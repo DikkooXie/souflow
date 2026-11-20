@@ -4,10 +4,23 @@ import { realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
 
-type CommandDecision = "accept" | "decline";
+type CommandDecision = "accept" | "decline" | "cancel";
 type Outcome = "completed" | "failed" | "interrupted" | "needs-reconciliation";
-type Approval = Readonly<{ id: string; command: string; workspace: string }>;
+type Approval = Readonly<{
+  id: string;
+  command: string;
+  workspace: string;
+  availableDecisions: readonly CommandDecision[];
+}>;
 type RequestId = number | string;
+type PendingApproval = {
+  id: string;
+  params: Record<string, unknown>;
+  availableDecisions: readonly CommandDecision[];
+  submitted: boolean;
+};
+
+const defaultDecisions = Object.freeze<CommandDecision[]>(["accept", "decline"]);
 
 export type CodexAttemptEvent =
   | { kind: "approval-requested"; approval: Approval }
@@ -33,6 +46,19 @@ function isRequestId(value: unknown): value is RequestId {
   return typeof value === "string" || (typeof value === "number" && Number.isSafeInteger(value));
 }
 
+function isCommandDecision(value: unknown): value is CommandDecision {
+  return value === "accept" || value === "decline" || value === "cancel";
+}
+
+function readAvailableDecisions(value: unknown): readonly CommandDecision[] | undefined {
+  if (value == null) return defaultDecisions;
+  if (!Array.isArray(value)) return undefined;
+  const decisions = new Set(value.filter(isCommandDecision));
+  if (decisions.has("accept") && (decisions.has("decline") || decisions.has("cancel"))) {
+    return Object.freeze([...decisions]);
+  }
+}
+
 export function startCodexCommandAttempt(options: Options) {
   const workspace = realpathSync(options.workspace);
   const [executable, ...args] = options.command ?? ["codex", "app-server", "--listen", "stdio://"];
@@ -47,7 +73,7 @@ export function startCodexCommandAttempt(options: Options) {
   const earlyMessages: { method: string; id: RequestId | undefined; params: Record<string, unknown> }[] = [];
   let complete!: (outcome: Outcome) => void;
   const finished = new Promise<Outcome>(resolve => { complete = resolve; });
-  const serverRequests = new Map<RequestId, { id: string; params: Record<string, unknown>; submitted: boolean } | null>();
+  const serverRequests = new Map<RequestId, PendingApproval | null>();
   const answerable = new Map<string, RequestId>();
   const startupDeadline = setTimeout(connectionLost, 15_000);
 
@@ -107,23 +133,23 @@ export function startCodexCommandAttempt(options: Options) {
       }
       return;
     }
-    const { command, cwd, availableDecisions } = params;
+    const { command, cwd } = params;
+    const availableDecisions = readAvailableDecisions(params.availableDecisions);
     if (method !== "item/commandExecution/requestApproval"
       || (params.kind !== undefined && params.kind !== "command")
       || !turnId || params.threadId !== threadId || params.turnId !== turnId
       || typeof params.itemId !== "string"
       || typeof command !== "string" || !command.trim() || cwd !== workspace
       || params.networkApprovalContext != null || params.additionalPermissions != null
-      || (availableDecisions != null && (!Array.isArray(availableDecisions)
-        || !availableDecisions.includes("accept") || !availableDecisions.includes("decline")))) {
+      || !availableDecisions) {
       serverRequests.set(id, null);
       send({ id, error: { code: -32601, message: "Unsupported approval request" } });
       return;
     }
     const approvalId = randomUUID();
-    serverRequests.set(id, { id: approvalId, params, submitted: false });
+    serverRequests.set(id, { id: approvalId, params, availableDecisions, submitted: false });
     answerable.set(approvalId, id);
-    publish({ kind: "approval-requested", approval: { id: approvalId, command, workspace } });
+    publish({ kind: "approval-requested", approval: { id: approvalId, command, workspace, availableDecisions } });
   }
 
   function handleNotification(method: string, params: Record<string, unknown>) {
@@ -227,11 +253,12 @@ export function startCodexCommandAttempt(options: Options) {
     finished,
     close: connectionLost,
     answer(approvalId: string, decision: CommandDecision): boolean {
-      if (closed || (decision !== "accept" && decision !== "decline")) return false;
+      if (closed || !isCommandDecision(decision)) return false;
       const id = answerable.get(approvalId);
       if (id === undefined) return false;
       const approval = serverRequests.get(id);
-      if (!approval) return false;
+      // 取消会结束本轮，必须由操作者明确选择。
+      if (!approval?.availableDecisions.includes(decision)) return false;
       answerable.delete(approvalId);
       approval.submitted = true;
       send({ id, result: { decision } });

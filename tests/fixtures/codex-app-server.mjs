@@ -46,6 +46,9 @@ input.on("line", line => {
       if (scenario === "additional-permissions") request.params.additionalPermissions = {};
       if (scenario === "outside-workspace") request.params.cwd = "/outside-fixture";
       if (scenario === "unknown-type") request.method = "item/permissions/requestApproval";
+      if (scenario === "cancel") request.params.availableDecisions = ["accept", "acceptForSession", "cancel"];
+      if (scenario === "accept-only") request.params.availableDecisions = ["accept"];
+      if (scenario === "legacy") delete request.params.availableDecisions;
       const started = { id: message.id, result: { turn: { id: turnId } } };
       if (scenario.startsWith("early-")) {
         send({ method: "turn/started", params: { threadId, turn: { id: request.params.turnId } } }, request, started);
@@ -76,12 +79,15 @@ input.on("line", line => {
   }
   const accepted = message.result?.decision === "accept";
   const declined = message.result?.decision === "decline";
+  const cancelled = message.result?.decision === "cancel";
   const denied = message.error?.code === -32601;
   const passed = (["accept", "early-current-turn", "foreign-notifications"].includes(scenario) && accepted)
-    || (scenario === "decline" && declined)
-    || (["foreign-thread", "early-foreign-turn", "network", "terminal-input", "additional-permissions", "outside-workspace", "unknown-type"].includes(scenario) && denied);
+    || (["decline", "legacy"].includes(scenario) && declined)
+    || (scenario === "cancel" && cancelled)
+    || (["foreign-thread", "early-foreign-turn", "network", "terminal-input", "additional-permissions", "outside-workspace", "unknown-type", "accept-only"].includes(scenario) && denied);
+  const status = passed && cancelled ? "interrupted" : passed ? "completed" : "failed";
   send(
     { method: "serverRequest/resolved", params: { threadId, requestId: message.id } },
-    { method: "turn/completed", params: { threadId, turn: { id: turnId, status: passed ? "completed" : "failed" } } },
+    { method: "turn/completed", params: { threadId, turn: { id: turnId, status } } },
   );
 });

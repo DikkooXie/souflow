@@ -27,13 +27,25 @@
 
 ### 本地 Codex 命令审批验证
 
-首版选择本地 Codex App Server 承接运行中的人工审批。当前 TypeScript 验证适配器通过 `stdio` 启动子进程，每次尝试使用独立连接和调用方分配的工作区。适配器等 `turn/start` 回执确认轮次，再将匹配线程、轮次和工作区的普通命令审批交给调用方。每个审批使用独立的本地编号，按原连接和请求编号投递一次同意或拒绝。调用方负责成员授权、工作区分配和审计持久化。 [Codex App Server 协议](https://learn.chatgpt.com/docs/app-server)
+首版选择本地 Codex App Server 承接运行中的人工审批。当前 TypeScript 验证适配器通过 `stdio` 启动子进程，每次尝试使用独立连接和调用方分配的工作区。适配器等 `turn/start` 回执确认轮次，再将匹配线程、轮次和工作区的普通命令审批交给调用方。每个审批使用独立的本地编号，按原连接和请求编号投递一次答复。调用方负责成员授权、工作区分配和审计持久化。 [Codex App Server 协议](https://learn.chatgpt.com/docs/app-server)
+
+审批展示 App Server 对该请求提供的一次性选项。`accept` 是同意本次命令，`decline` 是拒绝当前命令，`cancel` 是取消本轮。工作台应把取消本轮作为明确的操作。旧响应省略选项时，适配器保留同意和拒绝两项。
 
 连接中断时，待答审批失效，已投递且缺少回执的答复进入待核对。Codex 的 `serverRequest/resolved` 表示原请求已关闭。命令结果和整个轮次的结果分别以各自的执行事件为依据。
 
 在仓库根目录运行 `npm run check`。两个模拟子进程使用相同的协议请求编号，分别收到倒序投递的拒绝和同意。测试覆盖重复答复、越界请求、消息乱序、断线和旧编号失效。
 
-在 Node 22.17.1 和 Codex CLI 0.171.0-alpha.13 上，真实 App Server 通过 `stdio` 握手并完成测试轮次。本机试跑没有产生原生命令审批请求。真实双会话审批、工作台成员权限和持久化审计仍待按下文验收。
+### 使用真实 App Server 复验审批
+
+在仓库根目录使用 Node 22.17.1，并确保 `git` 和 `codex` 可执行。测试沿用本机 Codex 配置，为临时工作区单独设置模型端点和触发审批的命令规则。
+
+```sh
+SOULFLOW_TEST_NATIVE_CODEX=1 node --experimental-strip-types --test tests/codex-app-server.test.mts
+```
+
+在 Codex CLI 0.171.0-alpha.13 上，两个真实 App Server 进程在独立临时工作区收到回环服务生成的合成命令，均发出 `accept`、`cancel` 两项审批选项。测试先取消 B，再核对 A 仍在等待，最后取消 A。两次取消各自收到原生清理回执，轮次均变为 `interrupted`。第三次尝试主动关闭连接，待答审批失效，执行状态进入待核对。重复选择和跨会话选择均被拒绝。
+
+原生同意后执行、真实模型调用、工作台成员权限和持久化审计仍待按下文验收。
 
 ## 从需求到验收的审计
 

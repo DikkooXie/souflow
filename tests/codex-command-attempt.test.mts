@@ -33,12 +33,17 @@ function run(t: TestContext, directory: string, scenario: string, notify?: (even
   });
   t.after(attempt.close);
   async function waitFor<K extends CodexAttemptEvent["kind"]>(kind: K) {
+    let ended = false;
     for (;;) {
       const current = events.find(
         (event): event is Extract<CodexAttemptEvent, { kind: K }> => event.kind === kind,
       );
       if (current) return current;
-      await once(updates, "update", { signal: t.signal });
+      if (ended) assert.fail(`Attempt ended before ${kind}`);
+      ended = await Promise.race([
+        once(updates, "update", { signal: t.signal }).then(() => false),
+        attempt.finished.then(() => true),
+      ]);
     }
   }
   return { attempt, events, waitFor };
@@ -100,13 +105,31 @@ test("expires pending approvals when a connection closes and rejects them on the
 test("rejects unsupported requests before exposing an approval", { timeout: 5_000 }, async t => {
   const cases = [
     "foreign-thread", "early-foreign-turn", "network", "terminal-input",
-    "additional-permissions", "outside-workspace", "unknown-type",
+    "additional-permissions", "outside-workspace", "unknown-type", "accept-only",
   ];
   for (const scenario of cases) {
     const { attempt, events } = run(t, await workspace(t), scenario);
     assert.equal(await attempt.finished, "completed", scenario);
     assert.deepEqual(events, [], scenario);
   }
+});
+
+test("exposes cancel separately and rejects a decline the server does not offer", { timeout: 5_000 }, async t => {
+  const { attempt, waitFor } = run(t, await workspace(t), "cancel");
+  const { approval } = await waitFor("approval-requested");
+  assert.deepEqual(approval.availableDecisions, ["accept", "cancel"]);
+  assert.equal(attempt.answer(approval.id, "decline"), false);
+  assert.equal(attempt.answer(approval.id, "cancel"), true);
+  assert.equal(await attempt.finished, "interrupted");
+});
+
+test("keeps the original choices for servers that omit available decisions", { timeout: 5_000 }, async t => {
+  const { attempt, waitFor } = run(t, await workspace(t), "legacy");
+  const { approval } = await waitFor("approval-requested");
+  assert.deepEqual(approval.availableDecisions, ["accept", "decline"]);
+  assert.equal(attempt.answer(approval.id, "cancel"), false);
+  assert.equal(attempt.answer(approval.id, "decline"), true);
+  assert.equal(await attempt.finished, "completed");
 });
 
 test("checks an early approval against the eventual turn/start response", { timeout: 5_000 }, async t => {
