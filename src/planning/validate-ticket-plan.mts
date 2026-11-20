@@ -1,4 +1,4 @@
-// Call after validating the inbound JSON shape. Approval belongs to the application.
+// 调用方须先校验输入 JSON 的结构；工单计划的审批由应用层负责。
 export type TicketDraft = {
   id: string;
   dependsOn: readonly string[];
@@ -29,7 +29,7 @@ export function validateTicketPlan(required: readonly string[], tickets: readonl
   }
   if (errors.length) return errors;
 
-  // Peel off ready tickets. Any remainder contains a cycle or depends on one.
+  // 逐轮移除依赖已就绪的工单。若无法继续，剩余工单要么处于环中，要么依赖环中的工单。
   const remaining = new Set(ids);
   while (remaining.size) {
     const ready = tickets.filter(t => remaining.has(t.id) && t.dependsOn.every(id => !remaining.has(id)));
