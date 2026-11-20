@@ -1,0 +1,17 @@
+{
+  "name": "souflow",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.17.1" },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "biome lint --error-on-warnings src tests",
+    "test": "node --experimental-strip-types --test \"tests/**/*.test.mts\"",
+    "check": "npm run typecheck && npm run lint && npm test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.8",
+    "@types/node": "22.17.1",
+    "typescript": "5.9.3"
+  }
+}
