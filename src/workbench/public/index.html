@@ -137,25 +137,36 @@
     </dialog>
     <dialog id="monitor-dialog" class="archive-dialog monitor-dialog" aria-labelledby="monitor-title">
       <header class="archive-header">
-        <h2 id="monitor-title">调度面板</h2>
+        <h2 id="monitor-title">调度指挥中心</h2>
         <button type="button" class="icon-button" id="close-monitor" aria-label="关闭调度面板" autofocus>×</button>
       </header>
       <section class="monitor-body" aria-label="本机执行状态">
-        <div id="monitor-link" class="monitor-link" role="status">正在读取调度状态…</div>
-        <div class="monitor-grid">
-          <section aria-labelledby="monitor-hosts-title">
-            <h3 id="monitor-hosts-title">执行机器</h3>
-            <ul id="monitor-hosts" class="monitor-hosts"></ul>
-          </section>
-          <section aria-labelledby="monitor-sessions-title">
-            <h3 id="monitor-sessions-title">Codex 会话</h3>
-            <ul id="monitor-active" class="monitor-sessions"></ul>
-            <details class="monitor-history">
-              <summary>最近结束</summary>
-              <ul id="monitor-recent" class="monitor-sessions"></ul>
-            </details>
-          </section>
+        <div class="monitor-topline">
+          <h3 id="monitor-map-title">执行拓扑</h3>
+          <span id="monitor-link" class="monitor-link" role="status">正在读取调度状态…</span>
         </div>
+        <section id="monitor-map" class="monitor-map" aria-labelledby="monitor-map-title">
+          <canvas id="monitor-connections" aria-hidden="true"></canvas>
+          <div id="monitor-topology" class="monitor-topology"></div>
+        </section>
+        <section class="monitor-jobs" aria-labelledby="monitor-work-title">
+          <h3 id="monitor-work-title">工单进展</h3>
+          <ul id="monitor-work" class="monitor-work"></ul>
+        </section>
+      </section>
+    </dialog>
+    <dialog id="monitor-node-dialog" class="monitor-node-dialog" aria-labelledby="monitor-node-title">
+      <header class="archive-header">
+        <div><p id="monitor-node-kind"></p><h2 id="monitor-node-title">节点详情</h2></div>
+        <button type="button" class="icon-button" id="close-monitor-node" aria-label="关闭节点详情" autofocus>×</button>
+      </header>
+      <section class="monitor-node-body" aria-label="节点下的会话与工单">
+        <p id="monitor-node-meta" class="monitor-meta"></p>
+        <ul id="monitor-active" class="monitor-sessions"></ul>
+        <details id="monitor-node-history" class="monitor-history">
+          <summary>最近结束</summary>
+          <ul id="monitor-recent" class="monitor-sessions"></ul>
+        </details>
       </section>
     </dialog>
     <dialog id="dispatch-dialog" class="archive-dialog" aria-labelledby="dispatch-title">

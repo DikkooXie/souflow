@@ -27,6 +27,7 @@ const files = [
   ["/dispatch.mjs", "dispatch.mjs", "text/javascript"],
   ["/audit.mjs", "audit.mjs", "text/javascript"],
   ["/dispatch-monitor.mjs", "dispatch-monitor.mjs", "text/javascript"],
+  ["/dispatch-links.mjs", "dispatch-links.mjs", "text/javascript"],
   ["/dispatch-monitor.css", "dispatch-monitor.css", "text/css"],
 ] as const;
 

@@ -1,37 +1,66 @@
+import { createDispatchLinks } from "./dispatch-links.mjs";
+
 const labels = {
   connecting: "连接中", running: "执行中", waiting: "等人回答", queued: "排队中",
   completed: "会话结束", failed: "失败", interrupted: "已中断", "needs-reconciliation": "回执待核对",
+  ready: "产物就绪", blocked: "前置未通过", reviewing: "待验收", rejected: "产物未通过",
+  invalid: "补丁已失效", preparing: "正在分配", finalizing: "正在整理产物", dependencies: "等待前置",
 };
 const clock = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const pollMs = 1500;
+const overviewJobLimit = 6;
+const jobKey = item => item.ticketId ? `${item.batchId}/${item.ticketId}` : undefined;
+
+function stageFor(job, session) {
+  if (job?.status === "ready") {
+    if (job.reviewing) return "reviewing";
+    return job.review === "rejected" || job.review === "invalid" ? job.review : "ready";
+  }
+  if (job?.status === "queued") return job.waitingOn.length ? "dependencies" : "queued";
+  if (job?.status === "failed" || job?.status === "blocked") return job.status;
+  if (session?.status === "completed" && job?.status === "running") return "finalizing";
+  return session?.status ?? "preparing";
+}
 
 export function createMonitorView(node, selectFlow, onViewChange) {
   const dialog = document.querySelector("#monitor-dialog");
   const trigger = document.querySelector("#open-monitor");
   const connection = document.querySelector("#monitor-link");
-  const hosts = document.querySelector("#monitor-hosts");
+  const topology = document.querySelector("#monitor-topology");
+  const work = document.querySelector("#monitor-work");
+  const detail = document.querySelector("#monitor-node-dialog");
+  const detailTitle = document.querySelector("#monitor-node-title");
+  const detailKind = document.querySelector("#monitor-node-kind");
+  const detailMeta = document.querySelector("#monitor-node-meta");
+  const detailHistory = document.querySelector("#monitor-node-history");
   const active = document.querySelector("#monitor-active");
   const recent = document.querySelector("#monitor-recent");
+  const links = createDispatchLinks(document.querySelector("#monitor-map"), document.querySelector("#monitor-connections"));
   let timer;
   let generation = 0;
   let rendered;
+  let snapshot;
+  let selection;
+  let renderedDetail;
 
-  function sessionRow(item, host) {
+  function sessionRow(item, host, job) {
     const row = node("li", "monitor-session");
-    row.dataset.state = item.status;
+    row.dataset.state = stageFor(job, item);
     const heading = node("div", "monitor-session-heading");
     const title = node("strong", "", [item.ticketId, item.task].filter(Boolean).join(" · "));
-    heading.append(title, node("span", "monitor-badge", labels[item.status]));
+    heading.append(title, node("span", "monitor-badge", labels[row.dataset.state]));
     const detail = node("p", "monitor-project", [item.title, item.planVersion ? `计划 v${item.planVersion}` : "", host].filter(Boolean).join(" · "));
     row.append(heading, detail);
-    if (item.dependsOn?.length) row.append(node("p", "monitor-meta", `依赖 ${item.dependsOn.join("、")}`));
+    if (job?.dependsOn.length) row.append(node("p", "monitor-meta", `依赖 ${job.dependsOn.join("、")}`));
     if (item.model || item.threadId) {
       const thread = item.threadId ? `会话 …${item.threadId.slice(-8)}` : "";
       const meta = node("p", "monitor-meta", [item.model, thread].filter(Boolean).join(" · "));
       if (item.threadId) meta.title = item.threadId;
       row.append(meta);
     }
-    const steps = [["发起", item.startedAt], ["连接", item.connectedAt], ["结束", item.finishedAt]].filter(([, at]) => at !== undefined);
+    const steps = [["发起", item.startedAt ?? job?.startedAt], ["Agent 接入", item.connectedAt],
+      [item.threadId ? "会话结束" : "工单结束", item.finishedAt], ["工单结束", item.threadId ? job?.finishedAt : undefined]]
+      .filter(([, at]) => at !== undefined);
     if (steps.length) {
       const timeline = node("ol", "monitor-timeline");
       for (const [label, at] of steps) {
@@ -49,6 +78,7 @@ export function createMonitorView(node, selectFlow, onViewChange) {
       button.dataset.track = "select-flow";
       button.dataset.subject = item.flowId;
       button.addEventListener("click", () => {
+        detail.close();
         dialog.close();
         selectFlow(item.flowId);
       });
@@ -57,26 +87,123 @@ export function createMonitorView(node, selectFlow, onViewChange) {
     return row;
   }
 
+  function openDetail(target) {
+    selection = target;
+    renderedDetail = undefined;
+    detailHistory.open = false;
+    renderDetail();
+    detail.showModal();
+  }
+
+  function renderDetail() {
+    if (!selection || !snapshot) return;
+    const { rows, history, jobs, bySession } = snapshot;
+    const key = selection.id;
+    const forHost = item => item.hostId === key;
+    const forAgent = item => item.session.id === key;
+    const forJob = item => jobKey(item.session) === key;
+    const filtered = selection.kind === "调度器" ? rows
+      : rows.filter(selection.kind === "设备" ? forHost : selection.kind === "Agent" ? forAgent : forJob);
+    const finished = selection.kind === "调度器" ? history
+      : history.filter(selection.kind === "设备" ? forHost : selection.kind === "Agent" ? forAgent : forJob);
+    const selectedJob = selection.kind === "工单" ? jobs.get(key)
+      : selection.kind === "Agent" ? jobs.get(jobKey((filtered[0] ?? finished[0])?.session ?? {})) : undefined;
+    const additional = selection.kind === "调度器" ? [...jobs.values()].filter(job => !bySession.has(jobKey(job)))
+      : selectedJob && !filtered.length && !finished.length ? [selectedJob] : [];
+    const state = JSON.stringify([selection, filtered, finished, additional, selectedJob,
+      [...filtered, ...finished].map(item => jobs.get(jobKey(item.session)))]);
+    if (state === renderedDetail) return;
+    renderedDetail = state;
+    detailTitle.textContent = selection.title;
+    detailKind.textContent = selection.kind;
+    detailMeta.textContent = selectedJob?.title ?? (selection.kind === "设备" ? `${filtered.length} 条活动会话` : "");
+    detailMeta.hidden = !detailMeta.textContent;
+    const primary = [...filtered, ...(selection.kind === "Agent" || selection.kind === "工单" ? finished : [])];
+    active.replaceChildren(...primary.map(({ session, host }) => sessionRow(session, host, jobs.get(jobKey(session)))),
+      ...additional.map(job => sessionRow(job, undefined, job)));
+    if (!active.children.length) active.append(node("li", "monitor-empty", "目前没有活动会话或待处理工单。"));
+    recent.replaceChildren(...finished.map(({ session, host }) => sessionRow(session, host, jobs.get(jobKey(session)))));
+    detailHistory.hidden = !finished.length || primary.includes(finished[0]);
+  }
+
+  function topologyNode(kind, id, title, subtitle, description, state) {
+    const button = node("button", "monitor-node");
+    button.type = "button";
+    button.dataset.kind = kind;
+    button.dataset.state = state;
+    button.setAttribute("aria-haspopup", "dialog");
+    const icon = node("span", kind === "hub" ? "monitor-node-icon brand-mark" : "monitor-node-icon", kind === "hub" ? "✦" : "");
+    icon.setAttribute("aria-hidden", "true");
+    const text = node("span", "monitor-node-text");
+    text.append(node("strong", "", title), node("span", "monitor-node-subtitle", subtitle));
+    if (description) text.append(node("span", "monitor-node-note", description));
+    button.append(icon, text);
+    const name = { hub: "调度器", device: "设备", agent: "Agent" }[kind];
+    button.dataset.nodeKey = `${kind}/${id}`;
+    button.addEventListener("click", () => openDetail({ kind: name, id, title }));
+    return button;
+  }
+
   function render(data) {
-    connection.textContent = `${data.hosts.length} 台机器已连接 · 本机 souflow`;
+    const online = `${data.hosts.length} 台设备在线 · ${data.hosts.reduce((sum, host) => sum + host.active.length, 0)} 个活动 Agent`;
+    if (connection.textContent !== online) connection.textContent = online;
     dialog.dataset.connection = "online";
-    const key = JSON.stringify([data.hosts, data.waiting]);
+    links.setOnline(true);
+    const key = JSON.stringify([data.hosts, data.jobs]);
     if (rendered === key) return;
     rendered = key;
-    const rows = data.hosts.flatMap(host => host.active.map(session => ({ session, host: host.name })));
-    const history = data.hosts.flatMap(host => host.recent.map(session => ({ session, host: host.name })));
-    hosts.replaceChildren(...data.hosts.map(host => {
-      const name = node("li", "monitor-host");
-      name.append(node("strong", "", host.name), node("span", "monitor-meta", `本机 · ${host.active.length} 条活动会话`));
-      return name;
+    const entries = field => data.hosts.flatMap(host => host[field].map(session => ({ session, host: host.name, hostId: host.id ?? host.name })));
+    const rows = entries("active");
+    const history = entries("recent");
+    const jobs = new Map(data.jobs.map(job => [jobKey(job), job]));
+    const bySession = new Map([...history.toReversed(), ...rows].filter(item => item.session.ticketId)
+      .map(item => [jobKey(item.session), item.session]));
+    snapshot = { rows, history, jobs, bySession };
+    const selectedKey = topology.contains(document.activeElement) || work.contains(document.activeElement)
+      ? document.activeElement.dataset.nodeKey : undefined;
+    const hub = topologyNode("hub", "", "souflow", "任务调度", "", "idle");
+    const machines = node("div", "monitor-machines");
+    const routes = [];
+    for (const host of data.hosts) {
+      const group = node("div", "monitor-machine");
+      const device = topologyNode("device", host.id ?? host.name, host.name, "执行设备", host.kind === "local" ? "本机" : "", "idle");
+      const agents = node("div", "monitor-agents");
+      const running = host.active.some(session => session.status === "running");
+      routes.push({ from: hub, to: device, state: running ? "running" : "idle", trunk: true });
+      for (const session of host.active) {
+        const title = session.threadId ? `Codex Agent · …${session.threadId.slice(-8)}` : "Codex Agent";
+        const stage = stageFor(jobs.get(jobKey(session)), session);
+        const task = [session.ticketId, session.task].filter(Boolean).join(" · ");
+        const agent = topologyNode("agent", session.id, title, task, labels[stage], session.status);
+        routes.push({ from: device, to: agent, state: session.status });
+        agents.append(agent);
+      }
+      if (!host.active.length) agents.append(node("p", "monitor-idle", "暂无活动 Agent"));
+      group.append(device, agents);
+      machines.append(group);
+    }
+    topology.replaceChildren(hub, machines);
+    links.setRoutes(routes);
+    const priority = { running: 0, queued: 1, blocked: 2, failed: 2, ready: 3 };
+    const items = [...jobs.values()].toReversed().sort((a, b) => priority[a.status] - priority[b.status]).slice(0, overviewJobLimit);
+    work.replaceChildren(...items.map(job => {
+      const row = node("li");
+      const session = bySession.get(jobKey(job));
+      const state = stageFor(job, session);
+      const button = node("button", "monitor-job");
+      button.type = "button";
+      button.dataset.state = state;
+      button.dataset.nodeKey = `job/${jobKey(job)}`;
+      button.setAttribute("aria-haspopup", "dialog");
+      button.append(node("strong", "", `${job.ticketId} · ${job.task}`), node("span", "monitor-badge", labels[state]));
+      if (state === "dependencies") button.append(node("span", "monitor-meta", job.waitingOn.join("、")));
+      button.addEventListener("click", () => openDetail({ kind: "工单", id: jobKey(job), title: `${job.ticketId} · ${job.task}` }));
+      row.append(button);
+      return row;
     }));
-    const busy = [
-      ...rows.map(({ session, host }) => sessionRow(session, host)),
-      ...data.waiting.map(item => sessionRow({ ...item, status: "queued" })),
-    ];
-    active.replaceChildren(...(busy.length ? busy : [node("li", "monitor-empty", "目前没有正在执行或排队的工单。")]));
-    recent.replaceChildren(...(history.length
-      ? history.map(({ session, host }) => sessionRow(session, host)) : [node("li", "monitor-empty", "本次启动后暂无已结束会话。")]));
+    if (!items.length) work.append(node("li", "monitor-empty", "暂无已派发工单。"));
+    if (selectedKey) [...dialog.querySelectorAll("[data-node-key]")].find(item => item.dataset.nodeKey === selectedKey)?.focus();
+    if (detail.open) renderDetail();
   }
 
   async function refresh(id) {
@@ -88,6 +215,7 @@ export function createMonitorView(node, selectFlow, onViewChange) {
     } catch {
       if (dialog.open && id === generation) {
         dialog.dataset.connection = "offline";
+        links.setOnline(false);
         connection.textContent = rendered ? "连接中断 · 下方为最后一次读取的状态" : "无法连接本机 souflow，正在重试";
       }
     }
@@ -95,14 +223,29 @@ export function createMonitorView(node, selectFlow, onViewChange) {
   }
 
   trigger.addEventListener("click", () => {
+    connection.textContent = "正在读取调度状态…";
+    dialog.dataset.connection = "loading";
     dialog.showModal();
+    links.show();
     onViewChange();
     void refresh(++generation);
+  });
+  document.querySelector("#close-monitor-node").addEventListener("click", () => detail.close());
+  detail.addEventListener("close", () => {
+    if (detail.open) return;
+    const key = selection && { 调度器: "hub", 设备: "device", Agent: "agent", 工单: "job" }[selection.kind];
+    if (dialog.open) {
+      const match = [...dialog.querySelectorAll("[data-node-key]")].find(item => item.dataset.nodeKey === `${key}/${selection?.id}`);
+      (match ?? topology.querySelector("button"))?.focus();
+    }
+    selection = undefined;
   });
   document.querySelector("#close-monitor").addEventListener("click", () => dialog.close());
   dialog.addEventListener("close", () => {
     ++generation;
     clearTimeout(timer);
+    links.hide();
+    links.setOnline(false);
     onViewChange();
   });
   return {
