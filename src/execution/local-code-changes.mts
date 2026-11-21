@@ -11,6 +11,8 @@ const maxSourceBytes = 36_000;
 const maxPatchBytes = 160_000;
 
 const digest = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
+// Git 对普通文件只追踪可执行位，回放重建文件时其他权限位可随 umask 变化。
+const gitFileMode = (mode: number) => (mode & 0o100) ? 0o100755 : 0o100644;
 type PatchFile = { path: string; before: string; after: string; mode: number };
 export type LocalCodePatch = { patchSha256: string; changes: PatchFile[] };
 
@@ -64,7 +66,7 @@ export async function applyLocalCodeChanges(target: string, workspace: string, s
     const original = sources.get(path);
     const revised = proposed.get(path);
     if (!original || revised === undefined) throw Error("未找到待归档的改动。");
-    changes.push({ path, before: digest(original.content), after: digest(revised), mode: original.mode });
+    changes.push({ path, before: digest(original.content), after: digest(revised), mode: gitFileMode(original.mode) });
     for (const [side, content] of [["before", original.content], ["after", revised]] as const) {
       const file = join(target, side, path);
       await mkdir(dirname(file), { recursive: true, mode: 0o700 });
@@ -109,7 +111,7 @@ export async function replayLocalCodePatch(workspace: string, patchPath: string,
   async function verify(side: "before" | "after") {
     for (const change of approved.changes) {
       const actual = await readEditableFile(workspace, change.path);
-      if (change.mode !== actual.mode || change[side] !== digest(actual.content)) throw Error("补丁文件版本不匹配。");
+      if (change.mode !== gitFileMode(actual.mode) || change[side] !== digest(actual.content)) throw Error("补丁文件版本不匹配。");
     }
   }
   await verify("before");

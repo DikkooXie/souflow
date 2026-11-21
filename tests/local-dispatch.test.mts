@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate, setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { promisify } from "node:util";
 import { createLocalDispatch, readDispatchTickets, runLocalJobs } from "../src/execution/local-dispatch.mts";
-import { applyLocalCodeChanges, readEditableFile } from "../src/execution/local-code-changes.mts";
+import { applyLocalCodeChanges, readEditableFile, replayLocalCodePatch } from "../src/execution/local-code-changes.mts";
 import type { Flow } from "../src/planning/conversation-flow.mts";
 
 const exec = promisify(execFile);
@@ -57,6 +57,25 @@ test("code edits validate every path and anchor before changing a snapshot and e
   await exec("git", ["-C", destination, "apply", "-p2", result.patchPath]);
   assert.equal(await readFile(join(workspace, guide), "utf8"), "after\nrepeated repeated\n");
   assert.equal(await readFile(join(destination, guide), "utf8"), "after\nrepeated repeated\n");
+});
+
+test("replays a verified patch across umask differences and rejects executable-mode changes", async t => {
+  const target = await mkdtemp(join(tmpdir(), "souflow-code-mode-"));
+  t.after(() => rm(target, { recursive: true, force: true }));
+  const source = join(target, "source");
+  const successor = join(target, "successor");
+  for (const workspace of [source, successor]) {
+    await mkdir(join(workspace, "docs"), { recursive: true });
+    await writeFile(join(workspace, guide), "before\n");
+    await chmod(join(workspace, guide), 0o664);
+  }
+  const files = new Map([[guide, await readEditableFile(source, guide)]]);
+  const patch = await applyLocalCodeChanges(target, source, files, [{ path: guide, before: "before", after: "after" }]);
+  await chmod(join(successor, guide), 0o755);
+  await assert.rejects(replayLocalCodePatch(successor, patch.patchPath, patch), /补丁文件版本不匹配/);
+  await chmod(join(successor, guide), 0o664);
+  await replayLocalCodePatch(successor, patch.patchPath, patch);
+  assert.equal(await readFile(join(successor, guide), "utf8"), "after\n");
 });
 
 test("independent jobs overlap and a failed dependency blocks its successor", async () => {
