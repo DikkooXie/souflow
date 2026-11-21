@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
@@ -21,8 +22,9 @@ type Snapshot = ReturnType<ReturnType<typeof createDecisionDemo>["snapshot"]> & 
   inputLimits: { promptMaxLength: number; answerMaxLength: number };
 };
 
-async function start(t: TestContext, live?: Parameters<typeof createWorkbenchServer>[1], limits?: Parameters<typeof createWorkbenchServer>[3]) {
-  const server = createWorkbenchServer(100, live, undefined, limits);
+async function start(t: TestContext, live?: Parameters<typeof createWorkbenchServer>[1],
+  options?: Parameters<typeof createWorkbenchServer>[3], auditPath?: string) {
+  const server = createWorkbenchServer(100, live, auditPath, options);
   t.after(async () => {
     await new Promise<void>((resolve, reject) => {
       server.close(error => error ? reject(error) : resolve());
@@ -46,6 +48,16 @@ async function start(t: TestContext, live?: Parameters<typeof createWorkbenchSer
   return { url, post, read };
 }
 
+async function withAuditWriteBlocked(path: string, check: () => Promise<void>) {
+  const writer = new DatabaseSync(path);
+  try {
+    writer.exec("BEGIN IMMEDIATE");
+    await check();
+  } finally {
+    writer.close();
+  }
+}
+
 test("two authenticated members return a code delivery and accept only the revised batch", { timeout: 10000 }, async t => {
   const repo = await mkdtemp(join(tmpdir(), "souflow-member-workbench-"));
   const runDirectories = new Set<string>();
@@ -53,6 +65,7 @@ test("two authenticated members return a code delivery and accept only the revis
     await Promise.all([...runDirectories, repo].map(path => rm(path, { recursive: true, force: true })));
   });
   const file = "docs/guide.md";
+  const auditPath = join(repo, "audit.sqlite");
   await mkdir(join(repo, "docs"));
   await writeFile(join(repo, file), "草稿\n");
   const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
@@ -79,7 +92,7 @@ test("two authenticated members return a code delivery and accept only the revis
         edits: [{ path: file, before: "草稿", after: options.prompt.includes("修改后交付") ? "带验收步骤的指引" : "初稿" }],
       }) };
     },
-  } });
+  } }, auditPath);
   const write = async (actor: keyof typeof members, path: string, payload?: object) => (await post(path, payload, url, credential(actor))).status;
   async function waitFor<T>(find: (snapshot: Snapshot) => T | undefined): Promise<T> {
     for (let index = 0; index < 100; index++) {
@@ -138,6 +151,11 @@ test("two authenticated members return a code delivery and accept only the revis
   await writeFile(patch, "被替换的文件");
   assert.equal(await write("reviewer", `${next}/accept`, note), 409);
   await writeFile(patch, originalPatch);
+  await withAuditWriteBlocked(auditPath, async () => {
+    assert.equal(await write("reviewer", `${next}/accept`, note), 503);
+    const stuck = await waitFor(snapshot => snapshot.dispatches.find(run => run.id === second.id));
+    assert.deepEqual(stuck.acceptance?.map(receipt => receipt.decision), ["submitted"]);
+  });
   assert.equal(await write("reviewer", `${next}/accept`, note), 200);
   assert.equal(await write("reviewer", `${next}/return`, note), 409);
   assert.equal(await write("implementer", revise, { version: 2, text: "试图换掉已验收版本" }), 409);
@@ -360,7 +378,9 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
     ];
     const directories = new Set<string>();
     const started: string[] = [];
-    const members = outcome === "rejected" ? { implementer: "i".repeat(32), reviewer: "r".repeat(32) } : undefined;
+    const members = outcome === "rejected" || outcome === "approved"
+      ? { implementer: "i".repeat(32), reviewer: "r".repeat(32) } : undefined;
+    const auditPath = outcome === "approved" ? join(repo, "audit.sqlite") : undefined;
     const identity = (actor: "implementer" | "reviewer") => members
       ? `Basic ${Buffer.from(`${actor}:${members[actor]}`).toString("base64")}` : undefined;
     const server = await start(t, [repo, options => ({
@@ -386,7 +406,7 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
         if (step.id === "T4") assert.equal(input.evidence[0]?.text, "汇总指引\n");
         return { ...terminal, output: () => JSON.stringify({ report: step.id, edits: [step] }) };
       },
-    } });
+    } }, auditPath);
     const { url } = server;
     const read = () => server.read(identity("reviewer"));
     const post = (path: string, body: object, origin = url) =>
@@ -431,6 +451,15 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
     assert.equal((await post(reviewPath(second.id), { review: "通过此版本" })).status, 200);
     assert.equal((await post(reviewPath(second.id), { review: "通过此版本" })).status, 409);
     assert.deepEqual([...started].sort(), ["T1", "T2"]);
+    if (auditPath) {
+      await withAuditWriteBlocked(auditPath, async () => {
+        assert.equal((await post(reviewPath(first.id), { review: "通过此版本" })).status, 503);
+        const snapshot = await read();
+        assert.ok(snapshot.requests.some(card => card.id === first.id && card.status === "pending"));
+        assert.equal(snapshot.dispatches[0]?.jobs.find(job => job.id === "T3")?.status, "queued");
+        assert.deepEqual([...started].sort(), ["T1", "T2"]);
+      });
+    }
     if (outcome === "tampered-before") await writeFile(firstPatch, "通过前被替换的补丁");
     if (outcome === "approved") {
       const repeated = await Promise.all([
