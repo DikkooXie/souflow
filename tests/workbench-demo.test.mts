@@ -124,6 +124,8 @@ test("two authenticated members return a code delivery and accept only the revis
   assert.equal(await write("reviewer", `${old}/return`, { note: "补齐验收步骤" }), 200);
   assert.equal(await write("reviewer", `${old}/accept`, note), 409);
   assert.equal(await write("implementer", `${old}/submit`, note), 409);
+  assert.equal(await write("implementer", `${dispatch}/prepare`, { kind: "report" }), 409);
+  assert.equal(await write("implementer", `${dispatch}/start`, { id: first.id }), 409);
   assert.equal(await write("implementer", revise, { version: 1, text: "补齐验收步骤" }), 200);
   assert.equal(await write("implementer", `${dispatch}/start`, { id: first.id }), 409);
   const second = await finish(2);

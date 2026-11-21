@@ -116,7 +116,7 @@ export function createDispatchPanel(node, post, openDecisions) {
     const past = older.find(run => run.id === version.value);
     const run = past ?? currentRun;
     const locked = currentRuns.some(item => item.flowId === currentFlow?.id && item.plan.version === plan?.version
-      && ["submitted", "accepted"].includes(item.acceptance?.at(-1)?.decision));
+      && item.acceptance?.length);
     review.hidden = !!past || run?.kind !== "code" || !hasPendingReview;
     const key = JSON.stringify([currentFlow?.id, plan?.version, run, !!past, member?.id, locked]);
     if (rendered === key) return;

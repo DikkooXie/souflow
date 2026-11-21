@@ -31,10 +31,11 @@ export function createAcceptance(record: (event: BusinessEvent) => boolean) {
   const current = (run: Run) => receipts.get(run.id)?.at(-1)?.decision;
   return {
     history: (id: string) => receipts.get(id) ?? [],
-    locks: (flow: Flow, runs: Run[]) => {
+    decision: (flow: Flow, runs: Run[]) => {
       const plan = currentDevelopmentPlan(flow);
-      return runs.some(run => run.flowId === flow.id && run.plan.version === plan?.version
-        && (current(run) === "submitted" || current(run) === "accepted"));
+      const run = runs.find(item => item.flowId === flow.id && item.plan.id === plan?.id
+        && item.plan.version === plan.version && current(item));
+      return run && current(run);
     },
     async decide(action: AcceptanceAction, run: Run, actor: Member, body: unknown, stillCurrent: () => boolean) {
       const note = (body as { note?: unknown } | null)?.note;

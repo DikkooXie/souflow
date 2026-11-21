@@ -197,7 +197,8 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         if ("status" in body) return send(body.status, { error: body.error });
         const revision = readPlanRevision(body.value);
         if (!revision) return send(422, { error: `请填写有效计划版本和 1 到 ${maxArtifactTextLength} 字的计划内容。` });
-        const status = dispatch?.isRunning(flow.id) || acceptance?.locks(flow, dispatch?.list() ?? [])
+        const decision = acceptance?.decision(flow, dispatch?.list() ?? []);
+        const status = dispatch?.isRunning(flow.id) || decision === "submitted" || decision === "accepted"
           ? 409 : flows.revisePlan(flow, revision);
         if (status === 200 && member) audit.record({ kind: "member.revised", flowId: flow.id,
           details: { actor: member.id, plan: currentDevelopmentPlan(flow)?.version } });
@@ -214,7 +215,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         const body = dispatchAction[2] === "prepare" && request.headers["content-type"] === undefined
           ? { value: undefined } : await readJson(request);
         if ("status" in body) return send(body.status, { error: body.error });
-        if (acceptance?.locks(flow, dispatch.list())) return send(409, { error: "当前计划已有批次待验收或已通过。" });
+        if (acceptance?.decision(flow, dispatch.list())) return send(409, { error: "当前计划已有验收记录。退回后请修订计划再派发。" });
         if (dispatchAction[2] === "prepare") {
           const kind = (body.value as { kind?: unknown } | null)?.kind ?? "report";
           if (kind !== "report" && kind !== "code") return send(422, { error: "请选择已支持的工单类型。" });
@@ -235,7 +236,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         const status = await acceptance.decide(action, run, member, body.value, () => {
           const plan = currentDevelopmentPlan(flow);
           return plan?.id === run.plan.id && plan.version === run.plan.version && !dispatch.isRunning(flow.id)
-            && (action !== "submit" || !acceptance.locks(flow, dispatch.list()));
+            && (action !== "submit" || !acceptance.decision(flow, dispatch.list()));
         });
         return status === 200 ? send(200, state()) : send(status, {
           error: status === 422 ? `请填写有效的交付说明或验收备注（最多 ${maxAcceptanceNote} 字）。`
