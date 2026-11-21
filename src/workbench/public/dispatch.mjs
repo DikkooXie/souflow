@@ -52,7 +52,8 @@ export function createDispatchPanel(node, post) {
       if (job.changedFiles?.length) item.append(node("p", "archive-text", `已修改 · ${job.changedFiles.join("、")}`));
       if (job.patchPath) item.append(node("p", "archive-text", `本地补丁 · ${job.patchPath}`));
       if (job.error) item.append(node("p", "error", job.error));
-      if (job.model) item.append(node("p", "muted", job.model));
+      if (job.modelRoute) item.append(node("p", "muted", `计划模型 ${job.modelRoute.requestedModel} · ${job.modelRoute.reason}`));
+      if (job.model) item.append(node("p", "muted", `实际模型 ${job.model}`));
       if (job.report) item.append(node("p", "archive-text", job.report));
       row.append(item);
       return row;

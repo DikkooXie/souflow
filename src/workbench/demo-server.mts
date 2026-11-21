@@ -229,9 +229,12 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const dispatchConcurrency = integerSetting("SOULFLOW_DISPATCH_MAX_CONCURRENT", defaultDispatchConcurrency, 1, 6);
   const planPath = process.env.SOULFLOW_PROJECT_PLAN?.trim();
   const githubRepo = process.env.SOULFLOW_PROJECT_GITHUB_REPO?.trim();
+  const advanced = process.env.SOULFLOW_CODEX_PLANNING_MODEL?.trim();
+  const routine = process.env.SOULFLOW_CODEX_EXECUTION_MODEL?.trim();
   const server = createWorkbenchServer(undefined, live ? [process.cwd()] : undefined, auditPath, {
     limits, inputLimits, auditThresholds, dispatchConcurrency,
     ...(planPath || githubRepo ? { project: { ...(planPath ? { planPath } : {}), ...(githubRepo ? { githubRepo } : {}) } } : {}),
+    ...(advanced && routine && advanced !== routine ? { dispatchAdapters: { routing: { advanced, routine } } } : {}),
   });
   server.listen(port, address, () => {
     const bound = server.address();
