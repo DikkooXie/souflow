@@ -9,8 +9,9 @@ const controls = {
   "toggle-conversations": "展开或收起最近对话", "new-conversation": "新建对话",
   "open-archive": "打开项目文档", "close-archive": "关闭项目文档",
   "open-local-dispatch": "查看本地工单", "prepare-local-dispatch": "准备本地工单", "start-local-dispatch": "确认并执行工单", "edit-plan": "修改开发计划",
+  "open-monitor": "打开调度面板",
 };
-const names = { home: "首页", conversation: "需求对话", decisions: "决策收件箱", audit: "数据看板", archive: "项目文档" };
+const names = { home: "首页", conversation: "需求对话", decisions: "决策收件箱", audit: "数据看板", archive: "项目文档", "dispatch-monitor": "调度面板" };
 const events = {
   "request.submitted": "提交需求", "phase.started": "开始阶段", "phase.completed": "完成阶段", "plan.revised": "更新开发计划",
   "flow.finished": "流程结束", "decision.opened": "发出决策请求", "decision.answered": "提交决策答复",
