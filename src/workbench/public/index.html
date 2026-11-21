@@ -15,11 +15,11 @@
       </button>
       <div class="topbar-actions">
         <select id="flow-select" aria-label="选择需求对话" hidden></select>
-        <button type="button" id="open-decisions" class="inbox-button">待决策 <span id="count" aria-live="polite">0</span></button>
+        <button type="button" id="open-decisions" class="inbox-button" aria-haspopup="dialog" aria-controls="decision-dialog">待决策 <span id="count" aria-live="polite">0</span></button>
       </div>
     </header>
 
-    <main class="workspace">
+    <main class="workspace" id="workspace">
       <section id="welcome" class="welcome" aria-labelledby="welcome-title">
         <span class="brand-mark hero-mark" aria-hidden="true">✦</span>
         <h1 id="welcome-title">今天想推进什么？</h1>
@@ -38,28 +38,27 @@
       <p id="error" class="error" role="alert" hidden></p>
     </main>
 
-    <aside id="bubble-dock" class="bubble-dock" aria-labelledby="bubble-title" hidden>
-      <h2 id="bubble-title">需要你决定</h2>
-      <ul id="requests" class="request-list"></ul>
-      <button type="button" id="more-decisions" class="quiet-button" hidden></button>
-    </aside>
-
     <dialog id="decision-dialog" aria-labelledby="decision-title">
       <header class="decision-header">
         <h2 id="decision-title">决策收件箱</h2>
-        <button id="close-decision" type="button" class="icon-button" aria-label="关闭决策">×</button>
+        <button id="close-decision" type="button" class="icon-button" aria-label="关闭决策" autofocus>×</button>
       </header>
-      <select id="decision-select" aria-label="选择待决策事项" hidden></select>
-      <section id="detail" aria-label="当前决策"></section>
-      <p id="decision-error" class="error" role="alert" hidden></p>
-      <footer class="decision-footer">
-        <button type="button" id="reset" class="quiet-button">重置演示</button>
-      </footer>
+      <div class="decision-body">
+        <p id="decision-feedback" role="status"></p>
+        <section id="decision-queue" aria-label="待决策事项" hidden>
+          <ul id="requests" class="request-list"></ul>
+        </section>
+        <section id="detail" aria-label="当前决策"></section>
+        <p id="decision-error" class="error" role="alert" hidden></p>
+        <footer class="decision-footer">
+          <button type="button" id="reset" class="quiet-button">重置演示</button>
+        </footer>
+      </div>
     </dialog>
 
     <template id="detail-template">
-      <div class="detail-meta"><span class="ticket-key"></span><span class="status"></span></div>
-      <h3 class="ticket-title">当前提问</h3>
+      <div class="detail-meta"><span class="ticket-key"></span><span class="status">待回答</span></div>
+      <h3 class="ticket-title" tabindex="-1">当前提问</h3>
       <p class="source-message"></p>
       <form class="question-form">
         <div class="questions"></div>
