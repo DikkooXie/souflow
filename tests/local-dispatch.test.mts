@@ -7,6 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { promisify } from "node:util";
 import { createLocalDispatch, readDispatchTickets, runLocalJobs } from "../src/execution/local-dispatch.mts";
+import { applyLocalCodeChanges, readEditableFile } from "../src/execution/local-code-changes.mts";
 import type { Flow } from "../src/planning/conversation-flow.mts";
 
 const exec = promisify(execFile);
@@ -25,6 +26,35 @@ test("local dispatch requires criterion coverage, an acyclic graph and approved 
   assert.throws(() => read(draft.slice(0, 2)), /uncovered:AC-3/);
   assert.throws(() => read([{ ...draft[0], dependsOn: ["T3"] }, ...draft.slice(1)]), /cycle/);
   assert.throws(() => read([{ ...draft[0], sources: ["docs/linked.md"] }, ...draft.slice(1)]), /冻结版本/);
+  const code = draft.slice(0, 2).map(ticket => ({ ...ticket, editPaths: [guide] }));
+  assert.throws(() => readDispatchTickets(JSON.stringify({ tickets: code }), criteria.slice(0, 2), allowed, "code"), /重复分配/);
+  assert.throws(() => readDispatchTickets(JSON.stringify({ tickets: [{ ...code[0], dependsOn: ["T2"] }] }), criteria, allowed, "code"), /独立执行/);
+});
+
+test("code edits validate every path and anchor before changing a snapshot and emit an applicable patch", async t => {
+  const target = await mkdtemp(join(tmpdir(), "souflow-code-edits-"));
+  t.after(() => rm(target, { recursive: true, force: true }));
+  const workspace = join(target, "source");
+  const destination = join(target, "integration");
+  await mkdir(join(workspace, "docs"), { recursive: true });
+  await mkdir(join(destination, "docs"), { recursive: true });
+  await writeFile(join(workspace, guide), "before\nrepeated repeated\n");
+  await writeFile(join(destination, guide), "before\nrepeated repeated\n");
+  await symlink(join(destination, guide), join(workspace, "docs", "linked.md"));
+  await assert.rejects(readEditableFile(workspace, "docs/linked.md"), /普通文本/);
+  const original = await readEditableFile(workspace, guide);
+  const files = new Map([[guide, original]]);
+  const edit = { path: guide, before: "before", after: "after" };
+  await assert.rejects(applyLocalCodeChanges(target, workspace, files, [edit, { ...edit, path: "../unapproved.md" }]), /未获批准/);
+  await assert.rejects(applyLocalCodeChanges(target, workspace, files, [{ ...edit, after: "[已隐藏凭据]" }]), /已脱敏内容/);
+  await assert.rejects(applyLocalCodeChanges(target, workspace, files, [{ ...edit, before: "repeated" }]), /唯一匹配/);
+  assert.equal(await readFile(join(workspace, guide), "utf8"), original.content);
+  const result = await applyLocalCodeChanges(target, workspace, files, [edit]);
+  assert.deepEqual(result.files, [guide]);
+  await exec("git", ["-C", destination, "apply", "--check", "-p2", result.patchPath]);
+  await exec("git", ["-C", destination, "apply", "-p2", result.patchPath]);
+  assert.equal(await readFile(join(workspace, guide), "utf8"), "after\nrepeated repeated\n");
+  assert.equal(await readFile(join(destination, guide), "utf8"), "after\nrepeated repeated\n");
 });
 
 test("independent jobs overlap and a failed dependency blocks its successor", async () => {

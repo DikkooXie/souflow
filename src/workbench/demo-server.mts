@@ -146,11 +146,14 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       if (dispatchAction && dispatch) {
         const flow = flows.list().find(item => item.id === dispatchAction[1]);
         if (!flow) return send(404, { error: "需求对话不存在。" });
-        if (dispatchAction[2] === "prepare") {
-          return dispatch.prepare(flow) === 200 ? send(200, snapshot()) : send(409, { error: "请等待其他本地任务结束，再准备已完成计划的工单。" });
-        }
-        const body = await readJson(request);
+        const body = dispatchAction[2] === "prepare" && request.headers["content-type"] === undefined
+          ? { value: undefined } : await readJson(request);
         if ("status" in body) return send(body.status, { error: body.error });
+        if (dispatchAction[2] === "prepare") {
+          const kind = (body.value as { kind?: unknown } | null)?.kind ?? "report";
+          if (kind !== "report" && kind !== "code") return send(422, { error: "请选择已支持的工单类型。" });
+          return dispatch.prepare(flow, kind) === 200 ? send(200, snapshot()) : send(409, { error: "请等待其他本地任务结束，再准备已完成计划的工单。" });
+        }
         const id = (body.value as { id?: unknown } | null)?.id;
         return dispatch.start(flow, id) === 200 ? send(200, snapshot()) : send(409, { error: "工单尚未就绪，或确认的计划已失效。" });
       }

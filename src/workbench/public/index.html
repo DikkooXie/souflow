@@ -137,6 +137,9 @@
       <section class="dispatch-body" aria-label="工单及产物">
         <p id="dispatch-status" role="status"></p>
         <p class="error" role="alert" hidden></p>
+        <p><label for="dispatch-kind">工单类型</label>
+          <select id="dispatch-kind"><option value="report">只读核验</option><option value="code">编写代码</option></select>
+        </p>
         <button type="button" id="prepare-dispatch" class="button button-primary" data-track="prepare-local-dispatch">准备工单</button>
         <button type="button" id="start-dispatch" class="button button-primary" data-track="start-local-dispatch" hidden>确认并执行</button>
         <ul id="dispatch-jobs" class="dispatch-jobs"></ul>
