@@ -1,6 +1,7 @@
 import { createArchive } from "./archive.mjs";
 import { createAuditView } from "./audit.mjs";
 import { createDispatchPanel } from "./dispatch.mjs";
+import { createMonitorView } from "./dispatch-monitor.mjs";
 
 const list = document.querySelector("#requests");
 const queue = document.querySelector("#decision-queue");
@@ -35,6 +36,7 @@ const workspace = document.querySelector("#workspace");
 const audit = createAuditView(node);
 const archive = createArchive(node, reportView, post);
 const dispatch = createDispatchPanel(node, post, openDecisions);
+const monitor = createMonitorView(node, selectFlow, reportView);
 const clock = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const drafts = new Map();
 let requests = [];
@@ -82,6 +84,7 @@ function actionButton(text, style, handler) {
 function view() {
   if (dialog.open) return "decisions";
   if (archive.visible) return "archive";
+  if (monitor.visible) return "dispatch-monitor";
   if (auditOpen) return "audit";
   return selectedFlow ? "conversation" : "home";
 }
@@ -400,6 +403,7 @@ function applySnapshot(snapshot) {
     memberLabel.hidden = !member;
     memberLabel.textContent = member?.label ?? "";
     start.hidden = member?.id === "reviewer";
+    monitor.setAvailable(live);
     active = snapshot.active ?? 0;
     modeLabel.textContent = live ? "Codex · 规划" : "本地演示";
     reset.hidden = live;
@@ -469,7 +473,7 @@ sidebarToggle.addEventListener("click", () => showSidebar(sidebar.hidden));
 sidebarScrim.addEventListener("click", () => { showSidebar(false); sidebarToggle.focus(); });
 compactLayout.addEventListener("change", updateSidebarOverlay);
 document.addEventListener("keydown", event => {
-  if (event.key === "Escape" && !sidebar.hidden && !dialog.open && !archive.visible && !dispatch.visible) {
+  if (event.key === "Escape" && !sidebar.hidden && !dialog.open && !archive.visible && !dispatch.visible && !monitor.visible) {
     showSidebar(false);
     sidebarToggle.focus();
   }

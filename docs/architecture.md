@@ -103,6 +103,12 @@ souflow 通过 Codex App Server 运行规划，复用本机 Codex 登录。`SOUL
 
 此模式的交付物是核验报告。执行会话的环境工具已关闭，由程序从该提交的普通 Git 文件对象提供经核对的资料与前置报告。程序把报告及 `run.json` 写入独立临时目录，并将确认和执行结果写入审计。各报告仍需人工验收。
 
+### 调度面板
+
+在 `npm run dev:codex` 的工作台顶部打开「调度面板」，可查看调度器、执行设备和活动 Codex Agent 的连接。每条支路显示该 Agent 正在处理的需求步骤或工单。工单进展根据实际派发、等待前置或验收、执行结果和产物状态更新。点击任一节点或工单，右侧打开详情，按节点范围展示会话和时间线。App Server 回执到达后显示实际模型和会话 ID，调度器详情可浏览最近结束的 24 条会话。执行中的路径有流动动效，系统启用减少动态效果、页面在后台或服务连接中断时暂停。
+
+面板从本地调度和 App Server 的状态取数。前置依赖未满足的排队工单在真正启动后才获得会话 ID，Codex 会话结束后可到工单核对产物是否生成和验收。可用 `SOULFLOW_HOST_NAME` 指定显示名，默认使用操作系统主机名。当前显示此服务启动的本机 Codex 会话，跨机器登记、心跳和 Codex Desktop 已有对话需另接。参考机器在线状态和任务时间线的成熟设计。 [GitHub Actions Runner](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/monitor-and-troubleshoot) · [Temporal Web UI](https://docs.temporal.io/web-ui) · [Dagster 运行时间线](https://dagster.io/docs/guides/operate/webserver)
+
 ### 调度本地代码工单
 
 规划就绪后，在「本地执行工单」选择「编写代码」。负责人确认开发计划版本、仓库提交和每单可编辑文件后，服务在独立的快照目录为每单启动本机 Codex 会话。工单可修改已纳入 Git 的普通源文件、测试和文档。没有先后关系的工单可以并行，编辑范围须互斥。需要改同一文件的工单必须按依赖串行。

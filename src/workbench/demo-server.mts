@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
+import { hostname } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { defaultAuditThresholds, openActivityStore, readActivity } from "../audit/activity-store.mts";
+import { defaultAuditThresholds, openActivityStore, readActivity, scrubAuditText } from "../audit/activity-store.mts";
 import { defaultAnswerMaxLength, maxQuestionsPerDecision } from "../decisions/questions.mts";
 import { codeReviewOptions, createLocalDispatch } from "../execution/local-dispatch.mts";
+import { createDispatchMonitor } from "../execution/dispatch-monitor.mts";
 import { createConversationFlows, currentDevelopmentPlan, maxArtifactTextLength, phases, readPlanRevision } from "../planning/conversation-flow.mts";
 import { createProjectContextReader, type ProjectSettings } from "../planning/project-context.mts";
 import { createCodexInbox } from "./codex-inbox.mts";
@@ -15,6 +17,7 @@ import { createMembers, type Member, type MemberKeys } from "./members.mts";
 const address = "127.0.0.1";
 const defaultLimits = { demo: 24, codex: 4 };
 const defaultDispatchConcurrency = 2;
+const recentMonitorRuns = 4;
 const defaultInputLimits = { promptMaxLength: 4000, answerMaxLength: defaultAnswerMaxLength };
 const maxConfigurableInputLength = 16_000;
 const jsonMetadataBudget = 16_384;
@@ -25,6 +28,9 @@ const files = [
   ["/archive.mjs", "archive.mjs", "text/javascript"],
   ["/dispatch.mjs", "dispatch.mjs", "text/javascript"],
   ["/audit.mjs", "audit.mjs", "text/javascript"],
+  ["/dispatch-monitor.mjs", "dispatch-monitor.mjs", "text/javascript"],
+  ["/dispatch-links.mjs", "dispatch-links.mjs", "text/javascript"],
+  ["/dispatch-monitor.css", "dispatch-monitor.css", "text/css"],
 ] as const;
 
 async function readJson(request: IncomingMessage, maxBytes = jsonMetadataBudget): Promise<{ value: unknown } | { status: number; error: string }> {
@@ -52,11 +58,12 @@ type WorkbenchOptions = {
   dispatchAdapters?: Omit<NonNullable<Parameters<typeof createLocalDispatch>[2]>, "record">;
   project?: ProjectSettings;
   members?: MemberKeys;
+  hostName?: string;
 };
 
 export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions, auditPath?: string, {
   limits = defaultLimits, inputLimits = defaultInputLimits, auditThresholds = defaultAuditThresholds,
-  dispatchConcurrency = defaultDispatchConcurrency, dispatchAdapters, project, members,
+  dispatchConcurrency = defaultDispatchConcurrency, dispatchAdapters, project, members, hostName = hostname(),
 }: WorkbenchOptions = {}) {
   const memberFor = members && createMembers(members);
   if (memberFor && !live) throw Error("两位成员模式需要 Codex 工作台。");
@@ -67,12 +74,16 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
   const promptBodyBytes = jsonMetadataBudget + 6 * promptMaxLength;
   const answerBodyBytes = jsonMetadataBudget + 6 * answerMaxLength * maxQuestionsPerDecision;
   const demo = createDecisionDemo(receiptDelay, audit.record, answerMaxLength);
+  const monitor = live ? createDispatchMonitor(hostName) : undefined;
   const codex = live ? createCodexInbox(live[0], {
     limit: limits.codex, answerMaxLength, startAttempt: live[1], record: audit.record,
+    ...(monitor ? { monitor } : {}),
   }) : undefined;
   const inbox = codex ?? demo;
   const flows = createConversationFlows(inbox.runPhase, codex ? limits.codex : limits.demo, audit.record, loadProject);
-  const dispatch = live ? createLocalDispatch(live[0], dispatchConcurrency, { ...dispatchAdapters, record: audit.record }) : undefined;
+  const dispatch = live ? createLocalDispatch(live[0], dispatchConcurrency, { ...dispatchAdapters, record: audit.record,
+    ...(monitor ? { monitor } : {}),
+  }) : undefined;
   const acceptance = memberFor && createAcceptance(audit.record);
   const snapshot = (member?: Member) => {
     const conversations = flows.list();
@@ -133,6 +144,26 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
     }
     if (request.method === "GET") {
       if (path === "/api/decisions") return send(200, state());
+      if (path === "/api/dispatch-status" && monitor && dispatch) {
+        const names = new Map(flows.list().map(flow => [flow.id, scrubAuditText(flow.title)]));
+        const reviewing = new Set(dispatch.reviews().map(item => item.artifact.id));
+        const runs = dispatch.list().filter(run => run.status !== "ready" && run.status !== "preparing");
+        const jobs = runs.filter((run, index) => index >= runs.length - recentMonitorRuns || run.status === "running" || run.status === "waiting")
+          .flatMap(run => {
+            const byId = new Map(run.jobs.map(job => [job.id, job]));
+            return run.jobs.map(job => ({
+              flowId: run.flowId, batchId: run.id, planVersion: run.plan.version, ticketId: job.id, task: scrubAuditText(job.title),
+              title: names.get(run.flowId), dependsOn: job.dependsOn, status: job.status,
+              waitingOn: job.status === "queued" ? job.dependsOn.filter(id => {
+                const input = byId.get(id);
+                return input?.status !== "ready" || (run.kind === "code" && input.artifact?.review !== "accepted");
+              }) : [],
+              startedAt: job.startedAt, finishedAt: job.finishedAt,
+              reviewing: job.artifact ? reviewing.has(job.artifact.id) : false, review: job.artifact?.review,
+            }));
+          });
+        return send(200, { ...monitor.snapshot(), jobs, waiting: jobs.filter(job => job.status === "queued") });
+      }
       if (path === "/api/audit" || path.startsWith("/api/audit?")) {
         if (request.headers["sec-fetch-site"] === "cross-site") return send(403, { error: "请在本机工作台查看活动记录。" });
         const range = new URLSearchParams(path.split("?")[1]).get("days") ?? "7";
@@ -324,6 +355,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const githubRepo = process.env.SOULFLOW_PROJECT_GITHUB_REPO?.trim();
   const advanced = process.env.SOULFLOW_CODEX_PLANNING_MODEL?.trim();
   const routine = process.env.SOULFLOW_CODEX_EXECUTION_MODEL?.trim();
+  const hostName = process.env.SOULFLOW_HOST_NAME?.trim();
   const implementer = process.env.SOULFLOW_MEMBER_IMPLEMENTER_KEY;
   const reviewer = process.env.SOULFLOW_MEMBER_REVIEWER_KEY;
   // 成员凭据只用于工作台登录，子进程沿用清理后的环境。
@@ -332,6 +364,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const server = createWorkbenchServer(undefined, live ? [process.cwd()] : undefined, auditPath, {
     limits, inputLimits, auditThresholds, dispatchConcurrency,
     ...(implementer !== undefined || reviewer !== undefined ? { members: { implementer: implementer ?? "", reviewer: reviewer ?? "" } } : {}),
+    ...(hostName ? { hostName } : {}),
     ...(planPath || githubRepo ? { project: { ...(planPath ? { planPath } : {}), ...(githubRepo ? { githubRepo } : {}) } } : {}),
     ...(advanced && routine && advanced !== routine ? { dispatchAdapters: { routing: { advanced, routine } } } : {}),
   });

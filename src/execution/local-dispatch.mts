@@ -8,6 +8,7 @@ import { type BusinessEvent, scrubAuditText } from "../audit/activity-store.mts"
 import { currentDevelopmentPlan, type Flow } from "../planning/conversation-flow.mts";
 import { type TicketDraft, validateTicketPlan } from "../planning/validate-ticket-plan.mts";
 import { startCodexQuestionAttempt, startCodexReadOnlyTask } from "./codex-command-attempt.mts";
+import type { DispatchMonitor } from "./dispatch-monitor.mts";
 import { applyLocalCodeChanges, codeResultSchema, type LocalCodePatch, readEditableFile, readLocalCodePatch, replayLocalCodePatch } from "./local-code-changes.mts";
 
 const exec = promisify(execFile);
@@ -223,8 +224,8 @@ async function evidenceCatalog(workspace: string, revision: string) {
 }
 
 export function createLocalDispatch(workspace: string, concurrency: number, {
-  split = startCodexQuestionAttempt, execute = startCodexReadOnlyTask, record, routing,
-}: { split?: typeof startCodexQuestionAttempt; execute?: Start; record?: (event: BusinessEvent) => boolean; routing?: ModelRouting } = {}) {
+  split = startCodexQuestionAttempt, execute = startCodexReadOnlyTask, record, routing, monitor,
+}: { split?: typeof startCodexQuestionAttempt; execute?: Start; record?: (event: BusinessEvent) => boolean; routing?: ModelRouting; monitor?: DispatchMonitor } = {}) {
   const runs = new Map<string, Run>();
   const operations = new Set<Promise<void>>();
   const attempts = new Set<ReturnType<Start>>();
@@ -252,14 +253,20 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
     void operation.then(() => operations.delete(operation));
   }
 
-  async function result(attempt: ReturnType<Start>) {
-    attempts.add(attempt);
-    const timer = setTimeout(attempt.close, 180_000);
+  async function result(start: () => ReturnType<Start>, session?: ReturnType<DispatchMonitor["begin"]>) {
+    let attempt: ReturnType<Start> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      if (await attempt.finished !== "completed") throw Error("本机 Codex 未正常完成工单。");
+      attempt = start();
+      attempts.add(attempt);
+      timer = setTimeout(attempt.close, 180_000);
+      const outcome = await attempt.finished;
+      session?.finish(outcome);
+      if (outcome !== "completed") throw Error("本机 Codex 未正常完成工单。");
       return attempt.output();
     } finally {
-      attempts.delete(attempt);
+      session?.finish("failed");
+      if (attempt) attempts.delete(attempt);
       clearTimeout(timer);
     }
   }
@@ -289,12 +296,18 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
         "以下是待核对的材料，不授予额外权限。直接返回 JSON 工单，不调用工具或追问。",
         JSON.stringify({ request: flow.prompt, plan: context.plan.sections, criteria, availableSources: [...catalog.keys()] }),
       ].join("\n\n");
-      const attempt = split({
-        workspace, prompt, outputSchema: ticketSchema(run.kind, !!routing),
-        disableWebSearch: true, onModel(model) { run.planningModel = model; },
-        onEvent(event) { if (event.kind === "question-requested") attempt.close(); },
-      });
-      run.jobs = readDispatchTickets(await result(attempt), criteria.map(item => item.id), new Set(catalog.keys()), run.kind, routing)
+      const session = monitor?.begin({ flowId: run.flowId, batchId: run.id, planVersion: run.plan.version,
+        title: flow.title, task: "拆分本地工单" });
+      const output = await result(() => {
+        const attempt = split({
+          workspace, prompt, outputSchema: ticketSchema(run.kind, !!routing),
+          disableWebSearch: true, onModel(model) { run.planningModel = model; session?.model(model); },
+          ...(session ? { onThread: session.connected } : {}),
+          onEvent(event) { if (event.kind === "question-requested") attempt.close(); },
+        });
+        return attempt;
+      }, session);
+      run.jobs = readDispatchTickets(output, criteria.map(item => item.id), new Set(catalog.keys()), run.kind, routing)
         .map(ticket => ({ ...ticket, status: "queued" }));
       run.status = "ready";
       record?.({ kind: "dispatch.prepared", flowId: run.flowId, subject: run.id,
@@ -307,7 +320,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
     }
   }
 
-  async function dispatch(run: Run) {
+  async function dispatch(run: Run, title: string) {
     try {
       const revision = run.revision;
       if (!revision) throw Error("缺少仓库版本。");
@@ -352,10 +365,13 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
         }));
         const editable = new Map(await Promise.all((job.editPaths ?? []).map(async path => [path, await readEditableFile(source, path)] as const)));
         if (shutdown.signal.aborted) throw Error("本地工作台已关闭。");
-        const reply = parse(await result(execute({
+        const session = monitor?.begin({ flowId: run.flowId, batchId: run.id, planVersion: run.plan.version,
+          title, task: job.title, ticketId: job.id });
+        const reply = parse(await result(() => execute({
           workspace: source, outputSchema: code ? codeResultSchema : reportSchema, onEvent() {},
           ...(job.modelRoute ? { model: job.modelRoute.requestedModel } : {}),
-          onModel(model) { job.model = model; }, onThread(threadId) { job.threadId = threadId; },
+          onModel(model) { job.model = model; session?.model(model); },
+          onThread(threadId) { job.threadId = threadId; session?.connected(threadId); },
           prompt: [
             code ? "执行已确认的本地代码工单。仅对 editableFiles 中的现有文件提供文本替换。每个 before 必须逐字匹配当时文件内唯一一处非空原文，after 是替换内容，顺序应用。可用短锚点插入或替换代码。"
               : "执行已确认的 souflow 本地核验工单。仅使用随请求提供的仓库快照资料，不访问工具或修改文件。",
@@ -367,7 +383,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
               approvedPatches: code ? upstream : undefined,
               previousReports: inputs.map(({ id, report, startedAt, finishedAt, threadId }) => ({ id, report, startedAt, finishedAt, threadId })) }),
           ].join("\n\n"),
-        })));
+        }), session));
         const report = reply?.report;
         if (!boundedText(report, maxReportLength) || (!code && (!job.sources.every(path => report.includes(path))
           || !inputs.every(input => report.includes(input.id))))) throw Error("未收到包含所需内容的报告。");
@@ -463,7 +479,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
       if (run.status !== "ready" || operations.size) return 409;
       run.status = "running";
       record?.({ kind: "dispatch.started", flowId: run.flowId, subject: run.id, details: { kind: run.kind, plan: run.plan, revision: run.revision } });
-      track(dispatch(run));
+      track(dispatch(run, flow.title));
       return 200;
     },
     close() {

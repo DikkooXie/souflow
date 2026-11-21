@@ -107,6 +107,11 @@ test("two authenticated members return a code delivery and accept only the revis
   assert.match(noIdentity.headers.get("www-authenticate") ?? "", /^Basic /);
   assert.equal((await fetch(`${url}/api/decisions`)).status, 401);
   assert.equal((await fetch(`${url}/api/audit`)).status, 401);
+  assert.equal((await fetch(`${url}/api/dispatch-status`)).status, 401);
+  for (const actor of ["implementer", "reviewer"] as const) {
+    const monitor = await fetch(`${url}/api/dispatch-status`, { headers: { authorization: credential(actor) } });
+    assert.equal(monitor.status, 200);
+  }
   assert.equal((await post("/api/workflows", { prompt: "跳过登录" })).status, 401);
   assert.equal((await post("/api/workflows", { prompt: "交换密钥" }, url,
     `Basic ${Buffer.from(`implementer:${members.reviewer}`).toString("base64")}`)).status, 401);
@@ -383,6 +388,7 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
     const auditPath = outcome === "approved" ? join(repo, "audit.sqlite") : undefined;
     const identity = (actor: "implementer" | "reviewer") => members
       ? `Basic ${Buffer.from(`${actor}:${members[actor]}`).toString("base64")}` : undefined;
+    const reviewer = identity("reviewer");
     const server = await start(t, [repo, options => ({
       ...terminal, answerQuestions: () => false,
       output: () => JSON.stringify(Object.fromEntries(((options.outputSchema?.required ?? []) as string[]).map(field => [field, `示例${field}`]))),
@@ -433,6 +439,17 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
     assert.equal((await post(`${path}/start`, { id: run.id })).status, 200);
     const pending = await waitFor(snapshot => snapshot.requests.length === 2 ? snapshot : undefined);
     assert.deepEqual([...started].sort(), ["T1", "T2"]);
+    const monitor = async () => {
+      const response = await fetch(`${url}/api/dispatch-status`, reviewer ? { headers: { authorization: reviewer } } : undefined);
+      assert.equal(response.status, 200);
+      const { jobs } = await response.json() as { jobs: {
+        batchId: string; ticketId: string; status: string; reviewing: boolean; waitingOn: string[];
+      }[] };
+      return jobs.filter(job => job.batchId === run.id);
+    };
+    const monitored = await monitor();
+    assert.deepEqual(monitored.find(job => job.ticketId === "T3")?.waitingOn, ["T2", "T1"]);
+    assert.deepEqual(monitored.filter(job => job.reviewing).map(job => job.ticketId).sort(), ["T1", "T2"]);
     const first = pending.requests.find(card => card.title.includes("T1"));
     const second = pending.requests.find(card => card.title.includes("T2"));
     assert.ok(first && second);
@@ -476,6 +493,7 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
     }
     const final = await waitFor(snapshot => snapshot.dispatches.find(item => item.status === "finished" || item.status === "failed"));
     assert.equal(final.status, outcome === "approved" ? "finished" : "failed");
+    assert.equal((await monitor()).find(job => job.ticketId === "T4")?.status, outcome === "approved" ? "ready" : "blocked");
     assert.deepEqual(started.slice(2), outcome === "approved" ? ["T3", "T4"] : []);
     assert.equal(final.jobs.find(job => job.id === "T4")?.status, outcome === "approved" ? "ready" : "blocked");
     assert.match(final.jobs.find(job => job.id === "T3")?.error ?? "", outcome === "tampered-after" ? /前置补丁/ : /^$/);
@@ -490,7 +508,6 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
     await Promise.all([guide, rules].map(async (file, index) => {
       assert.equal(await readFile(join(repo, file), "utf8"), `${steps[index]?.before}\n`);
     }));
-    const reviewer = identity("reviewer");
     const audit = await (await fetch(`${url}/api/audit`, reviewer ? { headers: { authorization: reviewer } } : undefined)).json();
     const reviews = audit.recent.filter((entry: { kind: string }) => entry.kind === "dispatch.reviewed");
     assert.equal(reviews.length, outcome === "approved" ? 3 : 2);
