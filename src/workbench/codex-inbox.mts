@@ -14,14 +14,14 @@ const terminal = {
   "question-uncertain": { status: "uncertain", label: "答复回执待核对" },
 } as const;
 
-export function createCodexInbox(workspace: string, startAttempt: Start = startCodexQuestionAttempt, record?: RecordBusiness) {
+export function createCodexInbox(workspace: string, limit: number, startAttempt: Start = startCodexQuestionAttempt, record?: RecordBusiness) {
   const requests: DecisionCard[] = [];
   const routes = new Map<string, Attempt>();
   const active = new Set<Attempt>();
   let sequence = 0;
   let lastMessage = "";
   let closed = false;
-  const canBegin = () => !closed && active.size < 4;
+  const canBegin = () => !closed && active.size < limit;
 
   function begin(prompt: string, step?: { flow: Flow; phase: Phase; complete: (output: string | undefined) => void }): 200 | 409 | 503 {
     if (!canBegin()) return 409;

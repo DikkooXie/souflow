@@ -71,6 +71,10 @@ SOULFLOW_TEST_NATIVE_CODEX=1 node --experimental-strip-types --test tests/codex-
 
 ### 对话首页与决策抽屉
 
+在仓库根目录启动时，`npm run dev` 和 `npm run dev:codex` 会读取可选的 `.env`，终端中已有的环境变量优先。可以从 `.env.example` 复制模板。`SOULFLOW_DEMO_PORT` 控制端口，`SOULFLOW_DEMO_MAX_CONCURRENT` 和 `SOULFLOW_CODEX_MAX_CONCURRENT` 分别控制演示流程和 Codex 并发上限，默认分别为 24 和 4。
+
+API key 等凭据填写在本机 `.env` 或通过启动进程的环境注入。Git 忽略实际的环境文件，仓库仅提交示例。Soulflow 通过 Codex App Server 运行规划，沿用本机 Codex 的模型及认证配置。启动的 Codex 进程会继承环境变量，使用 API key 时由 Codex 的认证或模型提供方配置读取相应变量。
+
 在仓库根目录用 Node 22.17.1 运行 `npm run dev`，并打开 [Soulflow 首页](http://127.0.0.1:4173/)。输入自然语言需求后，程序依次推进调研、需求澄清、技术选型、开发文档和拆单。页面内可展开阶段产物。顶部「待决策」显示跨会话的待答数，点击可在当前页面打开右侧抽屉。
 
 1. 输入一条需求。调研样例完成后，打开「待决策」，选择这条需求并答复首版范围。
@@ -79,7 +83,7 @@ SOULFLOW_TEST_NATIVE_CODEX=1 node --experimental-strip-types --test tests/codex-
 
 运行 `npm run dev:codex` 可使用本机已配置的 Codex CLI。如果演示占用 4173，可用 `SOULFLOW_DEMO_PORT=4174 npm run dev:codex`。每个阶段运行独立的只读规划轮次，程序将已生成的产物传给下一阶段，收到符合本阶段结构的成功产物后才推进。`item/tool/requestUserInput` 映射为抽屉中的待决策事项，通过原连接回复。秘密输入和命令授权由适配器拒绝。规划会话禁用继承的 MCP 服务、插件、应用和钩子。 [Codex App Server 协议](https://learn.chatgpt.com/docs/app-server)
 
-本地服务只监听回环地址，最多同时运行四条 Codex 规划流程。卡片、路由和阶段草稿保存在内存中，审计事件独立持久化。当前流程产出可审阅的工单草稿，正式工单校验、确认版本后的派发、成员鉴权和流程恢复仍待实现。现有 Codex Desktop 对话尚未接入。真实模式的「原提问已关闭」来自 `serverRequest/resolved`，产物必须来自完成后的有效输出。
+本地服务只监听回环地址。卡片、路由和阶段草稿保存在内存中，审计事件独立持久化。当前流程产出可审阅的工单草稿，正式工单校验、确认版本后的派发、成员鉴权和流程恢复仍待实现。现有 Codex Desktop 对话尚未接入。真实模式的「原提问已关闭」来自 `serverRequest/resolved`，产物必须来自完成后的有效输出。
 
 工作台接口为原始请求和每份规划产物返回独立 ID、整数版本和上游 `{ id, version }` 引用。引用在启动阶段前由程序根据实际输入记录，并随阶段交给 Codex。PRD 和开发计划各自编号，两份文档在同一个阶段校验通过后一起记录。工单草稿集引用开发计划的具体版本，开发计划可再追到 PRD 和技术选型。当前每条新流程生成其产物的 v1，重启后内存记录随服务清除。
 

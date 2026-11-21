@@ -8,6 +8,7 @@ import { createCodexInbox } from "./codex-inbox.mts";
 import { createDecisionDemo } from "./demo-state.mts";
 
 const address = "127.0.0.1";
+const defaultLimits = { demo: 24, codex: 4 };
 const files = [
   ["/", "index.html", "text/html"],
   ["/style.css", "style.css", "text/css"],
@@ -31,14 +32,14 @@ async function readJson(request: IncomingMessage): Promise<{ value: unknown } | 
   }
 }
 
-type LiveOptions = [workspace: string, startAttempt?: Parameters<typeof createCodexInbox>[1]];
+type LiveOptions = [workspace: string, startAttempt?: Parameters<typeof createCodexInbox>[2]];
 
-export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions, auditPath?: string) {
+export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions, auditPath?: string, limits = defaultLimits) {
   const audit = openActivityStore(auditPath);
   const demo = createDecisionDemo(receiptDelay, audit.record);
-  const codex = live ? createCodexInbox(live[0], live[1], audit.record) : undefined;
+  const codex = live ? createCodexInbox(live[0], limits.codex, live[1], audit.record) : undefined;
   const inbox = codex ?? demo;
-  const flows = createConversationFlows(inbox.runPhase, codex ? 4 : 24, audit.record);
+  const flows = createConversationFlows(inbox.runPhase, codex ? limits.codex : limits.demo, audit.record);
   const snapshot = () => ({ ...inbox.snapshot(), flows: flows.list(), phases: phases.map(phase => phase.title) });
   const assets = new Map<string, { content: Buffer; mime: string }>(files.map(([path, name, mime]) => [
     path, { content: readFileSync(new URL(`./public/${name}`, import.meta.url)), mime },
@@ -105,7 +106,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         const status = codex?.begin(prompt.trim()) ?? 404;
         return send(status, status === 200 ? snapshot() : {
           ...snapshot(),
-          error: status === 409 ? "已有 4 条会话进行中。" : "无法启动 Codex 会话。",
+          error: status === 409 ? `已有 ${limits.codex} 条会话进行中。` : "无法启动 Codex 会话。",
         });
       }
       if (!codex && path === "/api/demo/reset") {
@@ -146,13 +147,37 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
   return server;
 }
 
+function integerSetting(name: string, fallback: number, minimum: number, maximum = Number.MAX_SAFE_INTEGER) {
+  const value = process.env[name]?.trim();
+  if (!value) return fallback;
+  const number = Number(value);
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(number) || number < minimum || number > maximum) {
+    throw new Error(`${name} 必须为 ${minimum} 到 ${maximum} 之间的整数。`);
+  }
+  return number;
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const port = Number(process.env.SOULFLOW_DEMO_PORT ?? "4173");
+  try {
+    process.loadEnvFile();
+  } catch (error) {
+    if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
+      throw new Error("无法读取本地 .env。");
+    }
+  }
+  const port = integerSetting("SOULFLOW_DEMO_PORT", 4173, 0, 65_535);
   const live = process.argv.includes("--codex");
   const auditPath = process.env.SOULFLOW_AUDIT_DB || resolve(".souflow", live ? "codex-audit.sqlite" : "demo-audit.sqlite");
-  const server = createWorkbenchServer(undefined, live ? [process.cwd()] : undefined, auditPath);
+  const limits = {
+    demo: integerSetting("SOULFLOW_DEMO_MAX_CONCURRENT", defaultLimits.demo, 1),
+    codex: integerSetting("SOULFLOW_CODEX_MAX_CONCURRENT", defaultLimits.codex, 1),
+  };
+  const server = createWorkbenchServer(undefined, live ? [process.cwd()] : undefined, auditPath, limits);
   server.listen(port, address, () => {
-    process.stdout.write(`Soulflow 决策收件箱 http://${address}:${port}（${live ? "Codex 会话" : "本地演示"}）\n`);
+    const bound = server.address();
+    if (bound && typeof bound !== "string") {
+      process.stdout.write(`Soulflow 决策收件箱 http://${address}:${bound.port}（${live ? "Codex 会话" : "本地演示"}）\n`);
+    }
   });
   process.once("SIGINT", () => server.close());
   process.once("SIGTERM", () => server.close());
