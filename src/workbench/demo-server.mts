@@ -15,6 +15,7 @@ import { createDecisionDemo, type DecisionCard } from "./demo-state.mts";
 const address = "127.0.0.1";
 const defaultLimits = { demo: 24, codex: 4 };
 const defaultDispatchConcurrency = 2;
+const recentMonitorRuns = 4;
 const defaultInputLimits = { promptMaxLength: 4000, answerMaxLength: defaultAnswerMaxLength };
 const maxConfigurableInputLength = 16_000;
 const jsonMetadataBudget = 16_384;
@@ -123,12 +124,23 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       if (path === "/api/decisions") return send(200, snapshot());
       if (path === "/api/dispatch-status" && monitor && dispatch) {
         const names = new Map(flows.list().map(flow => [flow.id, scrubAuditText(flow.title)]));
-        return send(200, { ...monitor.snapshot(), waiting: dispatch.list().filter(run => run.status === "running" || run.status === "waiting")
-          .flatMap(run => run.jobs.filter(job => job.status === "queued").map(job => ({
-            flowId: run.flowId, batchId: run.id, planVersion: run.plan.version, ticketId: job.id, task: scrubAuditText(job.title),
-            title: names.get(run.flowId), dependsOn: job.dependsOn,
-          }))),
-        });
+        const reviewing = new Set(dispatch.reviews().map(item => item.artifact.id));
+        const runs = dispatch.list().filter(run => run.status !== "ready" && run.status !== "preparing");
+        const jobs = runs.filter((run, index) => index >= runs.length - recentMonitorRuns || run.status === "running" || run.status === "waiting")
+          .flatMap(run => {
+            const byId = new Map(run.jobs.map(job => [job.id, job]));
+            return run.jobs.map(job => ({
+              flowId: run.flowId, batchId: run.id, planVersion: run.plan.version, ticketId: job.id, task: scrubAuditText(job.title),
+              title: names.get(run.flowId), dependsOn: job.dependsOn, status: job.status,
+              waitingOn: job.status === "queued" ? job.dependsOn.filter(id => {
+                const input = byId.get(id);
+                return input?.status !== "ready" || (run.kind === "code" && input.artifact?.review !== "accepted");
+              }) : [],
+              startedAt: job.startedAt, finishedAt: job.finishedAt,
+              reviewing: job.artifact ? reviewing.has(job.artifact.id) : false, review: job.artifact?.review,
+            }));
+          });
+        return send(200, { ...monitor.snapshot(), jobs, waiting: jobs.filter(job => job.status === "queued") });
       }
       if (path === "/api/audit" || path.startsWith("/api/audit?")) {
         if (request.headers["sec-fetch-site"] === "cross-site") return send(403, { error: "请在本机工作台查看活动记录。" });
