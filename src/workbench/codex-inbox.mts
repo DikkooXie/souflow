@@ -105,7 +105,7 @@ export function createCodexInbox(workspace: string, options: {
       const fields = step?.phase.fields;
       attempt = startAttempt({ workspace, prompt, onEvent, answerMaxLength,
         ...(step?.flow.project ? { disableWebSearch: true } : {}),
-        ...(monitored ? { onThread: monitored.connected } : {}),
+        ...(monitored ? { onThread: monitored.connected, onAccount: monitored.account } : {}),
         onModel: model => {
           monitored?.model(model);
           record?.({ kind: "model.started", ...trace, details: { model, phase: step?.phase.title } });

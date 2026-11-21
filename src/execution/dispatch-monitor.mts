@@ -17,6 +17,7 @@ type Session = Target & {
   connectedAt?: number;
   threadId?: string;
   model?: string;
+  accountRef?: string;
   finishedAt?: number;
 };
 const recentLimit = 24;
@@ -38,6 +39,9 @@ export function createDispatchMonitor(host: string, now = Date.now) {
         },
         model(model: string) {
           if (active.has(session.id)) session.model = model;
+        },
+        account(accountRef: string) {
+          if (active.has(session.id)) session.accountRef = accountRef;
         },
         waiting(waiting: boolean) {
           if (active.has(session.id) && session.threadId) session.status = waiting ? "waiting" : "running";

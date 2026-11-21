@@ -32,6 +32,7 @@ type Job = Ticket & {
   startedAt?: number;
   finishedAt?: number;
   model?: string;
+  accountRef?: string;
   threadId?: string;
   report?: string;
   reportPath?: string;
@@ -343,7 +344,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
         const attempt = split({
           workspace, prompt, outputSchema: ticketSchema(run.kind, !!routing),
           disableWebSearch: true, onModel(model) { run.planningModel = model; session?.model(model); },
-          ...(session ? { onThread: session.connected } : {}),
+          ...(session ? { onThread: session.connected, onAccount: session.account } : {}),
           onEvent(event) { if (event.kind === "question-requested") attempt.close(); },
         });
         return attempt;
@@ -421,6 +422,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
             if (!save(run)) throw Error("无法保存正在运行的 Codex 会话。");
           },
           onThread(threadId) { job.threadId = threadId; session?.connected(threadId); },
+          onAccount(ref) { job.accountRef = ref; session?.account(ref); },
           prompt: [
             code ? "执行已确认的本地代码工单。仅对 editableFiles 中的现有文件提供文本替换。每个 before 必须逐字匹配当时文件内唯一一处非空原文，after 是替换内容，顺序应用。可用短锚点插入或替换代码。"
               : "执行已确认的 souflow 本地核验工单。仅使用随请求提供的仓库快照资料，不访问工具或修改文件。",
@@ -471,8 +473,8 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
       for (const job of run.jobs) if (job.status === "queued") job.status = "blocked";
     } finally {
       if (!save(run, { kind: "dispatch.finished", flowId: run.flowId, subject: run.id, details: { status: run.status,
-        jobs: run.jobs.map(({ id, status, model, threadId, startedAt, finishedAt, artifact }) =>
-          ({ id, status, model, threadId, startedAt, finishedAt, artifact: artifact && {
+        jobs: run.jobs.map(({ id, status, model, threadId, accountRef, startedAt, finishedAt, artifact }) =>
+          ({ id, status, model, threadId, accountRef, startedAt, finishedAt, artifact: artifact && {
             id: artifact.id, patchSha256: artifact.patchSha256, review: artifact.review, upstream: artifact.upstream,
           } })),
       } })) {
