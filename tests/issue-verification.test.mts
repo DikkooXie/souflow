@@ -89,4 +89,3 @@ test("原生 Codex 通过本地模型回环暴露的工具和不可信工单上�
   assert.ok(received.input.some((item: { type?: string; name?: string; output?: string }) =>
     item.type === "function_call_output" && item.name === "github_issue" && item.output?.includes("核验工单的验收步骤")));
 });
-

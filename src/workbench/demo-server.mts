@@ -1,3 +1,7 @@
+import { createGitHubIssues } from "../connections/github.mts";
+import type { IssueTracker } from "../connections/issue-tracker.mts";
+import { createIssueVerifier, type VerifyIssue } from "../execution/issue-verification.mts";
+import { createIssueDispatch, IssueActionError, type Claim } from "./issue-dispatch.mts";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
 import { hostname } from "node:os";
@@ -25,6 +29,7 @@ const jsonMetadataBudget = 16_384;
 const files = [
   ["/", "index.html", "text/html"],
   ["/style.css", "style.css", "text/css"],
+  ["/github-issues.mjs", "github-issues.mjs", "text/javascript"],
   ["/app.mjs", "app.mjs", "text/javascript"],
   ["/archive.mjs", "archive.mjs", "text/javascript"],
   ["/dispatch.mjs", "dispatch.mjs", "text/javascript"],
@@ -59,12 +64,15 @@ type WorkbenchOptions = {
   dispatchAdapters?: Omit<NonNullable<Parameters<typeof createLocalDispatch>[2]>, "record" | "store" | "artifactRoot">;
   project?: ProjectSettings;
   members?: MemberKeys;
+  issueTracker?: IssueTracker;
+  verifyIssue?: VerifyIssue;
+  memberTrackers?: ReadonlyMap<string, IssueTracker>;
   hostName?: string;
 };
 
 export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions, auditPath?: string, {
   limits = defaultLimits, inputLimits = defaultInputLimits, auditThresholds = defaultAuditThresholds,
-  dispatchConcurrency = defaultDispatchConcurrency, dispatchAdapters, project, members, hostName = hostname(),
+  dispatchConcurrency = defaultDispatchConcurrency, dispatchAdapters, project, members, issueTracker, verifyIssue, memberTrackers, hostName = hostname(),
 }: WorkbenchOptions = {}) {
   const memberFor = members && createMembers(members);
   if (memberFor && !live) throw Error("两位成员模式需要 Codex 工作台。");
@@ -89,7 +97,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
   const demo = createDecisionDemo(receiptDelay, audit.record, answerMaxLength);
   const monitor = live ? createDispatchMonitor(hostName) : undefined;
   const recovery = !!(live && database);
-  const { codex, inbox, flows, dispatch, acceptance } = (() => {
+  const { codex, inbox, flows, dispatch, acceptance, github } = (() => {
     try {
       if (database) bindWorkbench(audit, live ? resolve(live[0]) : "", !!memberFor);
       const codex = live ? createCodexInbox(live[0], {
@@ -105,7 +113,11 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         ...(recovery ? { store: audit.checkpoint<Run>("dispatch"), artifactRoot: `${database}.artifacts` } : {}),
       }) : undefined;
       const acceptance = memberFor && createAcceptance(audit.record, recovery ? audit.checkpoint<StoredAcceptance>("acceptance") : undefined);
-      return { codex, inbox, flows, dispatch, acceptance };
+      if (issueTracker && (!recovery || !monitor)) throw Error("GitHub 认领需要持久化的 Codex 工作台。");
+      const github = issueTracker && monitor ? createIssueDispatch(issueTracker,
+        audit.checkpoint<Claim>(`github-issues:${issueTracker.repo.toLowerCase()}`), verifyIssue ?? createIssueVerifier(monitor),
+        audit.record, dispatchConcurrency, memberTrackers) : undefined;
+      return { codex, inbox, flows, dispatch, acceptance, github };
     } catch (error) {
       closeStore();
       throw error;
@@ -132,7 +144,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
     const state = inbox.snapshot();
     return {
       ...state, requests: [...state.requests, ...reviewCards], flows: conversations, phases: phases.map(phase => phase.title), inputLimits,
-      member,
+      member, githubEnabled: !!github,
       acceptanceNoteMaxLength: maxAcceptanceNote,
       planMaxLength: maxArtifactTextLength, dispatches: dispatch?.list().map(run =>
         acceptance ? { ...run, acceptance: acceptance.history(run.id) } : run) ?? [],
@@ -162,13 +174,16 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       return send(401, { error: "请以 souflow 成员身份登录。" });
     }
     const state = () => snapshot(member);
+    const githubActor = member?.login ?? member?.id ?? "personal";
+    const canClaim = member?.id !== "reviewer" && !!github?.permits(githubActor);
     function allowed(role: "implementer" | "reviewer", action: string, subject?: string) {
       if (!member || member.id === role) return true;
-      audit.record({ kind: "member.denied", ...(subject ? { subject } : {}), details: { actor: member.id, action } });
+      audit.record({ kind: "member.denied", ...(subject ? { subject } : {}), details: { actor: member.login ?? member.id, action } });
       send(403, { error: "当前成员无权执行此操作。" });
       return false;
     }
     if (request.method === "GET") {
+      if (path === "/api/github/issues" && github) return send(200, github.snapshot(canClaim));
       if (path === "/api/decisions") return send(200, state());
       if (path === "/api/dispatch-status" && monitor && dispatch) {
         const names = new Map(flows.list().map(flow => [flow.id, scrubAuditText(flow.title)]));
@@ -211,6 +226,24 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       // 页面操作仅接受当前本机地址发起的请求。
       if (request.headers.origin !== `http://${address}:${local.port}`) {
         return send(403, { error: "请求来源与工作台地址不一致。" });
+      }
+      if (github && (path === "/api/github/issues/refresh" || path === "/api/github/issues/claim")) {
+        const claim = path.endsWith("/claim");
+        if (claim && !allowed("implementer", "github.claim")) return;
+        const body = await readJson(request);
+        if ("status" in body) return send(body.status, { error: body.error });
+        const id = (body.value as { requestId?: unknown } | null)?.requestId;
+        if (claim && (typeof id !== "string" || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id))) {
+          return send(422, { error: "认领请求缺少有效标识。" });
+        }
+        try {
+          if (claim && typeof id === "string") await github.claim(id, githubActor);
+          else await github.refresh();
+          return send(200, github.snapshot(canClaim));
+        } catch (error) {
+          return error instanceof IssueActionError ? send(error.status, { error: error.message })
+            : send(503, { error: "无法读取 GitHub。请核对仓库、网络与本机 gh 登录权限。" });
+        }
       }
       if (path === "/api/activity") {
         const body = await readJson(request);
@@ -269,7 +302,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         const status = dispatch?.isRunning(flow.id) || decision === "submitted" || decision === "accepted"
           ? 409 : flows.revisePlan(flow, revision);
         if (status === 200 && member) audit.record({ kind: "member.revised", flowId: flow.id,
-          details: { actor: member.id, plan: currentDevelopmentPlan(flow)?.version } });
+          details: { actor: member.login ?? member.id, plan: currentDevelopmentPlan(flow)?.version } });
         return status === 200 ? send(200, state()) : send(status, {
           ...state(),
           error: status === 409 ? "计划版本已变更，或当前批次仍在执行、待验收或已通过。"
@@ -356,7 +389,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
   server.on("close", () => {
     const attempts = inbox.close();
     // 结束尝试时仍会产生最终状态，先让编排写完这些事件再关闭存储。
-    void Promise.allSettled([attempts, flows.settled(), dispatch?.close()]).then(() => {
+    void Promise.allSettled([attempts, flows.settled(), dispatch?.close(), github?.close()]).then(() => {
       closeStore();
       server.emit("workbenchClosed");
     });
@@ -372,6 +405,18 @@ function integerSetting(name: string, fallback: number, minimum: number, maximum
     throw new Error(`${name} 必须为 ${minimum} 到 ${maximum} 之间的整数。`);
   }
   return number;
+}
+
+function stringMapSetting(name: string): Record<string, string> {
+  const raw = process.env[name];
+  if (!raw) return {};
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (value && typeof value === "object" && !Array.isArray(value) && Object.values(value).every(v => typeof v === "string")) {
+      return value as Record<string, string>;
+    }
+  } catch { /* 配置解析失败时避免将凭据片段带入终端日志。 */ }
+  throw Error(`${name} 必须是登录名到字符串的 JSON 对象。`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -406,12 +451,22 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const hostName = process.env.SOULFLOW_HOST_NAME?.trim();
   const implementer = process.env.SOULFLOW_MEMBER_IMPLEMENTER_KEY;
   const reviewer = process.env.SOULFLOW_MEMBER_REVIEWER_KEY;
+  const extra = process.env.SOULFLOW_MEMBER_IMPLEMENTERS_JSON;
+  const additionalImplementers = stringMapSetting("SOULFLOW_MEMBER_IMPLEMENTERS_JSON");
+  const githubAccounts = stringMapSetting("SOULFLOW_GITHUB_ACCOUNTS");
+  delete process.env.SOULFLOW_MEMBER_IMPLEMENTERS_JSON;
+  const claimEnabled = live && process.env.SOULFLOW_GITHUB_CLAIMS === "1";
+  if (claimEnabled && !githubRepo) throw Error("开启认领前请配置 SOULFLOW_PROJECT_GITHUB_REPO。");
   // 成员凭据只用于工作台登录，子进程沿用清理后的环境。
   delete process.env.SOULFLOW_MEMBER_IMPLEMENTER_KEY;
   delete process.env.SOULFLOW_MEMBER_REVIEWER_KEY;
   const server = createWorkbenchServer(undefined, live ? [process.cwd()] : undefined, auditPath, {
     limits, inputLimits, auditThresholds, dispatchConcurrency,
-    ...(implementer !== undefined || reviewer !== undefined ? { members: { implementer: implementer ?? "", reviewer: reviewer ?? "" } } : {}),
+    ...(implementer !== undefined || reviewer !== undefined || extra ? { members: { implementer: implementer ?? "", reviewer: reviewer ?? "", additionalImplementers } } : {}),
+    ...(claimEnabled && githubRepo ? {
+      issueTracker: createGitHubIssues(process.cwd(), githubRepo, githubAccounts.implementer ?? githubAccounts.personal),
+      memberTrackers: new Map(Object.entries(githubAccounts).map(([name, login]) => [name, createGitHubIssues(process.cwd(), githubRepo, login)])),
+    } : {}),
     ...(hostName ? { hostName } : {}),
     ...(planPath || githubRepo ? { project: { ...(planPath ? { planPath } : {}), ...(githubRepo ? { githubRepo } : {}) } } : {}),
     ...(advanced && routine && advanced !== routine ? { dispatchAdapters: { routing: { advanced, routine } } } : {}),

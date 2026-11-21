@@ -2,6 +2,7 @@ import { createArchive } from "./archive.mjs";
 import { createAuditView } from "./audit.mjs";
 import { createDispatchPanel } from "./dispatch.mjs";
 import { createMonitorView } from "./dispatch-monitor.mjs";
+import { createGithubPanel } from "./github-issues.mjs";
 
 const list = document.querySelector("#requests");
 const queue = document.querySelector("#decision-queue");
@@ -40,6 +41,7 @@ const audit = createAuditView(node);
 const archive = createArchive(node, reportView, post);
 const dispatch = createDispatchPanel(node, post, openDecisions);
 const monitor = createMonitorView(node, selectFlow, reportView);
+const github = createGithubPanel(node, reportView);
 const clock = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const drafts = new Map();
 let requests = [];
@@ -77,6 +79,7 @@ function node(tag, className, text) {
   return element;
 }
 
+
 function actionButton(text, style, handler) {
   const button = node("button", `button ${style}`, text);
   button.type = handler ? "button" : "submit";
@@ -88,6 +91,7 @@ function view() {
   if (dialog.open) return "decisions";
   if (archive.visible) return "archive";
   if (monitor.visible) return "dispatch-monitor";
+  if (github.visible) return "github-issues";
   if (auditOpen) return "audit";
   return selectedFlow ? "conversation" : "home";
 }
@@ -427,6 +431,7 @@ function applySnapshot(snapshot) {
     memberLabel.textContent = member?.label ?? "";
     start.hidden = member?.id === "reviewer";
     monitor.setAvailable(live);
+    github.setAvailable(snapshot.githubEnabled === true);
     active = snapshot.active ?? 0;
     modeLabel.textContent = live ? "Codex · 规划" : "本地演示";
     reset.hidden = live;
@@ -496,7 +501,7 @@ sidebarToggle.addEventListener("click", () => showSidebar(sidebar.hidden));
 sidebarScrim.addEventListener("click", () => { showSidebar(false); sidebarToggle.focus(); });
 compactLayout.addEventListener("change", updateSidebarOverlay);
 document.addEventListener("keydown", event => {
-  if (event.key === "Escape" && !sidebar.hidden && !dialog.open && !archive.visible && !dispatch.visible && !monitor.visible) {
+  if (event.key === "Escape" && !sidebar.hidden && !dialog.open && !archive.visible && !dispatch.visible && !monitor.visible && !github.visible) {
     showSidebar(false);
     sidebarToggle.focus();
   }

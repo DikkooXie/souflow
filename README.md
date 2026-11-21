@@ -19,6 +19,8 @@ npm run dev
 
 ## 目前已经实测的能力
 
+要体验 GitHub 工单认领，可在 Codex 工作台启用 GitHub 连接，绑定本机 gh 账号。领取后可以在同一张工单上核对 GitHub 负责人、Codex 核验进度和关联 PR。[配置与操作](docs/architecture.md#在工作台认领-github-工单)
+
 | 能力 | 实际观察与证据 |
 | --- | --- |
 | 对话续推与规划 | 在固定的项目提交上读取计划和近期 PR，运行五阶段规划，处理澄清卡并归档产物。另一次只读工单试跑中，常规任务使用 Sol，跨模块任务使用 Astra，两者均产出报告。[项目续推与模型选择 · PR #11](https://github.com/DikkooXie/souflow/pull/11) |
