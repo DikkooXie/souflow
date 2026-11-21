@@ -1,5 +1,6 @@
 import { createArchive } from "./archive.mjs";
 import { createAuditView } from "./audit.mjs";
+import { createDispatchPanel } from "./dispatch.mjs";
 
 const list = document.querySelector("#requests");
 const queue = document.querySelector("#decision-queue");
@@ -30,10 +31,12 @@ const auditPanel = document.querySelector("#audit");
 const workspace = document.querySelector("#workspace");
 const audit = createAuditView(node);
 const archive = createArchive(node, reportView);
+const dispatch = createDispatchPanel(node, post);
 const clock = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const drafts = new Map();
 let requests = [];
 let flows = [];
+let dispatches = [];
 let answerMaxLength;
 let selectedFlow;
 let selected;
@@ -204,6 +207,7 @@ function render() {
   const flow = flows.find(entry => entry.id === selectedFlow);
   renderConversation(flow, pending);
   archive.update(flow);
+  dispatch.update(flow, dispatches, live);
   // 另一会话收到回执时，保留当前会话表单的焦点及正在输入的文字。
   const detailKey = current ? `${current.id}:${current.timeline.length}` : "empty";
   if (detailKey === renderedDetail) return;
@@ -332,7 +336,8 @@ function addQuestion(container, question, draft) {
 
 function later() {
   clearTimeout(poll);
-  if (active > 0 || flows.some(flow => flow.status === "running") || requests.some(request => request.status === "submitted")) {
+  if (active > 0 || flows.some(flow => flow.status === "running") || requests.some(request => request.status === "submitted")
+    || dispatches.some(run => run.status === "preparing" || run.status === "running")) {
     poll = setTimeout(() => void refresh(), 400);
   }
 }
@@ -343,6 +348,7 @@ function applySnapshot(snapshot) {
     answerMaxLength = snapshot.inputLimits.answerMaxLength;
     requests = snapshot.requests;
     flows = snapshot.flows ?? [];
+    dispatches = snapshot.dispatches ?? [];
     if (snapshot.flowId) selectedFlow = snapshot.flowId;
     if (selectedFlow && !flows.some(flow => flow.id === selectedFlow)) selectedFlow = undefined;
     live = snapshot.mode === "codex";
@@ -415,7 +421,7 @@ sidebarToggle.addEventListener("click", () => showSidebar(sidebar.hidden));
 sidebarScrim.addEventListener("click", () => { showSidebar(false); sidebarToggle.focus(); });
 compactLayout.addEventListener("change", updateSidebarOverlay);
 document.addEventListener("keydown", event => {
-  if (event.key === "Escape" && !sidebar.hidden && !dialog.open && !archive.visible) {
+  if (event.key === "Escape" && !sidebar.hidden && !dialog.open && !archive.visible && !dispatch.visible) {
     showSidebar(false);
     sidebarToggle.focus();
   }

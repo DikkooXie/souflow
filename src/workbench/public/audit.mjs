@@ -8,6 +8,7 @@ const controls = {
   "toggle-audit-log": "展开或收起最近记录",
   "toggle-conversations": "展开或收起最近对话", "new-conversation": "新建对话",
   "open-archive": "打开项目文档", "close-archive": "关闭项目文档",
+  "open-local-dispatch": "查看本地工单", "prepare-local-dispatch": "准备本地工单", "start-local-dispatch": "确认并执行工单",
 };
 const names = { home: "首页", conversation: "需求对话", decisions: "决策收件箱", audit: "数据看板", archive: "项目文档" };
 const events = {
@@ -15,6 +16,7 @@ const events = {
   "flow.finished": "流程结束", "decision.opened": "发出决策请求", "decision.answered": "提交决策答复",
   "decision.updated": "决策状态更新", "demo.reset": "重置演示",
   "attempt.started": "启动 Codex 尝试", "attempt.finished": "Codex 尝试结束", "model.started": "Codex 模型配置",
+  "dispatch.prepared": "工单已就绪", "dispatch.started": "确认本地派发", "dispatch.finished": "本地派发结束",
 };
 
 export function createAuditView(node) {
@@ -124,8 +126,16 @@ export function createAuditView(node) {
       content.open = previous.has(content.dataset.event);
       const shortFlow = entry.flowId?.slice(0, 8);
       const shortAttempt = entry.attemptId?.slice(0, 8);
+      const jobCounts = entry.kind === "dispatch.finished" ? entry.jobCounts : undefined;
       const title = interaction ? entry.kind === "ui.click" ? controls[entry.control] : `${names[entry.view]} → ${names[entry.destination]}`
-        : [events[entry.kind] ?? entry.kind, shortFlow && `流程 ${shortFlow}`, shortAttempt && `尝试 ${shortAttempt}`].filter(Boolean).join(" · ");
+        : [
+          events[entry.kind] ?? entry.kind,
+          shortFlow && `流程 ${shortFlow}`,
+          shortAttempt && `尝试 ${shortAttempt}`,
+          jobCounts && `待验收 ${formatNumber.format(jobCounts.ready)}`,
+          jobCounts && `失败 ${formatNumber.format(jobCounts.failed)}`,
+          jobCounts && `阻塞 ${formatNumber.format(jobCounts.blocked)}`,
+        ].filter(Boolean).join(" · ");
       const detail = interaction ? [names[entry.view], entry.subject].filter(Boolean).join(" · ")
         : entry.details?.text ?? (entry.details ? JSON.stringify(entry.details, null, 2) : entry.subject);
       content.append(node("summary", "", title));

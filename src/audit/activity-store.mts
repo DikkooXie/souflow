@@ -8,11 +8,13 @@ const controls = [
   "select-decision", "send-request", "send-answer", "select-option", "simulation-disconnect", "reset-demo",
   "open-artifact", "open-history", "change-audit-range", "change-log-type", "refresh-audit", "toggle-audit-log",
   "toggle-conversations", "new-conversation", "open-archive", "close-archive",
+  "open-local-dispatch", "prepare-local-dispatch", "start-local-dispatch",
 ] as const;
 
 export type BusinessEvent = {
   kind: "request.submitted" | "phase.started" | "phase.completed" | "flow.finished" | "decision.opened"
-    | "decision.answered" | "decision.updated" | "demo.reset" | "attempt.started" | "attempt.finished" | "model.started";
+    | "decision.answered" | "decision.updated" | "demo.reset" | "attempt.started" | "attempt.finished" | "model.started"
+    | "dispatch.prepared" | "dispatch.started" | "dispatch.finished";
   flowId?: string | undefined;
   attemptId?: string | undefined;
   subject?: string;
@@ -82,6 +84,17 @@ export function auditDecisionAnswers(
   return Object.fromEntries(questions.map(question => [
     question.id, credentialField(question.id) || credentialLabel.test(`${question.title} ${question.prompt}`) ? "[已隐藏凭据]" : answers[question.id],
   ]));
+}
+
+function countDispatchJobs(details: unknown) {
+  if (!details || typeof details !== "object" || !("jobs" in details) || !Array.isArray(details.jobs)) return;
+  const counts = { ready: 0, failed: 0, blocked: 0 };
+  for (const job of details.jobs as unknown[]) {
+    if (!job || typeof job !== "object" || !("status" in job)) continue;
+    const { status } = job;
+    if (status === "ready" || status === "failed" || status === "blocked") counts[status] += 1;
+  }
+  return counts;
 }
 
 export function openActivityStore(path = ":memory:", now = Date.now, thresholds = defaultAuditThresholds) {
@@ -189,11 +202,17 @@ export function openActivityStore(path = ":memory:", now = Date.now, thresholds 
         totals: Object.fromEntries(totals.all(since).map(row => [row.kind, row.total])),
         clicks: clicks.all(since, thresholds.repeatClickMs), transitions: transitions.all(since, thresholds.quickReturnMs),
         interactions: recentInteractions.all(since),
-        recent: recent.all(since).map(row => ({
-          id: row.id as number, version: row.version as number, at: row.at as number, kind: row.kind as BusinessEvent["kind"],
-          flowId: row.flowId as string | null, attemptId: row.attemptId as string | null, subject: row.subject as string | null,
-          details: typeof row.details === "string" ? JSON.parse(row.details) as unknown : null,
-        })),
+        recent: recent.all(since).map(row => {
+          const kind = row.kind as BusinessEvent["kind"];
+          const details = typeof row.details === "string" ? JSON.parse(row.details) as unknown : null;
+          const jobCounts = kind === "dispatch.finished" ? countDispatchJobs(details) : undefined;
+          return {
+            id: row.id as number, version: row.version as number, at: row.at as number, kind,
+            flowId: row.flowId as string | null, attemptId: row.attemptId as string | null, subject: row.subject as string | null,
+            details,
+            ...(jobCounts ? { jobCounts } : {}),
+          };
+        }),
       };
     },
     close() { closed = true; db.close(); },

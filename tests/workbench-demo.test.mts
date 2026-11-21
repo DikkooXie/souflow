@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -9,11 +9,13 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
 import type { Flow } from "../src/planning/conversation-flow.mts";
+import type { createLocalDispatch } from "../src/execution/local-dispatch.mts";
 import { createWorkbenchServer } from "../src/workbench/demo-server.mts";
 import type { createDecisionDemo } from "../src/workbench/demo-state.mts";
 
 type Snapshot = ReturnType<ReturnType<typeof createDecisionDemo>["snapshot"]> & {
   flows: Flow[];
+  dispatches: ReturnType<ReturnType<typeof createLocalDispatch>["list"]>;
   inputLimits: { promptMaxLength: number; answerMaxLength: number };
 };
 
@@ -128,6 +130,68 @@ test("rejects a new workflow when existing Codex sessions have filled capacity",
   assert.equal(capacity.status, 409);
   assert.match((await capacity.json()).error, /已有 2 条会话进行中/);
   assert.deepEqual((await read()).flows, []);
+});
+
+test("confirms an isolated code patch through the workbench without replacing the report run", { timeout: 8000 }, async t => {
+  const repo = await mkdtemp(join(tmpdir(), "souflow-code-workbench-"));
+  const file = "docs/guide.md";
+  await mkdir(join(repo, "docs"));
+  await writeFile(join(repo, file), "初始文档\n");
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+  git("init", "-q");
+  git("add", "docs");
+  git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--no-gpg-sign", "-qm", "fixture");
+  const terminal = { finished: Promise.resolve("completed" as const), close() {} };
+  let executions = 0;
+  const executedDirs = new Set<string>();
+  const { post, read } = await start(t, [repo, options => ({
+    ...terminal, answerQuestions: () => false,
+    output: () => JSON.stringify(Object.fromEntries(((options.outputSchema?.required ?? []) as string[]).map(field => [field, `示例${field}`]))),
+  })], { dispatchAdapters: {
+    split(options) {
+      const code = options.prompt.includes("拆成本地代码工单");
+      const fields = { id: "T1", title: "整理指引", instructions: "更新使用步骤", criteria: ["AC-1"], dependsOn: [], sources: [file] };
+      return { ...terminal, answerQuestions: () => false,
+        output: () => JSON.stringify({ tickets: [code ? { ...fields, editPaths: [file] } : fields] }) };
+    },
+    execute(options) {
+      executions += 1;
+      executedDirs.add(join(options.workspace, "..", ".."));
+      return { ...terminal, output: () => JSON.stringify({ report: `已核对 ${file}`,
+        ...(options.prompt.includes("文本替换") ? { edits: [{ path: file, before: "初始文档", after: "已更新" }] } : {}),
+      }) };
+    },
+  } });
+  t.after(async () => {
+    for (const dir of executedDirs) await rm(dir, { recursive: true, force: true });
+    await rm(repo, { recursive: true, force: true });
+  });
+  async function waitFor<T>(find: (snapshot: Snapshot) => T | undefined): Promise<T> {
+    for (let index = 0; index < 100; index++) {
+      const value = find(await read());
+      if (value !== undefined) return value;
+      await delay(20);
+    }
+    throw Error("等待派发状态超时");
+  }
+  assert.equal((await post("/api/workflows", { prompt: "更新使用指引" })).status, 200);
+  const flow = await waitFor(snapshot => snapshot.flows.find(item => item.status === "ready"));
+  const base = `/api/workflows/${flow.id}/local-dispatch`;
+  assert.equal((await post(`${base}/prepare`, { kind: "invalid" })).status, 422);
+  assert.equal((await post(`${base}/prepare`)).status, 200);
+  const report = await waitFor(snapshot => snapshot.dispatches.find(run => run.kind === "report" && run.status === "ready"));
+  assert.equal((await post(`${base}/prepare`, { kind: "code" })).status, 200);
+  const code = await waitFor(snapshot => snapshot.dispatches.find(run => run.kind === "code" && run.status === "ready"));
+  assert.equal(executions, 0);
+  assert.deepEqual(code.jobs[0]?.editPaths, [file]);
+  assert.equal((await post(`${base}/start`, { id: "stale" })).status, 409);
+  assert.equal((await post(`${base}/start`, { id: code.id })).status, 200);
+  const finished = await waitFor(snapshot => snapshot.dispatches.find(run => run.id === code.id && run.status === "finished"));
+  assert.equal(executions, 1);
+  assert.deepEqual(finished.jobs[0]?.changedFiles, [file]);
+  assert.ok(finished.jobs[0]?.patchPath);
+  assert.equal(await readFile(join(repo, file), "utf8"), "初始文档\n");
+  assert.equal((await read()).dispatches.find(run => run.id === report.id)?.status, "ready");
 });
 
 test("loads local environment settings at startup and keeps the file off HTTP", { timeout: 5000 }, async t => {
