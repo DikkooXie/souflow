@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { type BusinessEvent, scrubAuditText } from "../audit/activity-store.mts";
+import { type BusinessEvent, type Checkpoint, scrubAuditText } from "../audit/activity-store.mts";
 import { currentDevelopmentPlan, type Flow } from "../planning/conversation-flow.mts";
 import { type TicketDraft, validateTicketPlan } from "../planning/validate-ticket-plan.mts";
 import { startCodexQuestionAttempt, startCodexReadOnlyTask } from "./codex-command-attempt.mts";
@@ -40,12 +40,12 @@ type Job = Ticket & {
   artifact?: CodeArtifact;
   error?: string;
 };
-type Run = {
+export type Run = {
   id: string;
   flowId: string;
   plan: { id: string; version: number };
   kind: DispatchKind;
-  status: "preparing" | "ready" | "running" | "waiting" | "finished" | "failed";
+  status: "preparing" | "ready" | "running" | "waiting" | "paused" | "finished" | "failed";
   jobs: Job[];
   error?: string;
   revision?: string;
@@ -155,29 +155,39 @@ export function readDispatchTickets(text: string | undefined, criteria: readonly
 type ReviewGate = { signal: AbortSignal; changed: () => Promise<void>; waiting: (waiting: boolean) => void };
 const reviewFailed = (job: Job) => job.artifact?.review === "rejected" || job.artifact?.review === "invalid";
 const active = (run: Run) => run.status === "running" || run.status === "waiting";
+const resumable = (run: Run) => run.jobs.some(job => job.status === "queued")
+  && run.jobs.every(job => job.status === "ready" || job.status === "queued");
+const stopped = "执行已中断。请核对已完成工单和产物，再准备新的批次。";
 export const codeReviewOptions = ["通过此版本", "不通过"] as const;
 
-export async function runLocalJobs(jobs: Job[], concurrency: number, execute: (job: Job, inputs: readonly Job[]) => Promise<void>, gate?: ReviewGate) {
+export async function runLocalJobs(jobs: Job[], concurrency: number, execute: (job: Job, inputs: readonly Job[]) => Promise<void>, gate?: ReviewGate, checkpoint?: () => boolean) {
   if (!Number.isInteger(concurrency) || concurrency < 1) throw Error("必须设置有效的派发并发上限。");
   const running = new Set<Promise<void>>();
   const byId = new Map(jobs.map(job => [job.id, job]));
+  let writeFailed = false;
   const inputsFor = (job: Job) => gate ? ancestorsOf(job, byId) : jobs.filter(input => job.dependsOn.includes(input.id));
 
   async function runJob(job: Job, inputs: readonly Job[]) {
     job.status = "running";
     job.startedAt = Date.now();
     try {
+      if (checkpoint?.() === false) {
+        writeFailed = true;
+        throw Error("无法保存工单启动状态。");
+      }
       await execute(job, inputs);
       job.status = "ready";
     } catch {
       job.status = "failed";
     } finally {
       job.finishedAt = Date.now();
+      if (checkpoint?.() === false) writeFailed = true;
     }
   }
 
-  while (!gate?.signal.aborted) {
+  while (!gate?.signal.aborted && !writeFailed) {
     for (const job of jobs.filter(entry => entry.status === "queued")) {
+      if (writeFailed) break;
       const inputs = inputsFor(job);
       if (gate && inputs.some(input => reviewFailed(input) || input.status === "failed" || input.status === "blocked")) {
         job.status = "blocked";
@@ -192,7 +202,7 @@ export async function runLocalJobs(jobs: Job[], concurrency: number, execute: (j
       running.add(operation);
     }
     const changes = [...running];
-    if (gate && jobs.some(job => job.status === "queued")) {
+    if (!writeFailed && gate && jobs.some(job => job.status === "queued")) {
       gate.waiting(!running.size);
       changes.push(gate.changed());
     }
@@ -201,7 +211,10 @@ export async function runLocalJobs(jobs: Job[], concurrency: number, execute: (j
     await Promise.race(changes);
   }
   await Promise.all(running);
-  for (const job of jobs) if (job.status === "queued") job.status = "blocked";
+  if (writeFailed) throw Error("无法保存工单执行进度。");
+  if (!checkpoint || !gate?.signal.aborted) {
+    for (const job of jobs) if (job.status === "queued") job.status = "blocked";
+  }
 }
 
 function planFor(flow: Flow) {
@@ -224,8 +237,11 @@ async function evidenceCatalog(workspace: string, revision: string) {
 }
 
 export function createLocalDispatch(workspace: string, concurrency: number, {
-  split = startCodexQuestionAttempt, execute = startCodexReadOnlyTask, record, routing, monitor,
-}: { split?: typeof startCodexQuestionAttempt; execute?: Start; record?: (event: BusinessEvent) => boolean; routing?: ModelRouting; monitor?: DispatchMonitor } = {}) {
+  split = startCodexQuestionAttempt, execute = startCodexReadOnlyTask, record, routing, monitor, store, artifactRoot,
+}: {
+  split?: typeof startCodexQuestionAttempt; execute?: Start; record?: (event: BusinessEvent) => boolean;
+  routing?: ModelRouting; monitor?: DispatchMonitor; store?: Checkpoint<Run>; artifactRoot?: string;
+} = {}) {
   const runs = new Map<string, Run>();
   const operations = new Set<Promise<void>>();
   const attempts = new Set<ReturnType<Start>>();
@@ -239,8 +255,33 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
     reviewChanged = nextReview();
   }
 
+  function save(run: Run, event?: BusinessEvent) {
+    if (store) return store.save(run.id, run, event);
+    return !event || record?.(event) !== false;
+  }
+
+  for (const run of store?.load() ?? []) {
+    if (run.status === "preparing" || active(run)) {
+      if (run.jobs.length && run.jobs.every(job => job.status === "ready")) run.status = "finished";
+      else if (run.kind === "code" && resumable(run)) run.status = "paused";
+      else {
+        run.status = "failed";
+        run.error = stopped;
+        for (const job of run.jobs) {
+          if (job.status === "running") {
+            job.status = "failed";
+            job.error = "会话或补丁结果待核对。";
+          } else if (job.status === "queued") job.status = "blocked";
+        }
+      }
+      if (!save(run, { kind: "dispatch.finished", flowId: run.flowId, subject: run.id,
+        details: { status: run.status, reason: "restart" } })) throw Error("无法恢复工单状态。");
+    }
+    runs.set(run.id, run);
+  }
+
   function pendingReviews() {
-    return [...runs.values()].filter(run => run.kind === "code" && active(run)).flatMap(run => run.jobs.flatMap(job => {
+    return [...runs.values()].filter(run => run.kind === "code" && (active(run) || run.status === "paused")).flatMap(run => run.jobs.flatMap(job => {
       const artifact = job.artifact;
       if (!artifact || artifact.review || !job.patchPath || job.status !== "ready") return [];
       const successors = run.jobs.filter(candidate => candidate.status === "queued" && candidate.dependsOn.includes(job.id));
@@ -310,13 +351,16 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
       run.jobs = readDispatchTickets(output, criteria.map(item => item.id), new Set(catalog.keys()), run.kind, routing)
         .map(ticket => ({ ...ticket, status: "queued" }));
       run.status = "ready";
-      record?.({ kind: "dispatch.prepared", flowId: run.flowId, subject: run.id,
+      if (!save(run, { kind: "dispatch.prepared", flowId: run.flowId, subject: run.id,
         details: { kind: run.kind, plan: run.plan, revision,
-          jobs: run.jobs.map(({ id, dependsOn, editPaths, modelRoute }) => ({ id, dependsOn, editPaths, modelRoute })) } });
+          jobs: run.jobs.map(({ id, dependsOn, editPaths, modelRoute }) => ({ id, dependsOn, editPaths, modelRoute })) } })) {
+        throw Error("无法保存本地工单。");
+      }
     } catch (error) {
       run.status = "failed";
       run.error = error instanceof Error && /^返回的工单|^工单校验|^本机 Codex|^无法取得/.test(error.message)
         ? error.message : "无法准备本地工单。";
+      save(run);
     }
   }
 
@@ -325,7 +369,8 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
       const revision = run.revision;
       if (!revision) throw Error("缺少仓库版本。");
       const catalog = await evidenceCatalog(workspace, revision);
-      const directory = await mkdtemp(join(tmpdir(), "souflow-dispatch-"));
+      if (artifactRoot) await mkdir(artifactRoot, { recursive: true, mode: 0o700 });
+      const directory = await mkdtemp(join(artifactRoot ?? tmpdir(), "souflow-dispatch-"));
       run.directory = directory;
       const archive = join(directory, "source.tar");
       await exec("git", ["-C", workspace, "archive", "--format=tar", `--output=${archive}`, revision]);
@@ -370,7 +415,11 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
         const reply = parse(await result(() => execute({
           workspace: source, outputSchema: code ? codeResultSchema : reportSchema, onEvent() {},
           ...(job.modelRoute ? { model: job.modelRoute.requestedModel } : {}),
-          onModel(model) { job.model = model; session?.model(model); },
+          onModel(model) {
+            job.model = model;
+            session?.model(model);
+            if (!save(run)) throw Error("无法保存正在运行的 Codex 会话。");
+          },
           onThread(threadId) { job.threadId = threadId; session?.connected(threadId); },
           prompt: [
             code ? "执行已确认的本地代码工单。仅对 editableFiles 中的现有文件提供文本替换。每个 before 必须逐字匹配当时文件内唯一一处非空原文，after 是替换内容，顺序应用。可用短锚点插入或替换代码。"
@@ -407,8 +456,13 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
         signal: shutdown.signal,
         changed: () => reviewChanged,
         waiting: waiting => { run.status = waiting ? "waiting" : "running"; },
-      } : undefined);
-      const status = run.jobs.every(job => job.status === "ready") ? "finished" : "failed";
+      } : undefined, store ? () => save(run) : undefined);
+      const status = store && shutdown.signal.aborted && code && resumable(run) ? "paused"
+        : run.jobs.every(job => job.status === "ready") ? "finished" : "failed";
+      if (status === "failed" && shutdown.signal.aborted) {
+        run.error = stopped;
+        for (const job of run.jobs) if (job.status === "queued") job.status = "blocked";
+      }
       await writeFile(join(directory, "run.json"), JSON.stringify({ ...run, status }, null, 2), { mode: 0o600 });
       run.status = status;
     } catch {
@@ -416,18 +470,21 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
       run.error = "无法创建本地工单工作目录。";
       for (const job of run.jobs) if (job.status === "queued") job.status = "blocked";
     } finally {
-      record?.({ kind: "dispatch.finished", flowId: run.flowId, subject: run.id, details: { status: run.status,
+      if (!save(run, { kind: "dispatch.finished", flowId: run.flowId, subject: run.id, details: { status: run.status,
         jobs: run.jobs.map(({ id, status, model, threadId, startedAt, finishedAt, artifact }) =>
           ({ id, status, model, threadId, startedAt, finishedAt, artifact: artifact && {
             id: artifact.id, patchSha256: artifact.patchSha256, review: artifact.review, upstream: artifact.upstream,
           } })),
-      } });
+      } })) {
+        run.status = "failed";
+        run.error = "无法保存批次结果。请核对工单产物和数据库。";
+      }
     }
   }
 
   return {
     list: () => [...runs.values()],
-    isRunning: (flowId: string) => [...runs.values()].some(run => run.flowId === flowId && active(run)),
+    isRunning: (flowId: string) => [...runs.values()].some(run => run.flowId === flowId && (active(run) || run.status === "paused")),
     reviews: pendingReviews,
     async review(id: string, body: unknown, flows: readonly Flow[], actor?: string) {
       const pending = pendingReviews().find(item => item.artifact.id === id);
@@ -451,9 +508,10 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
       const plan = planFor(flow)?.plan;
       if (shutdown.signal.aborted || plan?.id !== run.plan.id || plan.version !== run.plan.version
         || !pendingReviews().some(item => item.artifact === artifact)) return 409;
-      if (record?.({ kind: "dispatch.reviewed", flowId: run.flowId, subject: run.id,
+      const updated = { ...run, jobs: run.jobs.map(item => item === job ? { ...job, artifact: { ...artifact, review: decision } } : item) };
+      if (!save(updated, { kind: "dispatch.reviewed", flowId: run.flowId, subject: run.id,
         details: { jobId: job.id, artifactId: artifact.id, patchSha256: artifact.patchSha256,
-          plan: run.plan, revision: run.revision, decision, actor } }) === false) return 503;
+          plan: run.plan, revision: run.revision, decision, actor } })) return 503;
       artifact.review = decision;
       wakeDispatch();
       return decision === "invalid" ? 409 : 200;
@@ -462,12 +520,13 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
       const context = planFor(flow);
       if (shutdown.signal.aborted || !context) return 409;
       const { id, version } = context.plan;
-      const key = `${flow.id}:${kind}:${version}`;
-      const previous = runs.get(key);
+      const previous = [...runs.values()].reverse().find(run => run.flowId === flow.id && run.kind === kind && run.plan.version === version);
       if (previous && previous.status !== "failed") return 200;
       if (operations.size) return 409;
       const run: Run = { id: randomUUID(), flowId: flow.id, plan: { id, version }, kind, status: "preparing", jobs: [] };
-      runs.set(key, run);
+      if (!save(run)) return 503;
+      if (previous && !store) runs.delete(previous.id);
+      runs.set(run.id, run);
       track(prepare(flow, run, context));
       return 200;
     },
@@ -476,9 +535,10 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
       const plan = planFor(flow)?.plan;
       if (shutdown.signal.aborted || !run || !plan || plan.id !== run.plan.id || plan.version !== run.plan.version) return 409;
       if (active(run) || run.status === "finished") return 200;
-      if (run.status !== "ready" || operations.size) return 409;
+      if ((run.status !== "ready" && run.status !== "paused") || operations.size) return 409;
+      if (!save({ ...run, status: "running" }, { kind: "dispatch.started", flowId: run.flowId, subject: run.id,
+        details: { kind: run.kind, plan: run.plan, revision: run.revision, resumed: run.status === "paused" } })) return 503;
       run.status = "running";
-      record?.({ kind: "dispatch.started", flowId: run.flowId, subject: run.id, details: { kind: run.kind, plan: run.plan, revision: run.revision } });
       track(dispatch(run, flow.title));
       return 200;
     },

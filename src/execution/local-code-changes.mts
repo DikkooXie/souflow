@@ -116,8 +116,12 @@ export async function replayLocalCodePatch(workspace: string, patchPath: string,
   }
   await verify("before");
   // Git 只接收刚校验过的字节，避免再次读取可能已更换的文件。
+  // 持久化工作区可能位于源仓库目录内，补丁只以本次解包目录为根。
+  const ceiling = dirname(await realpath(workspace));
   await new Promise<void>((resolve, reject) => {
-    const child = execFile("git", ["apply", "--whitespace=nowarn", "-p2", "-"], { cwd: workspace }, error => {
+    const child = execFile("git", ["apply", "--whitespace=nowarn", "-p2", "-"], {
+      cwd: workspace, env: { ...process.env, GIT_CEILING_DIRECTORIES: ceiling },
+    }, error => {
       if (error) reject(error);
       else resolve();
     });

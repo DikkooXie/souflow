@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { RecordBusiness } from "../audit/activity-store.mts";
+import { type BusinessEvent, type Checkpoint, type RecordBusiness, scrubAuditText } from "../audit/activity-store.mts";
 import type { ProjectContext, ProjectEvidence } from "./project-context.mts";
 
 const definitions = {
@@ -42,13 +42,15 @@ export type Flow = {
   prompt: string;
   title: string;
   source: ArtifactTrace<"request">;
-  status: "running" | "ready" | "failed";
+  status: "running" | "ready" | "failed" | "interrupted";
   outputs: { title: string; artifacts: readonly Artifact[] }[];
   planHistory?: readonly Artifact[];
   project?: ProjectEvidence;
 };
 
-type RunPhase = (flow: Flow, phase: Phase, targets: readonly PhaseTarget[], planText?: string) => Promise<readonly string[] | undefined>;
+export type StoredFlow = { flow: Flow; planText?: string };
+
+type RunPhase = (flow: Flow, phase: Phase, targets: readonly PhaseTarget[], planText?: string) => Promise<readonly string[] | "interrupted" | undefined>;
 
 export function currentDevelopmentPlan(flow: Flow) {
   return flow.outputs.flatMap(output => output.artifacts).find(artifact => artifact.kind === "development-plan");
@@ -80,74 +82,125 @@ function nextTargets(flow: Flow, phase: Phase): PhaseTarget[] {
   });
 }
 
-export function createConversationFlows(runPhase: RunPhase, limit: number, record?: RecordBusiness, loadProject?: () => Promise<ProjectContext>) {
+export function createConversationFlows(runPhase: RunPhase, limit: number, record?: RecordBusiness,
+  loadProject?: () => Promise<ProjectContext>, store?: Checkpoint<StoredFlow>) {
   const flows: Flow[] = [];
+  const planTexts = new Map<string, string>();
   const running = new Set<Promise<void>>();
+
+  function save(flow: Flow, event: BusinessEvent) {
+    if (store) {
+      const planText = planTexts.get(flow.id);
+      return store.save(flow.id, { flow, ...(planText ? { planText } : {}) }, event);
+    }
+    record?.(event);
+    return true;
+  }
+
+  for (const { flow, planText } of store?.load() ?? []) {
+    if (planText) planTexts.set(flow.id, planText);
+    if (flow.status === "running") {
+      flow.status = "interrupted";
+      if (!save(flow, { kind: "flow.finished", flowId: flow.id, details: { status: flow.status, reason: "restart" } })) {
+        throw Error("无法恢复规划状态。");
+      }
+    }
+    flows.push(flow);
+  }
 
   async function run(flow: Flow) {
     let phaseTitle: string | undefined;
     try {
-      const context = loadProject ? await loadProject() : undefined;
-      if (!flows.includes(flow)) return;
-      if (context) flow.project = context.evidence;
-      for (const phase of phases) {
+      if (loadProject && !flow.project) {
+        const context = await loadProject();
+        if (!flows.includes(flow)) return;
+        flow.project = context.evidence;
+        if (context.planText) planTexts.set(flow.id, context.planText);
+      }
+      for (const phase of phases.slice(flow.outputs.length)) {
         phaseTitle = phase.title;
         const targets = nextTargets(flow, phase);
-        record?.({ kind: "phase.started", flowId: flow.id, subject: phase.title });
-        const result = await runPhase(flow, phase, targets, context?.planText);
+        if (!save(flow, { kind: "phase.started", flowId: flow.id, subject: phase.title })) throw Error();
+        const result = await runPhase(flow, phase, targets, planTexts.get(flow.id));
         if (!flows.includes(flow)) return;
+        if (result === "interrupted") {
+          flow.status = "interrupted";
+          return;
+        }
         if (!result || result.length !== phase.fields.length || result.some(text => !text.trim())) {
           flow.status = "failed";
           return;
         }
-        const content = new Map(phase.fields.map((title, index) => [title, result[index] ?? ""]));
-        flow.outputs.push({ title: phase.title, artifacts: targets.map(target => ({
+        const content = new Map(phase.fields.map((title, index) => [title, store ? scrubAuditText(result[index] ?? "") : result[index] ?? ""]));
+        const output = { title: phase.title, artifacts: targets.map(target => ({
           ...target, sections: definitions[target.kind].fields.map(title => ({ title, text: content.get(title) ?? "" })),
-        })) });
-        record?.({ kind: "phase.completed", flowId: flow.id, subject: phase.title, details: { artifacts: targets } });
+        })) };
+        if (!save({ ...flow, outputs: [...flow.outputs, output] }, {
+          kind: "phase.completed", flowId: flow.id, subject: phase.title, details: { artifacts: targets },
+        })) throw Error();
+        flow.outputs.push(output);
       }
       flow.status = "ready";
     } catch {
-      flow.status = "failed";
+      flow.status = "interrupted";
     } finally {
-      if (flows.includes(flow)) record?.({ kind: "flow.finished", flowId: flow.id, details: { status: flow.status, phase: phaseTitle } });
+      if (flows.includes(flow) && !save(flow, { kind: "flow.finished", flowId: flow.id, details: { status: flow.status, phase: phaseTitle } })) {
+        flow.status = "interrupted";
+      }
     }
   }
 
+  function launch(flow: Flow) {
+    const operation = run(flow);
+    running.add(operation);
+    void operation.then(() => running.delete(operation));
+  }
+
+  const atLimit = () => flows.filter(flow => flow.status === "running").length >= limit;
+
   return {
     list: () => flows,
-    begin(prompt: string) {
-      if (flows.filter(flow => flow.status === "running").length >= limit) return;
+    begin(input: string) {
+      if (atLimit()) return;
+      const prompt = store ? scrubAuditText(input) : input;
       const id = randomUUID();
       const flow: Flow = {
         id, prompt, title: [...(prompt.split("\n")[0] ?? prompt)].slice(0, 32).join(""),
         source: { id: `${id}/request`, version: 1, kind: "request", upstream: [] },
         status: "running", outputs: [],
       };
+      if (!save(flow, { kind: "request.submitted", flowId: flow.id, subject: flow.source.id, details: { text: prompt } })) return null;
       flows.push(flow);
-      record?.({ kind: "request.submitted", flowId: flow.id, subject: flow.source.id, details: { text: prompt } });
-      const runResult = run(flow);
-      running.add(runResult);
-      void runResult.then(() => running.delete(runResult));
+      launch(flow);
       return flow;
     },
-    revisePlan(flow: Flow, revision: NonNullable<ReturnType<typeof readPlanRevision>>): 200 | 409 | 422 {
+    resume(flow: Flow): 200 | 409 | 503 {
+      if (atLimit() || flow.status !== "interrupted") return 409;
+      if (!save({ ...flow, status: "running" }, { kind: "flow.resumed", flowId: flow.id,
+        details: { completedPhases: flow.outputs.length } })) return 503;
+      flow.status = "running";
+      launch(flow);
+      return 200;
+    },
+    revisePlan(flow: Flow, revision: NonNullable<ReturnType<typeof readPlanRevision>>): 200 | 409 | 422 | 503 {
       const plan = currentDevelopmentPlan(flow);
       if (!flows.includes(flow) || flow.status !== "ready" || !plan || plan.version !== revision.version) return 409;
-      if (plan.sections[0]?.text.trim() === revision.text) return 422;
+      const text = store ? scrubAuditText(revision.text) : revision.text;
+      if (plan.sections[0]?.text.trim() === text) return 422;
 
       const replaces = { id: plan.id, version: plan.version };
       const revised = { ...plan, version: plan.version + 1, replaces,
-        sections: [{ title: definitions["development-plan"].fields[0], text: revision.text }] };
+        sections: [{ title: definitions["development-plan"].fields[0], text }] };
       const oldDrafts = flow.outputs.flatMap(output => output.artifacts).filter(artifact => artifact.kind === "ticket-drafts");
       // 旧草稿引用的是原计划，留在历史中，避免显示为改版后的执行依据。
-      flow.planHistory = [...(flow.planHistory ?? []), plan, ...oldDrafts];
-      flow.outputs = flow.outputs.map(output => ({
+      const planHistory = [...(flow.planHistory ?? []), plan, ...oldDrafts];
+      const outputs = flow.outputs.map(output => ({
         ...output, artifacts: output.artifacts.filter(artifact => artifact.kind !== "ticket-drafts")
           .map(artifact => artifact === plan ? revised : artifact),
       })).filter(output => output.artifacts.length > 0);
-      record?.({ kind: "plan.revised", flowId: flow.id, subject: plan.id,
-        details: { previousVersion: plan.version, version: revised.version, archivedDrafts: oldDrafts.map(({ id, version }) => ({ id, version })) } });
+      if (!save({ ...flow, planHistory, outputs }, { kind: "plan.revised", flowId: flow.id, subject: plan.id,
+        details: { previousVersion: plan.version, version: revised.version, archivedDrafts: oldDrafts.map(({ id, version }) => ({ id, version })) } })) return 503;
+      Object.assign(flow, { planHistory, outputs });
       return 200;
     },
     reset() {
@@ -155,6 +208,7 @@ export function createConversationFlows(runPhase: RunPhase, limit: number, recor
         if (flow.status === "running") record?.({ kind: "flow.finished", flowId: flow.id, details: { status: "reset" } });
       }
       flows.length = 0;
+      planTexts.clear();
     },
     settled: () => Promise.allSettled(running),
   };

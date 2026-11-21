@@ -8,18 +8,22 @@ const controls = [
   "select-decision", "send-request", "send-answer", "select-option", "simulation-disconnect", "reset-demo",
   "open-artifact", "open-history", "change-audit-range", "change-log-type", "refresh-audit", "toggle-audit-log",
   "toggle-conversations", "new-conversation", "open-archive", "close-archive",
-  "open-local-dispatch", "prepare-local-dispatch", "start-local-dispatch", "edit-plan", "open-monitor",
+  "open-local-dispatch", "prepare-local-dispatch", "start-local-dispatch", "edit-plan", "open-monitor", "resume-workflow",
 ] as const;
 
 export type BusinessEvent = {
   kind: "request.submitted" | "phase.started" | "phase.completed" | "flow.finished" | "decision.opened"
     | "decision.answered" | "decision.updated" | "demo.reset" | "attempt.started" | "attempt.finished" | "model.started"
     | "dispatch.prepared" | "dispatch.started" | "dispatch.reviewed" | "dispatch.finished" | "plan.revised"
-    | "member.denied" | "member.revised" | "acceptance.decided";
+    | "member.denied" | "member.revised" | "acceptance.decided" | "flow.resumed";
   flowId?: string | undefined;
   attemptId?: string | undefined;
   subject?: string;
   details?: object;
+};
+export type Checkpoint<T extends object> = {
+  load(): T[];
+  save(id: string, item: T, event?: BusinessEvent): boolean;
 };
 export type RecordBusiness = (event: BusinessEvent) => void;
 export const defaultAuditThresholds = {
@@ -98,17 +102,20 @@ function countDispatchJobs(details: unknown) {
   return counts;
 }
 
-export function openActivityStore(path = ":memory:", now = Date.now, thresholds = defaultAuditThresholds) {
-  if (path !== ":memory:") {
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    const fd = openSync(path, constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-    try {
-      if (!fstatSync(fd).isFile()) throw new Error("Audit database path is not a regular file");
-      fchmodSync(fd, 0o600);
-    } finally {
-      closeSync(fd);
-    }
+export function secureDatabaseFile(path: string) {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const fd = openSync(path, constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1) throw new Error("数据库路径必须指向没有硬链接的普通文件。");
+    fchmodSync(fd, 0o600);
+  } finally {
+    closeSync(fd);
   }
+}
+
+export function openActivityStore(path = ":memory:", now = Date.now, thresholds = defaultAuditThresholds) {
+  if (path !== ":memory:") secureDatabaseFile(path);
   const db = new DatabaseSync(path);
   db.exec(`
     PRAGMA busy_timeout = 1000;
@@ -127,6 +134,13 @@ export function openActivityStore(path = ":memory:", now = Date.now, thresholds 
       view TEXT,
       destination TEXT,
       control TEXT
+    ) STRICT;
+    CREATE TABLE IF NOT EXISTS workbench_checkpoints (
+      area TEXT NOT NULL,
+      id TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      payload TEXT NOT NULL CHECK(json_valid(payload)),
+      PRIMARY KEY (area, id)
     ) STRICT;
     CREATE INDEX IF NOT EXISTS activity_kind_time ON activity_events(kind, recorded_at);
     CREATE INDEX IF NOT EXISTS activity_time ON activity_events(recorded_at);
@@ -171,15 +185,55 @@ export function openActivityStore(path = ":memory:", now = Date.now, thresholds 
   let missed = 0;
   let closed = false;
 
+  const load = db.prepare("SELECT version, payload FROM workbench_checkpoints WHERE area = ? ORDER BY rowid");
+  const save = db.prepare(`
+    INSERT INTO workbench_checkpoints(area, id, version, payload) VALUES (?, ?, 1, ?)
+    ON CONFLICT(area, id) DO UPDATE SET version = excluded.version, payload = excluded.payload
+  `);
+
+  function insert(event: BusinessEvent) {
+    const details = event.details ? JSON.stringify(event.details, (key, value: unknown) => {
+      if (typeof value !== "string") return value;
+      return credentialField(key) ? "[已隐藏凭据]" : scrubAuditText(value);
+    }) : null;
+    insertBusiness.run(now(), event.kind, event.flowId ?? null, event.attemptId ?? null, event.subject ?? null, details);
+  }
+
   return {
+    checkpoint<T extends object>(area: string): Checkpoint<T> {
+      return {
+        load() {
+          return load.all(area).map(({ version, payload }) => {
+            if (version !== 1 || typeof payload !== "string") throw Error("工作台状态版本不兼容。");
+            const item: unknown = JSON.parse(payload);
+            if (!item || typeof item !== "object" || Array.isArray(item)) throw Error("无法读取工作台状态。");
+            return item as T;
+          });
+        },
+        save(id, item, event) {
+          if (closed) return false;
+          try {
+            db.exec("BEGIN IMMEDIATE");
+            try {
+              save.run(area, id, JSON.stringify(item));
+              if (event) insert(event);
+              db.exec("COMMIT");
+              return true;
+            } catch (error) {
+              db.exec("ROLLBACK");
+              throw error;
+            }
+          } catch {
+            missed += 1;
+            return false;
+          }
+        },
+      };
+    },
     record(event: BusinessEvent) {
       if (closed) return false;
       try {
-        const details = event.details ? JSON.stringify(event.details, (key, value: unknown) => {
-          if (typeof value !== "string") return value;
-          return credentialField(key) ? "[已隐藏凭据]" : scrubAuditText(value);
-        }) : null;
-        insertBusiness.run(now(), event.kind, event.flowId ?? null, event.attemptId ?? null, event.subject ?? null, details);
+        insert(event);
         return true;
       } catch {
         missed += 1;

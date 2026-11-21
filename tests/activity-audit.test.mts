@@ -210,7 +210,7 @@ test("retains terminal audit records when a Codex planning run is shut down", { 
     if (server.listening) {
       server.close();
       server.closeAllConnections();
-      await once(server, "close");
+      await once(server, "workbenchClosed");
     }
     await rm(dir, { recursive: true });
   });
@@ -226,13 +226,12 @@ test("retains terminal audit records when a Codex planning run is shut down", { 
   const { flowId } = await response.json() as { flowId: string };
   server.close();
   server.closeAllConnections();
-  await once(server, "close");
-  await delay(0);
+  await once(server, "workbenchClosed");
   const audit = openActivityStore(file);
   try {
     const events = audit.report(1).recent.filter(row => row.flowId === flowId);
     assert.equal(events[0]?.kind, "flow.finished");
-    assert.deepEqual(events[0]?.details, { status: "failed", phase: "调研" });
+    assert.deepEqual(events[0]?.details, { status: "interrupted", phase: "调研" });
     assert.equal(events.find(row => row.kind === "attempt.finished")?.attemptId, events.find(row => row.kind === "attempt.started")?.attemptId);
   } finally {
     audit.close();

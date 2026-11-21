@@ -46,6 +46,11 @@
         <p id="conversation-message" class="user-message"></p>
         <div class="conversation-reply">
           <p id="conversation-status" class="flow-status" role="status"></p>
+          <button type="button" id="resume-workflow" class="archive-entry" data-track="resume-workflow" hidden>继续未完成的规划</button>
+          <details id="interrupted-decisions" class="history project-context" hidden>
+            <summary>中断的决策记录</summary>
+            <ul id="interrupted-decision-list"></ul>
+          </details>
           <details id="project-context" class="history project-context" hidden>
             <summary>本轮参考资料</summary>
             <ul id="project-sources"></ul>

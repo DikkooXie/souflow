@@ -25,12 +25,15 @@ type Snapshot = ReturnType<ReturnType<typeof createDecisionDemo>["snapshot"]> & 
 async function start(t: TestContext, live?: Parameters<typeof createWorkbenchServer>[1],
   options?: Parameters<typeof createWorkbenchServer>[3], auditPath?: string) {
   const server = createWorkbenchServer(100, live, auditPath, options);
-  t.after(async () => {
-    await new Promise<void>((resolve, reject) => {
-      server.close(error => error ? reject(error) : resolve());
-      server.closeAllConnections();
-    });
-  });
+  let closing: Promise<unknown> | undefined;
+  function close() {
+    if (closing) return closing;
+    closing = once(server, "workbenchClosed");
+    server.close();
+    server.closeAllConnections();
+    return closing;
+  }
+  t.after(async () => { await close(); });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const address = server.address();
@@ -45,7 +48,7 @@ async function start(t: TestContext, live?: Parameters<typeof createWorkbenchSer
     assert.equal(response.status, 200);
     return response.json();
   };
-  return { url, post, read };
+  return { url, post, read, close };
 }
 
 async function withAuditWriteBlocked(path: string, check: () => Promise<void>) {
@@ -75,7 +78,7 @@ test("two authenticated members return a code delivery and accept only the revis
   const terminal = { finished: Promise.resolve("completed" as const), close() {}, answerQuestions: () => false };
   const members = { implementer: "a".repeat(32), reviewer: "b".repeat(32) };
   const credential = (member: keyof typeof members) => `Basic ${Buffer.from(`${member}:${members[member]}`).toString("base64")}`;
-  const { url, post, read } = await start(t, [repo, options => ({
+  const launch = () => start(t, [repo, options => ({
     ...terminal,
     output: () => JSON.stringify(Object.fromEntries(((options.outputSchema?.required ?? []) as string[]).map(field => [field, `示例${field}`]))),
   })], { members, dispatchAdapters: {
@@ -93,27 +96,28 @@ test("two authenticated members return a code delivery and accept only the revis
       }) };
     },
   } }, auditPath);
-  const write = async (actor: keyof typeof members, path: string, payload?: object) => (await post(path, payload, url, credential(actor))).status;
+  let server = await launch();
+  const write = async (actor: keyof typeof members, path: string, payload?: object) => (await server.post(path, payload, server.url, credential(actor))).status;
   async function waitFor<T>(find: (snapshot: Snapshot) => T | undefined): Promise<T> {
     for (let index = 0; index < 100; index++) {
-      const value = find(await read(credential("reviewer")));
+      const value = find(await server.read(credential("reviewer")));
       if (value !== undefined) return value;
       await delay(20);
     }
     throw Error("等待批次状态超时");
   }
-  const noIdentity = await fetch(url);
+  const noIdentity = await fetch(server.url);
   assert.equal(noIdentity.status, 401);
   assert.match(noIdentity.headers.get("www-authenticate") ?? "", /^Basic /);
-  assert.equal((await fetch(`${url}/api/decisions`)).status, 401);
-  assert.equal((await fetch(`${url}/api/audit`)).status, 401);
-  assert.equal((await fetch(`${url}/api/dispatch-status`)).status, 401);
+  assert.equal((await fetch(`${server.url}/api/decisions`)).status, 401);
+  assert.equal((await fetch(`${server.url}/api/audit`)).status, 401);
+  assert.equal((await fetch(`${server.url}/api/dispatch-status`)).status, 401);
   for (const actor of ["implementer", "reviewer"] as const) {
-    const monitor = await fetch(`${url}/api/dispatch-status`, { headers: { authorization: credential(actor) } });
+    const monitor = await fetch(`${server.url}/api/dispatch-status`, { headers: { authorization: credential(actor) } });
     assert.equal(monitor.status, 200);
   }
-  assert.equal((await post("/api/workflows", { prompt: "跳过登录" })).status, 401);
-  assert.equal((await post("/api/workflows", { prompt: "交换密钥" }, url,
+  assert.equal((await server.post("/api/workflows", { prompt: "跳过登录" })).status, 401);
+  assert.equal((await server.post("/api/workflows", { prompt: "交换密钥" }, server.url,
     `Basic ${Buffer.from(`implementer:${members.reviewer}`).toString("base64")}`)).status, 401);
   assert.equal(await write("reviewer", "/api/workflows", { prompt: "越权创建" }), 403);
   assert.equal(await write("implementer", "/api/workflows", { prompt: "更新使用指引" }), 200);
@@ -150,6 +154,11 @@ test("two authenticated members return a code delivery and accept only the revis
   const next = `/api/acceptance/${second.id}`;
   assert.notEqual(first.jobs[0]?.artifact?.patchSha256, second.jobs[0]?.artifact?.patchSha256);
   assert.equal(await write("implementer", `${next}/submit`, note), 200);
+  await server.close();
+  server = await launch();
+  const restored = await waitFor(snapshot => snapshot.dispatches.find(run => run.id === second.id));
+  assert.deepEqual(restored.acceptance?.map(receipt => [receipt.actor.id, receipt.decision]), [["implementer", "submitted"]]);
+  assert.equal(await write("implementer", `${next}/accept`, note), 403);
   const patch = second.jobs[0]?.patchPath;
   assert.ok(patch);
   const originalPatch = await readFile(patch);
@@ -164,7 +173,7 @@ test("two authenticated members return a code delivery and accept only the revis
   assert.equal(await write("reviewer", `${next}/accept`, note), 200);
   assert.equal(await write("reviewer", `${next}/return`, note), 409);
   assert.equal(await write("implementer", revise, { version: 2, text: "试图换掉已验收版本" }), 409);
-  const audit = await (await fetch(`${url}/api/audit`, { headers: { authorization: credential("reviewer") } })).json();
+  const audit = await (await fetch(`${server.url}/api/audit`, { headers: { authorization: credential("reviewer") } })).json();
   assert.deepEqual(audit.recent.filter((event: { kind: string }) => event.kind === "acceptance.decided")
     .map((event: { subject: string; details: { decision: string; actor: { id: string } } }) => [event.subject, event.details.decision, event.details.actor.id]),
   [[second.id, "accepted", "reviewer"], [second.id, "submitted", "implementer"],
@@ -389,7 +398,7 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
     const identity = (actor: "implementer" | "reviewer") => members
       ? `Basic ${Buffer.from(`${actor}:${members[actor]}`).toString("base64")}` : undefined;
     const reviewer = identity("reviewer");
-    const server = await start(t, [repo, options => ({
+    const launch = () => start(t, [repo, options => ({
       ...terminal, answerQuestions: () => false,
       output: () => JSON.stringify(Object.fromEntries(((options.outputSchema?.required ?? []) as string[]).map(field => [field, `示例${field}`]))),
     })], { ...(members ? { members } : {}), dispatchAdapters: {
@@ -413,9 +422,9 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
         return { ...terminal, output: () => JSON.stringify({ report: step.id, edits: [step] }) };
       },
     } }, auditPath);
-    const { url } = server;
+    let server = await launch();
     const read = () => server.read(identity("reviewer"));
-    const post = (path: string, body: object, origin = url) =>
+    const post = (path: string, body: object, origin = server.url) =>
       server.post(path, body, origin, identity(path.startsWith("/api/decisions/") ? "reviewer" : "implementer"));
     t.after(async () => {
       for (const directory of directories) await rm(directory, { recursive: true, force: true });
@@ -437,16 +446,26 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
     const run = await waitFor(snapshot => snapshot.dispatches.find(item => item.status !== "preparing"));
     assert.equal(run.status, "ready", run.error);
     assert.equal((await post(`${path}/start`, { id: run.id })).status, 200);
-    const pending = await waitFor(snapshot => snapshot.requests.length === 2 ? snapshot : undefined);
+    let pending = await waitFor(snapshot => snapshot.requests.length === 2 ? snapshot : undefined);
     assert.deepEqual([...started].sort(), ["T1", "T2"]);
     const monitor = async () => {
-      const response = await fetch(`${url}/api/dispatch-status`, reviewer ? { headers: { authorization: reviewer } } : undefined);
+      const response = await fetch(`${server.url}/api/dispatch-status`, reviewer ? { headers: { authorization: reviewer } } : undefined);
       assert.equal(response.status, 200);
       const { jobs } = await response.json() as { jobs: {
         batchId: string; ticketId: string; status: string; reviewing: boolean; waitingOn: string[];
       }[] };
       return jobs.filter(job => job.batchId === run.id);
     };
+    if (auditPath) {
+      const previousCards = pending.requests.map(card => card.id).sort();
+      await server.close();
+      server = await launch();
+      pending = await read();
+      assert.equal(pending.dispatches[0]?.id, run.id);
+      assert.equal(pending.dispatches[0]?.status, "paused");
+      assert.deepEqual(pending.requests.map(card => card.id).sort(), previousCards);
+      assert.deepEqual([...started].sort(), ["T1", "T2"]);
+    }
     const monitored = await monitor();
     assert.deepEqual(monitored.find(job => job.ticketId === "T3")?.waitingOn, ["T2", "T1"]);
     assert.deepEqual(monitored.filter(job => job.reviewing).map(job => job.ticketId).sort(), ["T1", "T2"]);
@@ -457,7 +476,7 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
     assert.ok(firstPatch);
     assert.equal((await post(reviewPath(first.id), { review: "通过此版本" }, "https://example.test")).status, 403);
     if (members) {
-      assert.equal((await server.post(reviewPath(first.id), { review: "通过此版本" }, url, identity("implementer"))).status, 403);
+      assert.equal((await server.post(reviewPath(first.id), { review: "通过此版本" }, server.url, identity("implementer"))).status, 403);
     }
     assert.equal((await post(reviewPath(first.id), { review: "模型自行批准" })).status, 422);
     assert.equal((await post(`/api/workflows/${flow.id}/plan/revise`, { version: 1, text: "改版" })).status, 409);
@@ -484,6 +503,10 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
         post(reviewPath(first.id), { review: "通过此版本" }),
       ]);
       assert.deepEqual(repeated.map(response => response.status).sort(), [200, 409]);
+      if (auditPath) {
+        assert.deepEqual([...started].sort(), ["T1", "T2"]);
+        assert.equal((await post(`${path}/start`, { id: run.id })).status, 200);
+      }
       const third = await waitFor(snapshot => snapshot.requests.find(card => card.title.includes("T3")));
       assert.deepEqual(started.slice(2), ["T3"]);
       assert.equal((await post(reviewPath(third.id), { review: "通过此版本" })).status, 200);
@@ -508,7 +531,7 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
     await Promise.all([guide, rules].map(async (file, index) => {
       assert.equal(await readFile(join(repo, file), "utf8"), `${steps[index]?.before}\n`);
     }));
-    const audit = await (await fetch(`${url}/api/audit`, reviewer ? { headers: { authorization: reviewer } } : undefined)).json();
+    const audit = await (await fetch(`${server.url}/api/audit`, reviewer ? { headers: { authorization: reviewer } } : undefined)).json();
     const reviews = audit.recent.filter((entry: { kind: string }) => entry.kind === "dispatch.reviewed");
     assert.equal(reviews.length, outcome === "approved" ? 3 : 2);
     if (members) assert.ok(reviews.every((entry: { details: { actor: string } }) => entry.details.actor === "reviewer"));
