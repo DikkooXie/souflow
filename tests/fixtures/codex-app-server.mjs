@@ -4,6 +4,21 @@ import { basename } from "node:path";
 const scenario = process.argv[2];
 const threadId = basename(process.cwd());
 const turnId = "turn-1";
+const questionMode = scenario.startsWith("question-");
+const question = {
+  id: 1,
+  method: "item/tool/requestUserInput",
+  params: {
+    threadId,
+    turnId,
+    itemId: "question-1",
+    questions: [{
+      id: "language", header: "语言", question: "用什么语言？",
+      isSecret: scenario === "question-secret", isOther: false,
+      options: [{ label: " TypeScript", description: "浏览器原型" }],
+    }],
+  },
+};
 const approval = {
   id: scenario === "foreign-notifications" ? "req-1" : 1,
   method: "item/commandExecution/requestApproval",
@@ -34,10 +49,29 @@ input.on("line", line => {
       return;
     case "initialized":
       return;
+    case "config/read":
+      if (scenario === "question-invalid-config") {
+        send({ id: message.id, result: { config: { mcp_servers: [] } } });
+      } else {
+        send({ id: message.id, result: { config: { mcp_servers: { inherited: {} } } } });
+      }
+      return;
     case "thread/start":
-      send({ id: message.id, result: { thread: { id: threadId } } });
+      if (questionMode && (scenario === "question-invalid-config" || message.params.approvalPolicy !== "never"
+        || message.params.sandbox !== "read-only" || message.params.config?.mcp_servers?.inherited?.enabled !== false)) {
+        send({ id: message.id, error: { code: -32602 } });
+        return;
+      }
+      send({ id: message.id, result: { thread: { id: threadId }, model: "fixture" } });
       return;
     case "turn/start": {
+      if (questionMode) {
+        const request = structuredClone(scenario === "question-command" ? approval : question);
+        if (scenario === "question-foreign-thread") request.params.threadId = "another-thread";
+        if (scenario === "question-foreign-turn") request.params.turnId = "another-turn";
+        send({ id: message.id, result: { turn: { id: turnId } } }, request);
+        return;
+      }
       const request = structuredClone(approval);
       if (scenario === "foreign-thread") request.params.threadId = "another-thread";
       if (scenario === "early-foreign-turn") request.params.turnId = "another-turn";
@@ -71,6 +105,23 @@ input.on("line", line => {
       }
       return;
     }
+  }
+
+  if (questionMode && message.id === question.id) {
+    if (scenario === "question-lost-after-answer") process.exit(0);
+    const denied = message.error?.code === -32601;
+    const answered = message.result?.answers?.language?.answers?.[0] === " TypeScript";
+    const status = (["question-valid", "question-output"].includes(scenario) ? answered : denied) ? "completed" : "failed";
+    if (scenario === "question-output") {
+      send(...["{\"result\":\"有效的中间产物\"}", "x".repeat(16_385)].map(text => ({
+        method: "item/completed", params: { threadId, turnId, item: { type: "agentMessage", text } },
+      })));
+    }
+    send(
+      { method: "serverRequest/resolved", params: { threadId, requestId: question.id } },
+      { method: "turn/completed", params: { threadId, turn: { id: turnId, status } } },
+    );
+    return;
   }
 
   if (message.id !== approval.id) return;
