@@ -68,6 +68,7 @@ export function createCodexInbox(workspace: string, options: {
     try {
       const fields = step?.phase.fields;
       attempt = startAttempt({ workspace, prompt, onEvent, answerMaxLength,
+        ...(step?.flow.project ? { disableWebSearch: true } : {}),
         onModel: model => record?.({ kind: "model.started", ...trace, details: { model, phase: step?.phase.title } }),
         ...(fields ? { outputSchema: {
         type: "object", additionalProperties: false, required: fields,
@@ -94,9 +95,9 @@ export function createCodexInbox(workspace: string, options: {
     snapshot: () => ({ requests, mode: "codex" as const, active: active.size, lastMessage }),
     begin,
     canBegin,
-    runPhase(flow: Flow, phase: Phase, targets: readonly PhaseTarget[]) {
+    runPhase(flow: Flow, phase: Phase, targets: readonly PhaseTarget[], planText?: string) {
       return new Promise<string[] | undefined>(resolve => {
-        const status = begin(makePhasePrompt(flow, phase, targets), {
+        const status = begin(makePhasePrompt(flow, phase, targets, planText), {
           flow, phase, complete: output => resolve(readPhaseOutput(phase, output)),
         });
         if (status !== 200) resolve(undefined);

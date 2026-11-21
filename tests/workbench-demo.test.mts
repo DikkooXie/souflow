@@ -223,7 +223,7 @@ test("loads local environment settings at startup and keeps the file off HTTP", 
   });
   const lines = createInterface({ input: child.stdout });
   const first = await Promise.race([once(lines, "line", { signal: t.signal }), closed.then(() => [])]);
-  const origin = /^Soulflow 决策收件箱 (http:\/\/127\.0\.0\.1:\d+)/.exec(String(first[0]))?.[1];
+  const origin = /^souflow 决策收件箱 (http:\/\/127\.0\.0\.1:\d+)/.exec(String(first[0]))?.[1];
   assert.ok(origin, "the demo server should announce its bound address");
   assert.ok((await stat(auditPath)).isFile());
   const envResponse = await fetch(`${origin}/.env`);

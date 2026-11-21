@@ -77,11 +77,13 @@ SOULFLOW_TEST_NATIVE_CODEX=1 node --experimental-strip-types --test tests/codex-
 
 `SOULFLOW_PROMPT_MAX_LENGTH` 和 `SOULFLOW_ANSWER_MAX_LENGTH` 分别控制需求和自定义答复的长度，默认分别为 4,000 和 1,000，两者均可设为 1 到 16,000。页面从 `GET /api/decisions` 的 `inputLimits` 读取同一组上限。自由文本长度按浏览器输入框的 UTF-16 码元计数，一个表情可能占两个码元。预设选项按原问题中的标签验证。
 
-Soulflow 通过 Codex App Server 运行规划，复用本机 Codex 登录。`SOULFLOW_CODEX_PLANNING_MODEL` 指定规划模型，`SOULFLOW_CODEX_EXECUTION_MODEL` 指定命令执行适配器的模型。变量留空时沿用本机 Codex 默认模型。指定模型后，适配器核对 App Server 回执的模型标识再启动轮次。正式工单派发接入后由该执行适配器消费执行模型配置。
+souflow 通过 Codex App Server 运行规划，复用本机 Codex 登录。`SOULFLOW_CODEX_PLANNING_MODEL` 指定规划模型，`SOULFLOW_CODEX_EXECUTION_MODEL` 指定默认执行模型。变量留空时沿用本机 Codex 默认模型。指定模型后，适配器核对 App Server 回执的模型标识再启动轮次。
+
+从已有项目续推时，可在 `npm run dev:codex` 的环境中设置 `SOULFLOW_PROJECT_PLAN`，例如 `docs/requirements-workflow.md`，并设置 `SOULFLOW_PROJECT_GITHUB_REPO` 为 `owner/repository`。后者需与本地 `origin` 对应，并使用已登录的 `gh` 只读查询最近八个 PR。每条需求固定一次本地 Git 提交，读取该提交内的计划和近期提交摘要；项目资料随规划发送给配置的模型，工作区未提交文件不在资料内。页面「本轮参考资料」标明所用提交、计划和 PR，以及未读到的来源。该轮后续拆单复用同一 Git 提交。
 
 如需 API key，凭据可填写在本机 `.env` 或通过启动进程的环境注入。Git 忽略实际的环境文件，仓库仅提交示例。使用 API key 时由 Codex 的认证或模型提供方配置读取相应变量。
 
-在仓库根目录用 Node 22.17.1 运行 `npm run dev`，并打开 [Soulflow 首页](http://127.0.0.1:4173/)。左上角按钮展开最近对话侧栏，可创建和切换对话。「待决策」显示跨会话的待答数，点击可在当前页面打开右侧抽屉。
+在仓库根目录用 Node 22.17.1 运行 `npm run dev`，并打开 [souflow 首页](http://127.0.0.1:4173/)。左上角按钮展开最近对话侧栏，可创建和切换对话。「待决策」显示跨会话的待答数，点击可在当前页面打开右侧抽屉。
 
 输入自然语言需求后，程序在后台依次推进调研、需求澄清、技术选型、开发文档和拆单。对话显示原始需求和当前状态。已生成的产物在当前对话的「查看项目文档」中按文档浏览，供项目审阅与后续拆单使用。
 

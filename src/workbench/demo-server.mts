@@ -6,6 +6,7 @@ import { defaultAuditThresholds, openActivityStore, readActivity } from "../audi
 import { defaultAnswerMaxLength, maxQuestionsPerDecision } from "../decisions/questions.mts";
 import { createLocalDispatch } from "../execution/local-dispatch.mts";
 import { createConversationFlows, phases } from "../planning/conversation-flow.mts";
+import { createProjectContextReader, type ProjectSettings } from "../planning/project-context.mts";
 import { createCodexInbox } from "./codex-inbox.mts";
 import { createDecisionDemo } from "./demo-state.mts";
 
@@ -47,12 +48,14 @@ type WorkbenchOptions = {
   auditThresholds?: typeof defaultAuditThresholds;
   dispatchConcurrency?: number;
   dispatchAdapters?: Omit<NonNullable<Parameters<typeof createLocalDispatch>[2]>, "record">;
+  project?: ProjectSettings;
 };
 
 export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions, auditPath?: string, {
   limits = defaultLimits, inputLimits = defaultInputLimits, auditThresholds = defaultAuditThresholds,
-  dispatchConcurrency = defaultDispatchConcurrency, dispatchAdapters,
+  dispatchConcurrency = defaultDispatchConcurrency, dispatchAdapters, project,
 }: WorkbenchOptions = {}) {
+  const loadProject = live && project ? createProjectContextReader(live[0], project) : undefined;
   const audit = openActivityStore(auditPath, Date.now, auditThresholds);
   const { promptMaxLength, answerMaxLength } = inputLimits;
   // JSON 可能将每个 UTF-16 码元转义为六个字节，给包裹字段另留空间。
@@ -63,7 +66,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
     limit: limits.codex, answerMaxLength, startAttempt: live[1], record: audit.record,
   }) : undefined;
   const inbox = codex ?? demo;
-  const flows = createConversationFlows(inbox.runPhase, codex ? limits.codex : limits.demo, audit.record);
+  const flows = createConversationFlows(inbox.runPhase, codex ? limits.codex : limits.demo, audit.record, loadProject);
   const dispatch = live ? createLocalDispatch(live[0], dispatchConcurrency, { ...dispatchAdapters, record: audit.record }) : undefined;
   const snapshot = () => ({
     ...inbox.snapshot(), flows: flows.list(), phases: phases.map(phase => phase.title), inputLimits, dispatches: dispatch?.list() ?? [],
@@ -224,11 +227,16 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     insightMinCount: integerSetting("SOULFLOW_AUDIT_INSIGHT_MIN_COUNT", defaultAuditThresholds.insightMinCount, 1),
   };
   const dispatchConcurrency = integerSetting("SOULFLOW_DISPATCH_MAX_CONCURRENT", defaultDispatchConcurrency, 1, 6);
-  const server = createWorkbenchServer(undefined, live ? [process.cwd()] : undefined, auditPath, { limits, inputLimits, auditThresholds, dispatchConcurrency });
+  const planPath = process.env.SOULFLOW_PROJECT_PLAN?.trim();
+  const githubRepo = process.env.SOULFLOW_PROJECT_GITHUB_REPO?.trim();
+  const server = createWorkbenchServer(undefined, live ? [process.cwd()] : undefined, auditPath, {
+    limits, inputLimits, auditThresholds, dispatchConcurrency,
+    ...(planPath || githubRepo ? { project: { ...(planPath ? { planPath } : {}), ...(githubRepo ? { githubRepo } : {}) } } : {}),
+  });
   server.listen(port, address, () => {
     const bound = server.address();
     if (bound && typeof bound !== "string") {
-      process.stdout.write(`Soulflow 决策收件箱 http://${address}:${bound.port}（${live ? "Codex 会话" : "本地演示"}）\n`);
+      process.stdout.write(`souflow 决策收件箱 http://${address}:${bound.port}（${live ? "Codex 会话" : "本地演示"}）\n`);
     }
   });
   process.once("SIGINT", () => server.close());

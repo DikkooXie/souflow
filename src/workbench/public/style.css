@@ -183,6 +183,9 @@ h1 { font-size: clamp(32px, 4.1vw, 54px); font-weight: 750; letter-spacing: -.04
 .source-message { font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 10px; line-height: 1.55; color: var(--muted); }
 .conversation-reply { justify-self: start; padding: 0 3px 6px; }
 .flow-status { margin: 0 0 8px; color: var(--muted); font-size: 14px; }
+.project-context { margin-bottom: 12px; font-size: 14px; overflow-wrap: anywhere; }
+.project-context ul { padding-inline-start: 20px; line-height: 1.6; color: var(--muted); }
+.project-context a { color: var(--accent-dark); }
 .archive-entry {
   display: inline-flex;
   align-items: center;
