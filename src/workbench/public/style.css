@@ -177,6 +177,43 @@ dialog::backdrop { background: #24183860; }
 .muted { color: var(--muted); }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
+.audit-nav { border: 1px solid var(--line); border-radius: 9px; padding: 7px 10px; background: var(--surface); color: var(--accent-dark); font-size: 13px; font-weight: 650; white-space: nowrap; }
+.audit-nav:hover, .audit-nav[aria-pressed="true"] { border-color: #c0aeea; background: var(--accent-light); }
+.audit { width: min(1120px, calc(100% - 48px)); margin: 36px auto 60px; }
+.audit-header, .audit-controls { display: flex; align-items: center; gap: 12px; }
+.audit-header { justify-content: space-between; align-items: flex-end; }
+.audit h1 { margin: 0 0 8px; font-size: clamp(27px, 4vw, 39px); }
+.audit-header p, .audit-status, .audit-help { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.audit-status { margin: 14px 0; }
+.audit-totals { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin: 0 0 20px; border: 1px solid var(--line); border-radius: 16px; overflow: hidden; background: var(--line); }
+.audit-total { background: var(--surface); padding: 16px 18px; }
+.audit-total dt { font-size: 13px; color: var(--muted); }
+.audit-total dd { margin: 3px 0 0; font-size: clamp(26px, 5vw, 36px); color: var(--accent-dark); font-weight: 700; font-variant-numeric: tabular-nums; }
+.audit h2 { font-size: 18px; margin: 0 0 6px; }
+.audit-insights { padding: 16px 18px; border-radius: 14px; border-left: 4px solid #8b70d8; background: var(--accent-light); }
+.audit-insights ul { margin: 8px 0 0; padding-left: 21px; font-size: 14px; line-height: 1.6; }
+.audit-breakdown { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; margin: 16px 0; }
+.audit-breakdown > section, .audit-log { background: var(--surface); border: 1px solid var(--line); padding: 17px 18px; border-radius: 14px; }
+.audit-log > summary { cursor: pointer; font-size: 18px; font-weight: 700; }
+.audit-log > summary::marker { color: var(--accent); }
+#audit-log-count { color: var(--muted); font-size: 13px; font-weight: 400; margin-inline-start: 10px; }
+.audit-log-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 12px; }
+.audit-ranking-scroll, .audit-log-scroll { overflow-y: auto; }
+.audit-ranking-scroll { max-height: 218px; }
+.audit-log-scroll { max-height: min(45dvh, 350px); }
+.audit-ranking, #audit-events { list-style: none; margin: 12px 0 0; padding: 0; }
+.audit-row { padding: 9px 0; border-bottom: 1px solid var(--line); }
+.audit-row:last-child, .audit-event:last-child { border-bottom: 0; }
+.audit-row-meta { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 13px; }
+.audit-row-meta span, .audit-empty { color: var(--muted); font-size: 13px; }
+.audit-row meter { display: block; width: 100%; height: 8px; margin-top: 7px; }
+.audit-row meter::-webkit-meter-bar { background: var(--accent-light); border: 0; }
+.audit-row meter::-webkit-meter-optimum-value { background: #8b70d8; }
+.audit-event { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 8px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.audit-event time { color: var(--muted); }
+.audit-event summary { cursor: pointer; font-weight: 650; }
+.audit-event pre { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; margin: 7px 0 0; padding: 8px; background: var(--background); border-radius: 8px; }
+
 @media (max-width: 560px) {
   .topbar { min-height: 61px; height: auto; flex-wrap: wrap; padding-block: 9px; }
   .brand { font-size: 20px; gap: 7px; }
@@ -192,4 +229,10 @@ dialog::backdrop { background: #24183860; }
   .phase { font-size: 12px; }
   #decision-dialog { border: 0; border-radius: 0; }
   .decision-header, .decision-body { padding-inline: 16px; }
+  .audit { width: calc(100% - 32px); margin-top: 24px; }
+  .audit-header { display: block; }
+  .audit-controls { margin-top: 11px; }
+  .audit-totals { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .audit-breakdown { grid-template-columns: minmax(0, 1fr); }
+  .audit-event { grid-template-columns: minmax(0, 1fr); gap: 3px; }
 }

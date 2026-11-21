@@ -1,3 +1,5 @@
+import { createAuditView } from "./audit.mjs";
+
 const list = document.querySelector("#requests");
 const queue = document.querySelector("#decision-queue");
 const detail = document.querySelector("#detail");
@@ -15,6 +17,10 @@ const phasesList = document.querySelector("#phases");
 const flowSelect = document.querySelector("#flow-select");
 const dialog = document.querySelector("#decision-dialog");
 const decisionBody = dialog.querySelector(".decision-body");
+const auditButton = document.querySelector("#open-audit");
+const auditPanel = document.querySelector("#audit");
+const workspace = document.querySelector("#workspace");
+const audit = createAuditView(node);
 const clock = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const drafts = new Map();
 let requests = [];
@@ -30,6 +36,8 @@ let cycle = 0;
 let poll;
 let live = false;
 let active = 0;
+let auditOpen = false;
+let recordedView = "home";
 
 function setError(message = "") {
   for (const error of errors) {
@@ -52,6 +60,27 @@ function actionButton(text, style, handler) {
   return button;
 }
 
+function view() {
+  if (dialog.open) return "decisions";
+  if (auditOpen) return "audit";
+  return selectedFlow ? "conversation" : "home";
+}
+
+function reportView() {
+  const next = view();
+  if (next === recordedView) return;
+  audit.navigate(recordedView, next);
+  recordedView = next;
+}
+
+function showAudit(visible) {
+  auditOpen = visible;
+  workspace.hidden = visible;
+  auditPanel.hidden = !visible;
+  auditButton.setAttribute("aria-pressed", String(visible));
+  render();
+}
+
 function openDecisions() {
   selected = pendingDecisions()[0]?.id;
   feedback.textContent = "";
@@ -60,6 +89,7 @@ function openDecisions() {
   dialog.showModal();
   decisionBody.scrollTop = 0;
   queue.scrollTop = 0;
+  reportView();
 }
 
 function pickOption(entry) {
@@ -87,6 +117,7 @@ function renderQueue(pending) {
     const item = node("li");
     const button = node("button", "request-button");
     button.type = "button";
+    button.dataset.track = "select-decision";
     button.dataset.subject = request.id;
     button.addEventListener("click", () => {
       selected = request.id;
@@ -112,6 +143,7 @@ function pendingDecisions() {
 }
 
 function render() {
+  reportView();
   const pending = pendingDecisions();
   const current = pending.find(request => request.id === selected) ?? pending[0];
   selected = current?.id;
@@ -171,6 +203,8 @@ function renderConversation(pending) {
     section.dataset.phase = output.title;
     section.open = (previousFlow === flow.id && open.has(output.title)) || index === flow.outputs.length - 1;
     const heading = node("summary", "", output.title);
+    heading.dataset.track = "open-artifact";
+    heading.dataset.subject = output.artifacts[0]?.id;
     section.append(heading);
     for (const { sections } of output.artifacts) {
       for (const item of sections) section.append(node("h3", "", item.title), node("p", "", item.text));
@@ -189,11 +223,14 @@ function renderDetail(current) {
   const form = fragment.querySelector("form");
   const actions = fragment.querySelector(".actions");
   const questions = fragment.querySelector(".questions");
+  fragment.querySelector(".history summary").dataset.subject = current.id;
   const path = ["/api/decisions", current.id].join("/");
   const draft = drafts.get(current.id) ?? new Map();
   drafts.set(current.id, draft);
   const readers = current.questions.map(question => addQuestion(questions, question, draft));
   const send = actionButton("发送回答", "button-primary");
+  send.dataset.track = "send-answer";
+  send.dataset.subject = current.id;
   actions.append(send);
   form.addEventListener("submit", async event => {
     event.preventDefault();
@@ -206,6 +243,8 @@ function renderDetail(current) {
   });
   if (!live) {
     const disconnect = actionButton("模拟断线", "disconnect", () => void post(`${path}/disconnect`));
+    disconnect.dataset.track = "simulation-disconnect";
+    disconnect.dataset.subject = current.id;
     actions.append(disconnect);
   }
   const timeline = fragment.querySelector(".timeline");
@@ -220,7 +259,7 @@ function renderDetail(current) {
 }
 
 function addQuestion(container, question, draft) {
-  const current = draft.get(question.id) ?? { choice: "", text: "" };
+  const current = draft.get(question.id) ?? { choice: "", text: "", optionIds: new Map() };
   draft.set(question.id, current);
   const fieldset = node("fieldset", "question");
   const legend = node("legend", "", question.prompt);
@@ -258,6 +297,9 @@ function addQuestion(container, question, draft) {
     radio.type = "radio";
     radio.name = question.id;
     radio.value = value;
+    if (!current.optionIds.has(value)) current.optionIds.set(value, crypto.randomUUID());
+    radio.dataset.track = "select-option";
+    radio.dataset.subject = current.optionIds.get(value);
     radio.required = true;
     radio.checked = current.choice === value;
     radio.addEventListener("change", () => {
@@ -344,12 +386,28 @@ async function post(path, answers) {
 reset.addEventListener("click", async () => {
   if (await post("/api/demo/reset")) dialog.close();
 });
-document.querySelector("#home").addEventListener("click", () => { selectedFlow = undefined; render(); promptBox.focus(); });
+document.addEventListener("click", event => {
+  const control = event.target.closest?.("[data-track]");
+  if (control) audit.click(view(), control.dataset.track, control.dataset.subject);
+}, { capture: true });
+document.querySelector("#home").addEventListener("click", () => { selectedFlow = undefined; showAudit(false); promptBox.focus(); });
+auditButton.addEventListener("click", () => {
+  showAudit(!auditOpen);
+  if (auditOpen) {
+    document.querySelector("#audit-title").focus();
+    void audit.refresh();
+  }
+});
 document.querySelector("#open-decisions").addEventListener("click", openDecisions);
 document.querySelector("#close-decision").addEventListener("click", () => dialog.close());
+dialog.addEventListener("close", () => {
+  reportView();
+  if (auditOpen) void audit.refresh();
+});
 flowSelect.addEventListener("change", () => {
+  audit.click(view(), "select-flow", flowSelect.value);
   selectedFlow = flowSelect.value || undefined;
-  render();
+  showAudit(false);
 });
 promptBox.addEventListener("keydown", event => {
   if (event.key === "Enter" && !event.isComposing && !event.shiftKey) {

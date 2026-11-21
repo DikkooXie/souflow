@@ -12,6 +12,7 @@ const files = [
   ["/", "index.html", "text/html"],
   ["/style.css", "style.css", "text/css"],
   ["/app.mjs", "app.mjs", "text/javascript"],
+  ["/audit.mjs", "audit.mjs", "text/javascript"],
 ] as const;
 
 async function readJson(request: IncomingMessage): Promise<{ value: unknown } | { status: number; error: string }> {
