@@ -30,7 +30,7 @@ test("local dispatch requires criterion coverage, an acyclic graph and approved 
   assert.throws(() => read([{ ...draft[0], sources: ["docs/linked.md"] }, ...draft.slice(1)]), /冻结版本/);
   const code = draft.slice(0, 2).map(ticket => ({ ...ticket, editPaths: [guide] }));
   assert.throws(() => readDispatchTickets(JSON.stringify({ tickets: code }), criteria.slice(0, 2), allowed, "code"), /重复分配/);
-  assert.throws(() => readDispatchTickets(JSON.stringify({ tickets: [{ ...code[0], dependsOn: ["T2"] }] }), criteria, allowed, "code"), /独立执行/);
+  assert.throws(() => readDispatchTickets(JSON.stringify({ tickets: [{ ...code[0], dependsOn: ["T2"] }] }), criteria, allowed, "code"), /unknown-dependency:T1:T2/);
 });
 
 test("code edits validate every path and anchor before changing a snapshot and emit an applicable patch", async t => {

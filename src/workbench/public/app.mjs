@@ -33,7 +33,7 @@ const auditPanel = document.querySelector("#audit");
 const workspace = document.querySelector("#workspace");
 const audit = createAuditView(node);
 const archive = createArchive(node, reportView, post);
-const dispatch = createDispatchPanel(node, post);
+const dispatch = createDispatchPanel(node, post, openDecisions);
 const clock = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const drafts = new Map();
 let requests = [];
@@ -52,8 +52,10 @@ let live = false;
 let active = 0;
 let auditOpen = false;
 let recordedView = "home";
+let actionError = false;
 
-function setError(message = "") {
+function setError(message = "", fromAction = false) {
+  actionError = fromAction;
   for (const error of errors) {
     error.textContent = message;
     error.hidden = !message;
@@ -96,8 +98,9 @@ function showAudit(visible) {
   render();
 }
 
-function openDecisions() {
-  selected = pendingDecisions()[0]?.id;
+function openDecisions(kind) {
+  const pending = pendingDecisions();
+  selected = (pending.find(item => item.kind === kind && item.flowId === selectedFlow) ?? pending[0])?.id;
   feedback.textContent = "";
   setError();
   render();
@@ -210,7 +213,7 @@ function render() {
   const flow = flows.find(entry => entry.id === selectedFlow);
   renderConversation(flow, pending);
   archive.update(flow, planMaxLength);
-  dispatch.update(flow, dispatches, live);
+  dispatch.update(flow, dispatches, live, pending.some(item => item.kind === "code-review" && item.flowId === flow?.id));
   // 另一会话收到回执时，保留当前会话表单的焦点及正在输入的文字。
   const detailKey = current ? `${current.id}:${current.timeline.length}` : "empty";
   if (detailKey === renderedDetail) return;
@@ -280,7 +283,7 @@ function renderDetail(current) {
   const draft = drafts.get(current.id) ?? new Map();
   drafts.set(current.id, draft);
   const readers = current.questions.map(question => addQuestion(questions, question, draft));
-  const send = actionButton("发送回答", "button-primary");
+  const send = actionButton(current.kind === "code-review" ? "提交验收" : "发送回答", "button-primary");
   send.dataset.track = "send-answer";
   send.dataset.subject = current.id;
   actions.append(send);
@@ -289,7 +292,7 @@ function renderDetail(current) {
     feedback.textContent = "";
     const answers = Object.fromEntries(current.questions.map((question, index) => [question.id, readers[index]()]));
     if (await post(`${path}/answer`, answers) && dialog.open) {
-      feedback.textContent = "回答已提交。";
+      feedback.textContent = current.kind === "code-review" ? "验收已记录。" : "回答已提交。";
       if (!dialog.contains(document.activeElement)) detail.querySelector('[tabindex="-1"]')?.focus();
     }
   });
@@ -367,7 +370,7 @@ function addQuestion(container, question, draft) {
 function later() {
   clearTimeout(poll);
   if (active > 0 || flows.some(flow => flow.status === "running") || requests.some(request => request.status === "submitted")
-    || dispatches.some(run => run.status === "preparing" || run.status === "running")) {
+    || dispatches.some(run => ["preparing", "running", "waiting"].includes(run.status))) {
     poll = setTimeout(() => void refresh(), 400);
   }
 }
@@ -400,11 +403,11 @@ async function refresh() {
     const snapshot = await response.json();
     if (revision !== cycle) return;
     applySnapshot(snapshot);
-    setError();
+    if (!actionError) setError();
     render();
   } catch {
     if (revision !== cycle) return;
-    setError("无法读取会话提问，请重新加载页面。");
+    if (!actionError) setError("无法读取会话提问，请重新加载页面。");
     if (!requests.length) render();
   }
   if (revision === cycle) later();
@@ -424,10 +427,10 @@ async function post(path, answers) {
     const response = await fetch(path, options);
     const snapshot = await response.json();
     applySnapshot(snapshot);
-    setError(response.ok ? "" : snapshot.error);
+    setError(response.ok ? "" : snapshot.error, !response.ok);
     return response.ok;
   } catch {
-    setError("发送失败，请刷新页面核对答复状态。");
+    setError("发送失败，请刷新页面核对答复状态。", true);
     return false;
   } finally {
     busy = false;
