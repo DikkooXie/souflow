@@ -301,6 +301,17 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
     assert.equal((await post(`${path}/start`, { id: run.id })).status, 200);
     const pending = await waitFor(snapshot => snapshot.requests.length === 2 ? snapshot : undefined);
     assert.deepEqual([...started].sort(), ["T1", "T2"]);
+    const monitor = async () => {
+      const response = await fetch(`${url}/api/dispatch-status`);
+      assert.equal(response.status, 200);
+      const { jobs } = await response.json() as { jobs: {
+        batchId: string; ticketId: string; status: string; reviewing: boolean; waitingOn: string[];
+      }[] };
+      return jobs.filter(job => job.batchId === run.id);
+    };
+    const monitored = await monitor();
+    assert.deepEqual(monitored.find(job => job.ticketId === "T3")?.waitingOn, ["T2", "T1"]);
+    assert.deepEqual(monitored.filter(job => job.reviewing).map(job => job.ticketId).sort(), ["T1", "T2"]);
     const first = pending.requests.find(card => card.title.includes("T1"));
     const second = pending.requests.find(card => card.title.includes("T2"));
     assert.ok(first && second);
@@ -332,6 +343,7 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
     }
     const final = await waitFor(snapshot => snapshot.dispatches.find(item => item.status === "finished" || item.status === "failed"));
     assert.equal(final.status, outcome === "approved" ? "finished" : "failed");
+    assert.equal((await monitor()).find(job => job.ticketId === "T4")?.status, outcome === "approved" ? "ready" : "blocked");
     assert.deepEqual(started.slice(2), outcome === "approved" ? ["T3", "T4"] : []);
     assert.equal(final.jobs.find(job => job.id === "T4")?.status, outcome === "approved" ? "ready" : "blocked");
     assert.match(final.jobs.find(job => job.id === "T3")?.error ?? "", outcome === "tampered-after" ? /前置补丁/ : /^$/);

@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { startCodexQuestionAttempt } from "../src/execution/codex-command-attempt.mts";
+import type { DispatchMonitor } from "../src/execution/dispatch-monitor.mts";
 import { type Flow, phases } from "../src/planning/conversation-flow.mts";
 import { createWorkbenchServer } from "../src/workbench/demo-server.mts";
 import type { DecisionCard } from "../src/workbench/demo-state.mts";
@@ -104,6 +105,14 @@ test("real App Server question replies reach their originating sessions through 
   const post = (url: string, body: object) => fetch(origin + url, {
     method: "POST", headers: { origin, "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
+  async function monitor() {
+    const result = await fetch(`${origin}/api/dispatch-status`);
+    assert.equal(result.status, 200);
+    const { hosts } = await result.json() as ReturnType<DispatchMonitor["snapshot"]>;
+    assert.equal(hosts.length, 1);
+    assert.ok(hosts[0]);
+    return hosts[0];
+  }
   async function waitFor(predicate: (cards: DecisionCard[]) => boolean) {
     const deadline = Date.now() + 9000;
     for (;;) {
@@ -125,12 +134,19 @@ test("real App Server question replies reach their originating sessions through 
   const [, b] = await waitFor(cards => cards.length === 2);
   assert.ok(b);
   assert.notEqual(a.id, b.id);
+  const waiting = (await monitor()).active;
+  assert.deepEqual(waiting.map(session => [session.title, session.status, session.model]), [
+    ["会话 A 的游戏", "waiting", model], ["会话 B 的游戏", "waiting", model],
+  ]);
+  assert.ok(waiting.every(session => session.threadId));
+  assert.notEqual(waiting[0]?.threadId, waiting[1]?.threadId);
   const second = `/api/decisions/${b.id}/answer`;
   assert.equal((await post(second, { wrong: "Python" })).status, 422);
   assert.equal((await post(second, { language: "Python" })).status, 200);
   assert.equal((await post(second, { language: "Python" })).status, 409);
   const [unchanged] = await waitFor(cards => cards[1]?.status === "closed" && results.has("b"));
   assert.equal(unchanged?.status, "pending");
+  assert.equal((await monitor()).active.find(session => session.id === waiting[0]?.id)?.status, "waiting");
   assert.equal(results.has("a"), false);
   assert.equal((await post(`/api/decisions/${a.id}/answer`, { language: "TypeScript" })).status, 200);
   await waitFor(cards => cards[0]?.status === "closed" && results.has("a"));
