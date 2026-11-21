@@ -59,7 +59,7 @@ const examples = [
 
 const event = (label: string) => ({ label, at: new Date().toISOString() });
 
-export function createDecisionDemo(receiptDelay = 650, record?: RecordBusiness) {
+export function createDecisionDemo(receiptDelay = 650, record?: RecordBusiness, answerMaxLength?: number) {
   let requests = seed();
   const waiting = new Map<string, (answer: string | undefined) => void>();
   let closed = false;
@@ -132,7 +132,7 @@ export function createDecisionDemo(receiptDelay = 650, record?: RecordBusiness) 
       const request = requests.find(entry => entry.id === id);
       if (!request) return 404;
       if (request.status !== "pending") return 409;
-      const answers = readDecisionAnswers(request.questions, input);
+      const answers = readDecisionAnswers(request.questions, input, answerMaxLength);
       if (!answers) return 422;
       request.status = "submitted";
       request.answers = answers;

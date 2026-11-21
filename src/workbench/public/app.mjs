@@ -26,6 +26,7 @@ const drafts = new Map();
 let requests = [];
 let flows = [];
 let phases = [];
+let answerMaxLength;
 let selectedFlow;
 let selected;
 let renderedDetail;
@@ -269,7 +270,7 @@ function addQuestion(container, question, draft) {
   const hasFreeText = choices.length === 0;
   const custom = node("input", "custom-answer");
   custom.type = "text";
-  custom.maxLength = 1000;
+  custom.maxLength = answerMaxLength;
   custom.value = current.text;
   custom.placeholder = "填写你的回答";
   custom.setAttribute("aria-label", `${question.prompt} 自定义回答`);
@@ -321,6 +322,8 @@ function later() {
 
 function applySnapshot(snapshot) {
   if (snapshot.requests) {
+    promptBox.maxLength = snapshot.inputLimits.promptMaxLength;
+    answerMaxLength = snapshot.inputLimits.answerMaxLength;
     requests = snapshot.requests;
     flows = snapshot.flows ?? [];
     phases = snapshot.phases ?? [];

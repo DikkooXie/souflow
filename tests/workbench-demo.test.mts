@@ -1,15 +1,24 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
 import type { Flow } from "../src/planning/conversation-flow.mts";
 import { createWorkbenchServer } from "../src/workbench/demo-server.mts";
 import type { createDecisionDemo } from "../src/workbench/demo-state.mts";
 
-type Snapshot = ReturnType<ReturnType<typeof createDecisionDemo>["snapshot"]> & { flows: Flow[] };
+type Snapshot = ReturnType<ReturnType<typeof createDecisionDemo>["snapshot"]> & {
+  flows: Flow[];
+  inputLimits: { promptMaxLength: number; answerMaxLength: number };
+};
 
-async function start(t: TestContext, live?: Parameters<typeof createWorkbenchServer>[1]) {
-  const server = createWorkbenchServer(100, live);
+async function start(t: TestContext, live?: Parameters<typeof createWorkbenchServer>[1], limits?: Parameters<typeof createWorkbenchServer>[3]) {
+  const server = createWorkbenchServer(100, live, undefined, limits);
   t.after(async () => {
     await new Promise<void>((resolve, reject) => {
       server.close(error => error ? reject(error) : resolve());
@@ -110,10 +119,72 @@ test("rejects a new workflow when existing Codex sessions have filled capacity",
     let close!: () => void;
     const finished = new Promise<"interrupted">(resolve => { close = () => resolve("interrupted"); });
     return { finished, close, answerQuestions: () => false, output: () => undefined };
-  }]);
-  for (let session = 0; session < 4; session += 1) {
+  }], { limits: { codex: 2, demo: 24 } });
+  for (let session = 0; session < 2; session += 1) {
     assert.equal((await post("/api/sessions", { prompt: `澄清会话 ${session}` })).status, 200);
   }
   assert.equal((await post("/api/workflows", { prompt: "开发一个游戏" })).status, 409);
+  const capacity = await post("/api/sessions", { prompt: "超出配置的会话" });
+  assert.equal(capacity.status, 409);
+  assert.match((await capacity.json()).error, /已有 2 条会话进行中/);
   assert.deepEqual((await read()).flows, []);
+});
+
+test("loads local environment settings at startup and keeps the file off HTTP", { timeout: 5000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), "souflow-env-"));
+  const auditPath = join(dir, "from-dotenv.sqlite");
+  await writeFile(join(dir, ".env"), [
+    "SOULFLOW_DEMO_PORT=0",
+    "SOULFLOW_DEMO_MAX_CONCURRENT=1",
+    "SOULFLOW_PROMPT_MAX_LENGTH=8000",
+    "SOULFLOW_ANSWER_MAX_LENGTH=6",
+    "SOULFLOW_AUDIT_REPEAT_CLICK_MS=600",
+    "SOULFLOW_AUDIT_QUICK_RETURN_MS=1500",
+    "SOULFLOW_AUDIT_INSIGHT_MIN_COUNT=1",
+    `SOULFLOW_AUDIT_DB="${auditPath}"`,
+    "OPENAI_API_KEY=synthetic-test-value",
+  ].join("\n"), { mode: 0o600 });
+  const entry = fileURLToPath(new URL("../src/workbench/demo-server.mts", import.meta.url));
+  const child = spawn(process.execPath, ["--experimental-strip-types", entry], {
+    cwd: dir, env: { SOULFLOW_DEMO_MAX_CONCURRENT: "2" }, stdio: ["ignore", "pipe", "inherit"],
+  });
+  const closed = once(child, "close");
+  t.after(async () => {
+    child.kill();
+    try {
+      await closed;
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+  const lines = createInterface({ input: child.stdout });
+  const first = await Promise.race([once(lines, "line", { signal: t.signal }), closed.then(() => [])]);
+  const origin = /^Soulflow 决策收件箱 (http:\/\/127\.0\.0\.1:\d+)/.exec(String(first[0]))?.[1];
+  assert.ok(origin, "the demo server should announce its bound address");
+  assert.ok((await stat(auditPath)).isFile());
+  const envResponse = await fetch(`${origin}/.env`);
+  assert.equal(envResponse.status, 404);
+  assert.doesNotMatch(await envResponse.text(), /synthetic-test-value/);
+  const snapshot = await (await fetch(`${origin}/api/decisions`)).json() as Snapshot;
+  assert.deepEqual(snapshot.inputLimits, { promptMaxLength: 8000, answerMaxLength: 6 });
+  const report = await fetch(`${origin}/api/audit`);
+  assert.equal(report.status, 200);
+  assert.deepEqual((await report.json()).thresholds, { repeatClickMs: 600, quickReturnMs: 1500, insightMinCount: 1 });
+  const firstCard = snapshot.requests[0];
+  assert.ok(firstCard);
+  const post = (path: string, body: object) => fetch(origin + path, {
+    method: "POST", headers: { origin, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const submit = (prompt: string) => post("/api/workflows", { prompt });
+  const widePrompt = "界".repeat(snapshot.inputLimits.promptMaxLength);
+  const overLimit = await submit(widePrompt + "外");
+  assert.equal(overLimit.status, 422);
+  assert.match((await overLimit.json()).error, /8000/);
+  assert.equal((await submit(widePrompt)).status, 200);
+  assert.equal((await submit("验证配置的流程上限")).status, 200);
+  assert.equal((await submit("第三个流程")).status, 409);
+  const answer = (genre: string) => post(`/api/decisions/${firstCard.id}/answer`, { language: "TypeScript", genre });
+  assert.equal((await answer("🎮🎮🎮外")).status, 422);
+  assert.equal((await answer("🎮🎮🎮")).status, 200);
 });

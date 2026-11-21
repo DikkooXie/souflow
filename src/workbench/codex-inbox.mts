@@ -14,14 +14,20 @@ const terminal = {
   "question-uncertain": { status: "uncertain", label: "答复回执待核对" },
 } as const;
 
-export function createCodexInbox(workspace: string, startAttempt: Start = startCodexQuestionAttempt, record?: RecordBusiness) {
+export function createCodexInbox(workspace: string, options: {
+  limit: number;
+  answerMaxLength: number;
+  startAttempt?: Start | undefined;
+  record?: RecordBusiness;
+}) {
+  const { limit, answerMaxLength, startAttempt = startCodexQuestionAttempt, record } = options;
   const requests: DecisionCard[] = [];
   const routes = new Map<string, Attempt>();
   const active = new Set<Attempt>();
   let sequence = 0;
   let lastMessage = "";
   let closed = false;
-  const canBegin = () => !closed && active.size < 4;
+  const canBegin = () => !closed && active.size < limit;
 
   function begin(prompt: string, step?: { flow: Flow; phase: Phase; complete: (output: string | undefined) => void }): 200 | 409 | 503 {
     if (!canBegin()) return 409;
@@ -61,7 +67,7 @@ export function createCodexInbox(workspace: string, startAttempt: Start = startC
     };
     try {
       const fields = step?.phase.fields;
-      attempt = startAttempt({ workspace, prompt, onEvent,
+      attempt = startAttempt({ workspace, prompt, onEvent, answerMaxLength,
         onModel: model => record?.({ kind: "model.started", ...trace, details: { model, phase: step?.phase.title } }),
         ...(fields ? { outputSchema: {
         type: "object", additionalProperties: false, required: fields,
@@ -101,7 +107,7 @@ export function createCodexInbox(workspace: string, startAttempt: Start = startC
       if (!request) return 404;
       const attempt = routes.get(id);
       if (!attempt || request.status !== "pending") return 409;
-      const answers = readDecisionAnswers(request.questions, input);
+      const answers = readDecisionAnswers(request.questions, input, answerMaxLength);
       if (!answers) return 422;
       if (!attempt.answerQuestions(id, answers)) return 409;
       request.status = "submitted";

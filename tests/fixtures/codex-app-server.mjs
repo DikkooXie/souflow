@@ -14,7 +14,7 @@ const question = {
     itemId: "question-1",
     questions: [{
       id: "language", header: "语言", question: "用什么语言？",
-      isSecret: scenario === "question-secret", isOther: false,
+      isSecret: scenario === "question-secret", isOther: scenario === "question-custom-length",
       options: [{ label: " TypeScript", description: "浏览器原型" }],
     }],
   },
@@ -110,8 +110,9 @@ input.on("line", line => {
   if (questionMode && message.id === question.id) {
     if (scenario === "question-lost-after-answer") process.exit(0);
     const denied = message.error?.code === -32601;
-    const answered = message.result?.answers?.language?.answers?.[0] === " TypeScript";
-    const status = (["question-valid", "question-output"].includes(scenario) ? answered : denied) ? "completed" : "failed";
+    const expected = scenario === "question-custom-length" ? "自".repeat(1200) : " TypeScript";
+    const answered = message.result?.answers?.language?.answers?.[0] === expected;
+    const status = (["question-valid", "question-output", "question-custom-length"].includes(scenario) ? answered : denied) ? "completed" : "failed";
     if (scenario === "question-output") {
       send(...["{\"result\":\"有效的中间产物\"}", "x".repeat(16_385)].map(text => ({
         method: "item/completed", params: { threadId, turnId, item: { type: "agentMessage", text } },

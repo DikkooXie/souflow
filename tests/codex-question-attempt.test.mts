@@ -9,7 +9,9 @@ import { type CodexAttemptEvent, startCodexQuestionAttempt } from "../src/execut
 
 const fixture = fileURLToPath(new URL("./fixtures/codex-app-server.mjs", import.meta.url));
 
-function runQuestion(t: TestContext, scenario: string, workspace: string, outputSchema?: Record<string, unknown>) {
+type Overrides = Pick<Parameters<typeof startCodexQuestionAttempt>[0], "outputSchema" | "answerMaxLength">;
+
+function runQuestion(t: TestContext, scenario: string, workspace: string, overrides?: Overrides) {
   const events: CodexAttemptEvent[] = [];
   let reportQuestion!: (event: Extract<CodexAttemptEvent, { kind: "question-requested" }>) => void;
   const requested = new Promise<Extract<CodexAttemptEvent, { kind: "question-requested" }>>(resolve => {
@@ -17,7 +19,7 @@ function runQuestion(t: TestContext, scenario: string, workspace: string, output
   });
   const attempt = startCodexQuestionAttempt({
     workspace, prompt: "验证需求澄清", command: [process.execPath, fixture, scenario],
-    ...(outputSchema ? { outputSchema } : {}),
+    ...overrides,
     onEvent(event) {
       events.push(event);
       if (event.kind === "question-requested") reportQuestion(event);
@@ -63,8 +65,19 @@ test("preserves option labels and expires or reconciles questions on disconnect"
 test("does not fall back to an earlier output when the final result exceeds the size limit", { timeout: 5000 }, async t => {
   const workspace = await mkdtemp(join(tmpdir(), "souflow-question-"));
   t.after(() => rm(workspace, { recursive: true }));
-  const { attempt, requested } = runQuestion(t, "question-output", workspace, { type: "object" });
+  const { attempt, requested } = runQuestion(t, "question-output", workspace, { outputSchema: { type: "object" } });
   assert.equal(attempt.answerQuestions((await requested).requestId, { language: " TypeScript" }), true);
   assert.equal(await attempt.finished, "completed");
   assert.equal(attempt.output(), undefined);
+});
+
+test("uses the configured custom answer limit in the Codex adapter", { timeout: 5000 }, async t => {
+  const workspace = await mkdtemp(join(tmpdir(), "souflow-question-limit-"));
+  t.after(() => rm(workspace, { recursive: true }));
+  const { attempt, requested } = runQuestion(t, "question-custom-length", workspace, { answerMaxLength: 1200 });
+  const { requestId } = await requested;
+  const boundary = "自".repeat(1200);
+  assert.equal(attempt.answerQuestions(requestId, { language: boundary + "外" }), false);
+  assert.equal(attempt.answerQuestions(requestId, { language: boundary }), true);
+  assert.equal(await attempt.finished, "completed");
 });

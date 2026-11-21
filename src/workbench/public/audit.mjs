@@ -80,6 +80,12 @@ export function createAuditView(node) {
   }
 
   function render(report) {
+    const { repeatClickMs, quickReturnMs, insightMinCount } = report.thresholds;
+    const seconds = ms => formatNumber.format(ms / 1000);
+    document.querySelector("#audit-click-rule").textContent =
+      `同一标签页、同一视图，${seconds(repeatClickMs)} 秒内连续操作同一控件和对象，计为重复。`;
+    document.querySelector("#audit-return-rule").textContent =
+      `同一标签页内，${seconds(quickReturnMs)} 秒内切回上一个视图，计为一次快速返回。`;
     const metrics = [["提交需求", "request.submitted"], ["决策答复", "decision.answered"], ["控件操作", "ui.click"], ["视图切换", "ui.navigate"]];
     document.querySelector("#audit-totals").replaceChildren(...metrics.map(([label, key]) => {
       const pair = node("div", "audit-total");
@@ -90,12 +96,13 @@ export function createAuditView(node) {
     const clickName = entry => controls[entry.control] ?? entry.control;
     ranking("#audit-clicks", report.clicks, clickName, entry => `${entry.repeated} 次重复`, "暂无控件操作。");
     ranking("#audit-paths", report.transitions, pathName, entry => `${entry.reversals} 次快速返回`, "暂无视图切换。");
-    const frequent = report.transitions.filter(entry => entry.reversals >= 3).slice(0, 3).map(entry =>
+    const frequent = report.transitions.filter(entry => entry.reversals >= insightMinCount).slice(0, 3).map(entry =>
       `${pathName(entry)}有 ${entry.reversals} 次快速返回。可以试验把常用内容并排展示，或在当前页面内展开。`);
-    const repeated = report.clicks.filter(entry => entry.repeated >= 3).slice(0, 2).map(entry =>
+    const repeated = report.clicks.filter(entry => entry.repeated >= insightMinCount).slice(0, 2).map(entry =>
       `「${clickName(entry)}」有 ${entry.repeated} 次连续重复。可检查是否缺少操作反馈，或是否适合合并操作。`);
     const insights = [...frequent, ...repeated];
-    document.querySelector("#audit-insights").replaceChildren(...(insights.length ? insights : ["当前范围暂无达到 3 次的重复或快速返回。"])
+    const empty = `当前范围暂无达到 ${formatNumber.format(insightMinCount)} 次的重复或快速返回。`;
+    document.querySelector("#audit-insights").replaceChildren(...(insights.length ? insights : [empty])
       .map(insight => node("li", "", insight)));
     renderLog(report);
   }
