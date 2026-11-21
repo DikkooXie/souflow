@@ -11,6 +11,7 @@ export function createArchive(node, reportView, post) {
   const drafts = new Map();
   let selection;
   let planMaxLength;
+  let canEdit;
   let displayedFlow;
   const versionKey = artifact => `${artifact.id}:${artifact.version}`;
 
@@ -48,7 +49,7 @@ export function createArchive(node, reportView, post) {
       ?? current.find(entry => entry.kind === "prd") ?? current[0];
     const historical = archived.includes(artifact);
     selection = { id: artifact.id, version: historical ? artifact.version : undefined };
-    const documentKey = `${versionKey(artifact)}:${historical}:${flow.status}`;
+    const documentKey = `${versionKey(artifact)}:${historical}:${flow.status}:${canEdit}`;
     for (const button of list.querySelectorAll("button")) {
       if (button.dataset.key === versionKey(artifact)) button.setAttribute("aria-current", "true");
       else button.removeAttribute("aria-current");
@@ -59,7 +60,7 @@ export function createArchive(node, reportView, post) {
     const heading = node("h3", "", title);
     heading.id = "archive-document-title";
     reader.replaceChildren(heading, node("p", "archive-version", `v${artifact.version}${historical ? " · 历史版本" : ""}`));
-    if (artifact.kind === "development-plan" && !historical && flow.status === "ready") {
+    if (canEdit && artifact.kind === "development-plan" && !historical && flow.status === "ready") {
       const tools = node("div", "plan-edit-tools");
       const edit = node("button", "button plan-edit-button", "修改计划");
       edit.type = "button";
@@ -158,8 +159,9 @@ export function createArchive(node, reportView, post) {
         reportView();
       }
     },
-    update(flow, maxLength) {
+    update(flow, maxLength, allowEdit) {
       planMaxLength = maxLength;
+      canEdit = allowEdit;
       if (dialog.open && !render(flow)) dialog.close();
     },
   };
