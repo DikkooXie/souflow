@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { auditDecisionAnswers, type RecordBusiness } from "../audit/activity-store.mts";
 import { readDecisionAnswers } from "../decisions/questions.mts";
 import { startCodexQuestionAttempt, type CodexAttemptEvent } from "../execution/codex-command-attempt.mts";
+import type { DispatchMonitor } from "../execution/dispatch-monitor.mts";
 import { type Flow, makePhasePrompt, type Phase, type PhaseTarget, readPhaseOutput } from "../planning/conversation-flow.mts";
 import type { DecisionCard } from "./demo-state.mts";
 
@@ -19,8 +20,9 @@ export function createCodexInbox(workspace: string, options: {
   answerMaxLength: number;
   startAttempt?: Start | undefined;
   record?: RecordBusiness;
+  monitor?: DispatchMonitor;
 }) {
-  const { limit, answerMaxLength, startAttempt = startCodexQuestionAttempt, record } = options;
+  const { limit, answerMaxLength, startAttempt = startCodexQuestionAttempt, record, monitor } = options;
   const requests: DecisionCard[] = [];
   const routes = new Map<string, Attempt>();
   const active = new Set<Attempt>();
@@ -36,12 +38,14 @@ export function createCodexInbox(workspace: string, options: {
     const trace = { attemptId, flowId };
     const session = `Codex · 会话 ${++sequence}`;
     const title = [...prompt.split("\n")[0] ?? prompt].slice(0, 40).join("");
+    const monitored = monitor?.begin({ title: step?.flow.title ?? title, task: step?.phase.title ?? "直接澄清", flowId });
     let asked = false;
     let unanswered = false;
     let attempt: Attempt;
     const onEvent = (event: CodexAttemptEvent) => {
       if (!("requestId" in event) || !active.has(attempt)) return;
       if (event.kind === "question-requested") {
+        monitored?.waiting(true);
         asked = true;
         routes.set(event.requestId, attempt);
         requests.push({
@@ -64,17 +68,23 @@ export function createCodexInbox(workspace: string, options: {
       request.timeline.push(at(update.label));
       record?.({ kind: "decision.updated", ...trace, subject: request.id, details: { status: update.status } });
       routes.delete(request.id);
+      monitored?.waiting([...routes.values()].includes(attempt));
     };
     try {
       const fields = step?.phase.fields;
       attempt = startAttempt({ workspace, prompt, onEvent, answerMaxLength,
         ...(step?.flow.project ? { disableWebSearch: true } : {}),
-        onModel: model => record?.({ kind: "model.started", ...trace, details: { model, phase: step?.phase.title } }),
+        ...(monitored ? { onThread: monitored.connected } : {}),
+        onModel: model => {
+          monitored?.model(model);
+          record?.({ kind: "model.started", ...trace, details: { model, phase: step?.phase.title } });
+        },
         ...(fields ? { outputSchema: {
         type: "object", additionalProperties: false, required: fields,
         properties: Object.fromEntries(fields.map(key => [key, { type: "string" }])),
       } } : {}) });
     } catch {
+      monitored?.finish("failed");
       return 503;
     }
     if (!step) record?.({ kind: "request.submitted", ...trace, details: { text: prompt } });
@@ -82,6 +92,7 @@ export function createCodexInbox(workspace: string, options: {
     active.add(attempt);
     lastMessage = "";
     void attempt.finished.then(outcome => {
+      monitored?.finish(outcome);
       active.delete(attempt);
       record?.({ kind: "attempt.finished", ...trace, details: { outcome } });
       if (step) step.complete(outcome === "completed" && !unanswered ? attempt.output() : undefined);

@@ -1,0 +1,74 @@
+body:has(#monitor-dialog[open]) { overflow: hidden; }
+.monitor-dialog {
+  --monitor-background: #19162b;
+  --monitor-panel: #252139;
+  --monitor-border: #42395a;
+  --monitor-muted: #bbb2d1;
+  --monitor-active: #8ce0b3;
+  --monitor-waiting: #ffd38c;
+  --monitor-animation: monitor-pulse 2.4s ease-in-out infinite;
+  width: min(940px, calc(100% - 36px));
+  color: #f7f3ff;
+  background: var(--monitor-background);
+  border-color: var(--monitor-border);
+}
+.monitor-dialog .archive-header { border-color: var(--monitor-border); }
+.monitor-body { overflow: auto; padding: 18px 24px 28px; }
+.monitor-link { margin-bottom: 18px; font-size: .875rem; color: var(--monitor-active); }
+.monitor-link::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-inline-end: 8px; border-radius: 50%; background: currentColor; }
+.monitor-dialog[data-connection="offline"] .monitor-link { color: var(--monitor-waiting); }
+.monitor-grid { display: grid; grid-template-columns: minmax(155px, 1fr) minmax(0, 3fr); gap: 24px; }
+.monitor-grid h3 { margin-block: 0 9px; font-size: .875rem; color: var(--monitor-muted); }
+.monitor-hosts, .monitor-sessions, .monitor-timeline { list-style: none; padding: 0; margin: 0; }
+.monitor-host, .monitor-session, .monitor-empty {
+  padding: 12px 14px;
+  margin-bottom: 8px;
+  border: 1px solid var(--monitor-border);
+  border-radius: 9px;
+}
+.monitor-host, .monitor-session { background: var(--monitor-panel); overflow-wrap: anywhere; }
+.monitor-host strong, .monitor-host span { display: block; }
+.monitor-session { border-inline-start: 3px solid var(--monitor-border); }
+.monitor-session[data-state="running"] { border-inline-start-color: var(--monitor-active); }
+.monitor-session[data-state="waiting"] { border-inline-start-color: var(--monitor-waiting); }
+.monitor-session-heading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
+.monitor-badge { font-size: .78rem; color: var(--monitor-muted); }
+.monitor-session[data-state="running"] .monitor-badge { color: var(--monitor-active); }
+.monitor-session[data-state="running"] .monitor-badge::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-inline-end: 6px;
+  background: currentColor;
+  border-radius: 50%;
+  animation: var(--monitor-animation);
+}
+.monitor-session[data-state="waiting"] .monitor-badge { color: var(--monitor-waiting); }
+.monitor-project, .monitor-meta, .monitor-empty { font-size: .82rem; color: var(--monitor-muted); }
+.monitor-project, .monitor-meta { margin-block: 5px; }
+.monitor-timeline { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-block: 8px 4px; font-size: .76rem; }
+.monitor-timeline li { border-top: 1px solid var(--monitor-border); padding-top: 4px; color: var(--monitor-muted); }
+.monitor-timeline time { margin-inline-start: 6px; font-variant-numeric: tabular-nums; }
+.monitor-open-flow { border: 0; background: transparent; padding: 6px 0 0; color: #d4c5ff; font-size: .8rem; text-decoration: underline; text-underline-offset: .2em; }
+.monitor-history { margin-top: 14px; }
+.monitor-history summary { cursor: pointer; padding-block: 8px; }
+.monitor-dialog[data-connection="offline"] { --monitor-animation: none; }
+@keyframes monitor-pulse { 50% { box-shadow: 0 0 0 5px #8ce0b330; } }
+@media (prefers-reduced-motion: reduce) {
+  .monitor-dialog { --monitor-animation: none; }
+}
+@media (max-width: 680px) {
+  .monitor-grid { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .monitor-body { padding-inline: 15px; }
+}
+@media (max-width: 480px) {
+  body:has(#open-monitor:not([hidden])) { --topbar-height: 88px; }
+  .topbar:has(#open-monitor:not([hidden])) {
+    flex-direction: column;
+    justify-content: center;
+    align-items: stretch;
+    gap: 4px;
+  }
+  .topbar:has(#open-monitor:not([hidden])) .topbar-actions { justify-content: flex-end; }
+}

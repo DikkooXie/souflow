@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { createLocalDispatch, readDispatchTickets, runLocalJobs } from "../src/execution/local-dispatch.mts";
 import { applyLocalCodeChanges, readEditableFile, replayLocalCodePatch } from "../src/execution/local-code-changes.mts";
 import type { Flow } from "../src/planning/conversation-flow.mts";
+import { createDispatchMonitor } from "../src/execution/dispatch-monitor.mts";
 
 const exec = promisify(execFile);
 const guide = "docs/guide.md";
@@ -162,8 +163,9 @@ test("prepares without executing, rejects stale confirmation and reads only the 
   const classified = draft.map(ticket => ({
     ...ticket, difficulty: ticket.id === "T2" ? "advanced" : "routine", routingReason: `核对 ${ticket.id} 的验收范围`,
   }));
+  const monitor = createDispatchMonitor("测试机器");
   const dispatch = createLocalDispatch(repo, 2, {
-    routing,
+    routing, monitor,
     split(options) {
       assert.equal(options.disableWebSearch, true);
       assert.doesNotMatch(options.prompt, /docs\/linked\.md/);
@@ -223,5 +225,20 @@ test("prepares without executing, rejects stale confirmation and reads only the 
   assert.equal(new Set(actualWorkspaces).size, 3);
   assert.equal(new Set(done.jobs.map(job => job.threadId)).size, 3);
   assert.deepEqual(done.jobs.map(job => job.model), ["fixture-sol", "fixture-astra", "fixture-sol"]);
+  const host = monitor.snapshot().hosts[0];
+  assert.ok(host);
+  assert.equal(host.name, "测试机器");
+  assert.deepEqual(host.active, []);
+  for (const job of done.jobs) {
+    const session: (typeof host.recent)[number] | undefined = host.recent.find(item => item.ticketId === job.id);
+    assert.ok(session);
+    assert.equal(session.batchId, done.id);
+    assert.equal(session.flowId, flow.id);
+    assert.equal(session.planVersion, 1);
+    assert.equal(session.threadId, job.threadId);
+    assert.equal(session.model, job.model);
+    assert.equal(session.status, "completed");
+    assert.ok(session.connectedAt && session.finishedAt && session.finishedAt >= session.connectedAt);
+  }
   assert.equal(JSON.parse(await readFile(join(done.directory ?? "", "run.json"), "utf8")).status, "finished");
 });

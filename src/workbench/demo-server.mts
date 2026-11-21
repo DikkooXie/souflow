@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
+import { hostname } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { defaultAuditThresholds, openActivityStore, readActivity } from "../audit/activity-store.mts";
+import { defaultAuditThresholds, openActivityStore, readActivity, scrubAuditText } from "../audit/activity-store.mts";
 import { defaultAnswerMaxLength, maxQuestionsPerDecision } from "../decisions/questions.mts";
 import { codeReviewOptions, createLocalDispatch } from "../execution/local-dispatch.mts";
+import { createDispatchMonitor } from "../execution/dispatch-monitor.mts";
 import { createConversationFlows, maxArtifactTextLength, phases, readPlanRevision } from "../planning/conversation-flow.mts";
 import { createProjectContextReader, type ProjectSettings } from "../planning/project-context.mts";
 import { createCodexInbox } from "./codex-inbox.mts";
@@ -23,6 +25,8 @@ const files = [
   ["/archive.mjs", "archive.mjs", "text/javascript"],
   ["/dispatch.mjs", "dispatch.mjs", "text/javascript"],
   ["/audit.mjs", "audit.mjs", "text/javascript"],
+  ["/dispatch-monitor.mjs", "dispatch-monitor.mjs", "text/javascript"],
+  ["/dispatch-monitor.css", "dispatch-monitor.css", "text/css"],
 ] as const;
 
 async function readJson(request: IncomingMessage, maxBytes = jsonMetadataBudget): Promise<{ value: unknown } | { status: number; error: string }> {
@@ -49,11 +53,12 @@ type WorkbenchOptions = {
   dispatchConcurrency?: number;
   dispatchAdapters?: Omit<NonNullable<Parameters<typeof createLocalDispatch>[2]>, "record">;
   project?: ProjectSettings;
+  hostName?: string;
 };
 
 export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions, auditPath?: string, {
   limits = defaultLimits, inputLimits = defaultInputLimits, auditThresholds = defaultAuditThresholds,
-  dispatchConcurrency = defaultDispatchConcurrency, dispatchAdapters, project,
+  dispatchConcurrency = defaultDispatchConcurrency, dispatchAdapters, project, hostName = hostname(),
 }: WorkbenchOptions = {}) {
   const loadProject = live && project ? createProjectContextReader(live[0], project) : undefined;
   const audit = openActivityStore(auditPath, Date.now, auditThresholds);
@@ -62,12 +67,16 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
   const promptBodyBytes = jsonMetadataBudget + 6 * promptMaxLength;
   const answerBodyBytes = jsonMetadataBudget + 6 * answerMaxLength * maxQuestionsPerDecision;
   const demo = createDecisionDemo(receiptDelay, audit.record, answerMaxLength);
+  const monitor = live ? createDispatchMonitor(hostName) : undefined;
   const codex = live ? createCodexInbox(live[0], {
     limit: limits.codex, answerMaxLength, startAttempt: live[1], record: audit.record,
+    ...(monitor ? { monitor } : {}),
   }) : undefined;
   const inbox = codex ?? demo;
   const flows = createConversationFlows(inbox.runPhase, codex ? limits.codex : limits.demo, audit.record, loadProject);
-  const dispatch = live ? createLocalDispatch(live[0], dispatchConcurrency, { ...dispatchAdapters, record: audit.record }) : undefined;
+  const dispatch = live ? createLocalDispatch(live[0], dispatchConcurrency, { ...dispatchAdapters, record: audit.record,
+    ...(monitor ? { monitor } : {}),
+  }) : undefined;
   const snapshot = () => {
     const conversations = flows.list();
     const reviewCards = dispatch?.reviews().map(({ run, job, artifact, patchPath, successors }): DecisionCard => ({
@@ -112,6 +121,15 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
     }
     if (request.method === "GET") {
       if (path === "/api/decisions") return send(200, snapshot());
+      if (path === "/api/dispatch-status" && monitor && dispatch) {
+        const names = new Map(flows.list().map(flow => [flow.id, scrubAuditText(flow.title)]));
+        return send(200, { ...monitor.snapshot(), waiting: dispatch.list().filter(run => run.status === "running" || run.status === "waiting")
+          .flatMap(run => run.jobs.filter(job => job.status === "queued").map(job => ({
+            flowId: run.flowId, batchId: run.id, planVersion: run.plan.version, ticketId: job.id, task: scrubAuditText(job.title),
+            title: names.get(run.flowId), dependsOn: job.dependsOn,
+          }))),
+        });
+      }
       if (path === "/api/audit" || path.startsWith("/api/audit?")) {
         if (request.headers["sec-fetch-site"] === "cross-site") return send(403, { error: "请在本机工作台查看活动记录。" });
         const range = new URLSearchParams(path.split("?")[1]).get("days") ?? "7";
@@ -273,8 +291,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const githubRepo = process.env.SOULFLOW_PROJECT_GITHUB_REPO?.trim();
   const advanced = process.env.SOULFLOW_CODEX_PLANNING_MODEL?.trim();
   const routine = process.env.SOULFLOW_CODEX_EXECUTION_MODEL?.trim();
+  const hostName = process.env.SOULFLOW_HOST_NAME?.trim();
   const server = createWorkbenchServer(undefined, live ? [process.cwd()] : undefined, auditPath, {
     limits, inputLimits, auditThresholds, dispatchConcurrency,
+    ...(hostName ? { hostName } : {}),
     ...(planPath || githubRepo ? { project: { ...(planPath ? { planPath } : {}), ...(githubRepo ? { githubRepo } : {}) } } : {}),
     ...(advanced && routine && advanced !== routine ? { dispatchAdapters: { routing: { advanced, routine } } } : {}),
   });
