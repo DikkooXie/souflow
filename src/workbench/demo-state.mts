@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { auditDecisionAnswers, type RecordBusiness } from "../audit/activity-store.mts";
 import { type DecisionQuestion, readDecisionAnswers } from "../decisions/questions.mts";
 import type { Flow, Phase } from "../planning/conversation-flow.mts";
 
@@ -8,6 +9,7 @@ export type DecisionCard = {
   session: string;
   title: string;
   flowId?: string;
+  attemptId?: string;
   prompt: string;
   questions: readonly DecisionQuestion[];
   status: Status;
@@ -57,9 +59,10 @@ const examples = [
 
 const event = (label: string) => ({ label, at: new Date().toISOString() });
 
-export function createDecisionDemo(receiptDelay = 650) {
+export function createDecisionDemo(receiptDelay = 650, record?: RecordBusiness) {
   let requests = seed();
   const waiting = new Map<string, (answer: string | undefined) => void>();
+  let closed = false;
 
   function seed(): DecisionCard[] {
     return examples.map(example => ({
@@ -67,14 +70,35 @@ export function createDecisionDemo(receiptDelay = 650) {
     }));
   }
 
+  function disconnect(id: string): 200 | 404 | 409 {
+    const request = requests.find(entry => entry.id === id);
+    if (!request) return 404;
+    if (request.status !== "pending" && request.status !== "submitted") return 409;
+    request.status = request.status === "pending" ? "expired" : "uncertain";
+    request.timeline.push(event("会话连接已断开"),
+      event(request.status === "expired" ? "待答问题已失效" : "答复回执待核对"));
+    record?.({ kind: "decision.updated", flowId: request.flowId, subject: id, details: { status: request.status } });
+    waiting.get(id)?.(undefined);
+    waiting.delete(id);
+    return 200;
+  }
+
+  function settlePending() {
+    for (const request of requests) if (request.flowId || request.status === "submitted") disconnect(request.id);
+  }
+
   return {
     snapshot: () => ({ requests, mode: "demo" as const }),
     reset() {
+      settlePending();
       requests = seed();
-      for (const resolve of waiting.values()) resolve(undefined);
-      waiting.clear();
+    },
+    close() {
+      closed = true;
+      settlePending();
     },
     async runPhase(flow: Flow, phase: Phase) {
+      if (closed) return;
       switch (phase.title) {
         case "调研": return ["梳理目标人群、主要使用场景、已有实现和可复用方案。", "本地演示使用样例，外部资料和项目现状需要实际调研。"];
         case "需求澄清": {
@@ -91,6 +115,7 @@ export function createDecisionDemo(receiptDelay = 650) {
                 ],
               }],
             });
+            record?.({ kind: "decision.opened", flowId: flow.id, subject: id, details: { phase: phase.title, count: 1 } });
           });
           if (answer) return [`原始需求：${flow.prompt}\n首版范围：${answer}`, "AC-1 · 可以完成首版核心场景。\nAC-2 · 可以观察结果和主要失败状态。"];
           return;
@@ -112,25 +137,17 @@ export function createDecisionDemo(receiptDelay = 650) {
       request.status = "submitted";
       request.answers = answers;
       request.timeline.push(event("已提交回答"));
+      record?.({ kind: "decision.answered", flowId: request.flowId, subject: id, details: { answers: auditDecisionAnswers(request.questions, answers) } });
       setTimeout(() => {
         if (!requests.includes(request) || request.status !== "submitted") return;
         request.status = "acknowledged";
         request.timeline.push(event("原会话已收到回答"));
+        record?.({ kind: "decision.updated", flowId: request.flowId, subject: id, details: { status: request.status } });
         waiting.get(id)?.(answers.scope);
         waiting.delete(id);
       }, receiptDelay).unref();
       return 200;
     },
-    disconnect(id: string): 200 | 404 | 409 {
-      const request = requests.find(entry => entry.id === id);
-      if (!request) return 404;
-      if (request.status !== "pending" && request.status !== "submitted") return 409;
-      request.status = request.status === "pending" ? "expired" : "uncertain";
-      request.timeline.push(event("会话连接已断开"),
-        event(request.status === "expired" ? "待答问题已失效" : "答复回执待核对"));
-      waiting.get(id)?.(undefined);
-      waiting.delete(id);
-      return 200;
-    },
+    disconnect,
   };
 }

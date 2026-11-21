@@ -37,6 +37,7 @@ type Options = {
   workspace: string;
   prompt: string;
   onEvent: (event: CodexAttemptEvent) => void;
+  onModel?: (model: string) => void;
   command?: readonly [executable: string, ...args: string[]];
   outputSchema?: Record<string, unknown>;
 };
@@ -288,15 +289,16 @@ function startAttempt(options: Options, mode: "commands" | "questions") {
       ...(mode === "questions" ? { environments: [], config } : {}),
     }, result => {
       const thread = record(result.thread);
+      const model = result.model;
       if (typeof thread?.id !== "string" || !thread.id) return connectionLost();
-      if (mode === "questions" && typeof result.model !== "string") return connectionLost();
+      if (mode === "questions" && typeof model !== "string") return connectionLost();
       threadId = thread.id;
       startingTurn = true;
       call("turn/start", {
         threadId, input: [{ type: "text", text: options.prompt }],
         ...(options.outputSchema ? { outputSchema: options.outputSchema } : {}),
         ...(mode === "questions" ? { collaborationMode: {
-          mode: "plan", settings: { model: result.model, reasoning_effort: null, developer_instructions: null },
+          mode: "plan", settings: { model, reasoning_effort: null, developer_instructions: null },
         } } : {}),
       }, result => {
         const turn = record(result.turn);
@@ -304,6 +306,11 @@ function startAttempt(options: Options, mode: "commands" | "questions") {
           return connectionLost();
         }
         turnId = turn.id;
+        try {
+          if (mode === "questions" && typeof model === "string") options.onModel?.(model);
+        } catch {
+          return connectionLost();
+        }
         clearTimeout(startupDeadline);
         for (const message of earlyMessages.splice(0)) handleMethod(message.method, message.id, message.params);
       });

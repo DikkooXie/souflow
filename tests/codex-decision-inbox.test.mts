@@ -165,4 +165,14 @@ test("real App Server question replies reach their originating sessions through 
     await delay(70);
   }
   await assert.rejects(stat(marker), { code: "ENOENT" });
+  const audit = await (await fetch(`${origin}/api/audit`)).json() as {
+    recent: { flowId: string | null; attemptId: string | null; subject: string | null; kind: string; details: { model?: string } }[];
+  };
+  const attempts = new Set([a, b].map(card => audit.recent.find(event => event.kind === "decision.opened" && event.subject === card.id)?.attemptId));
+  assert.equal(attempts.size, 2);
+  for (const id of attempts) {
+    assert.ok(id);
+    assert.ok(audit.recent.some(event => event.kind === "request.submitted" && event.attemptId === id));
+  }
+  assert.equal(audit.recent.filter(event => event.flowId === flowId && event.kind === "model.started" && event.details.model === model).length, 5);
 });
