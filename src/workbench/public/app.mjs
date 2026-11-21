@@ -1,3 +1,4 @@
+import { createArchive } from "./archive.mjs";
 import { createAuditView } from "./audit.mjs";
 
 const list = document.querySelector("#requests");
@@ -13,24 +14,30 @@ const promptBox = document.querySelector("#new-prompt");
 const template = document.querySelector("#detail-template");
 const welcome = document.querySelector("#welcome");
 const conversation = document.querySelector("#conversation");
-const phasesList = document.querySelector("#phases");
-const flowSelect = document.querySelector("#flow-select");
+const conversationMessage = document.querySelector("#conversation-message");
+const conversationStatus = document.querySelector("#conversation-status");
+const sidebarToggle = document.querySelector("#toggle-conversations");
+const sidebar = document.querySelector("#conversation-sidebar");
+const sidebarScrim = document.querySelector("#sidebar-scrim");
+const recent = document.querySelector("#recent-conversations");
+const recentEmpty = document.querySelector("#recent-empty");
+const compactLayout = matchMedia("(max-width: 680px)");
+const openArchive = document.querySelector("#open-archive");
 const dialog = document.querySelector("#decision-dialog");
 const decisionBody = dialog.querySelector(".decision-body");
 const auditButton = document.querySelector("#open-audit");
 const auditPanel = document.querySelector("#audit");
 const workspace = document.querySelector("#workspace");
 const audit = createAuditView(node);
+const archive = createArchive(node, reportView);
 const clock = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const drafts = new Map();
 let requests = [];
 let flows = [];
-let phases = [];
 let answerMaxLength;
 let selectedFlow;
 let selected;
 let renderedDetail;
-let renderedConversation;
 let renderedQueue;
 let busy = false;
 let cycle = 0;
@@ -63,6 +70,7 @@ function actionButton(text, style, handler) {
 
 function view() {
   if (dialog.open) return "decisions";
+  if (archive.visible) return "archive";
   if (auditOpen) return "audit";
   return selectedFlow ? "conversation" : "home";
 }
@@ -93,10 +101,53 @@ function openDecisions() {
   reportView();
 }
 
-function pickOption(entry) {
-  const option = node("option", "", entry.title);
-  option.value = entry.id;
-  return option;
+function updateSidebarOverlay() {
+  const overlays = compactLayout.matches && !sidebar.hidden;
+  sidebarScrim.hidden = !overlays;
+  workspace.inert = overlays;
+  auditPanel.inert = overlays;
+}
+
+function showSidebar(visible) {
+  sidebar.hidden = !visible;
+  sidebarToggle.setAttribute("aria-expanded", String(visible));
+  const label = visible ? "收起最近对话" : "展开最近对话";
+  sidebarToggle.setAttribute("aria-label", label);
+  sidebarToggle.title = label;
+  updateSidebarOverlay();
+}
+
+function selectFlow(id) {
+  selectedFlow = id;
+  if (compactLayout.matches) showSidebar(false);
+  showAudit(false);
+  if (!id) promptBox.focus();
+  else if (compactLayout.matches) document.querySelector("#conversation-title").focus();
+}
+
+function renderRecent() {
+  const ids = flows.map(flow => flow.id).join(",");
+  if (recent.dataset.ids !== ids) {
+    recent.dataset.ids = ids;
+    recentEmpty.hidden = flows.length > 0;
+    const focusedId = recent.contains(document.activeElement) ? document.activeElement.dataset.subject : undefined;
+    recent.replaceChildren(...flows.toReversed().map(flow => {
+      const entry = node("li");
+      const button = node("button", "recent-entry", flow.title);
+      button.type = "button";
+      button.title = flow.title;
+      button.dataset.track = "select-flow";
+      button.dataset.subject = flow.id;
+      button.addEventListener("click", () => selectFlow(flow.id));
+      entry.append(button);
+      return entry;
+    }));
+    if (focusedId) [...recent.querySelectorAll("button")].find(button => button.dataset.subject === focusedId)?.focus({ preventScroll: true });
+  }
+  for (const button of recent.querySelectorAll("button")) {
+    if (button.dataset.subject === selectedFlow) button.setAttribute("aria-current", "true");
+    else button.removeAttribute("aria-current");
+  }
 }
 
 function renderQueue(pending) {
@@ -149,7 +200,10 @@ function render() {
   const current = pending.find(request => request.id === selected) ?? pending[0];
   selected = current?.id;
   renderQueue(pending);
-  renderConversation(pending);
+  renderRecent();
+  const flow = flows.find(entry => entry.id === selectedFlow);
+  renderConversation(flow, pending);
+  archive.update(flow);
   // 另一会话收到回执时，保留当前会话表单的焦点及正在输入的文字。
   const detailKey = current ? `${current.id}:${current.timeline.length}` : "empty";
   if (detailKey === renderedDetail) return;
@@ -163,56 +217,19 @@ function render() {
   renderDetail(current);
 }
 
-function renderConversation(pending) {
-  const ids = flows.map(flow => flow.id).join(",");
-  if (flowSelect.dataset.ids !== ids) {
-    const newFlow = node("option", "", "新需求");
-    newFlow.value = "";
-    flowSelect.replaceChildren(newFlow, ...flows.map(pickOption));
-    flowSelect.dataset.ids = ids;
-  }
-  flowSelect.hidden = !flows.length;
-  flowSelect.value = selectedFlow ?? "";
-  const flow = flows.find(entry => entry.id === selectedFlow);
+function renderConversation(flow, pending) {
   welcome.hidden = !!flow;
   conversation.hidden = !flow;
-  promptBox.placeholder = flow ? "描述下一项需求…" : "描述你的需求…";
-  const waiting = !!flow && pending.some(request => request.flowId === flow.id);
-  const key = JSON.stringify([flow?.id, flow?.status, flow?.outputs.length, waiting, phases]);
-  if (key === renderedConversation) return;
-  renderedConversation = key;
-  phasesList.replaceChildren(...phases.map((phase, index) => {
-    const step = node("li", "phase", phase);
-    if (flow && index < flow.outputs.length) step.dataset.state = "done";
-    if (flow?.status === "running" && index === flow.outputs.length) step.setAttribute("aria-current", "step");
-    return step;
-  }));
-  if (!flow) {
-    conversation.replaceChildren();
-    return;
-  }
-  const open = new Set([...conversation.querySelectorAll("details[open]")].map(item => item.dataset.phase));
-  const note = flow.status === "ready" ? "草稿已就绪，可展开审阅。"
-    : flow.status === "failed" ? `${phases[flow.outputs.length]}阶段未取得有效结果，流程已停止。`
-      : waiting ? `${phases[flow.outputs.length]}正在等待你的决策。` : `正在推进${phases[flow.outputs.length]}…`;
-  const status = node("p", "flow-status", note);
-  status.setAttribute("role", "status");
-  const previousFlow = conversation.dataset.flow;
-  conversation.dataset.flow = flow.id;
-  const outputs = flow.outputs.map((output, index) => {
-    const section = node("details", "flow-output");
-    section.dataset.phase = output.title;
-    section.open = (previousFlow === flow.id && open.has(output.title)) || index === flow.outputs.length - 1;
-    const heading = node("summary", "", output.title);
-    heading.dataset.track = "open-artifact";
-    heading.dataset.subject = output.artifacts[0]?.id;
-    section.append(heading);
-    for (const { sections } of output.artifacts) {
-      for (const item of sections) section.append(node("h3", "", item.title), node("p", "", item.text));
-    }
-    return section;
-  });
-  conversation.replaceChildren(node("h1", "visually-hidden", "需求对话"), node("p", "user-message", flow.prompt), ...outputs, status);
+  promptBox.placeholder = flow ? "发起另一项需求…" : "描述你的需求…";
+  if (!flow) return;
+  if (conversationMessage.textContent !== flow.prompt) conversationMessage.textContent = flow.prompt;
+  const waiting = pending.some(request => request.flowId === flow.id);
+  const note = flow.status === "ready" ? "项目文档已就绪。"
+    : flow.status === "failed" ? "这项需求暂未完成。"
+      : waiting ? "有一个问题需要你决定。" : "正在推进你的需求…";
+  if (conversationStatus.textContent !== note) conversationStatus.textContent = note;
+  openArchive.hidden = !flow.outputs.some(output => output.artifacts.length);
+  openArchive.dataset.subject = flow.id;
 }
 
 function renderDetail(current) {
@@ -326,7 +343,6 @@ function applySnapshot(snapshot) {
     answerMaxLength = snapshot.inputLimits.answerMaxLength;
     requests = snapshot.requests;
     flows = snapshot.flows ?? [];
-    phases = snapshot.phases ?? [];
     if (snapshot.flowId) selectedFlow = snapshot.flowId;
     if (selectedFlow && !flows.some(flow => flow.id === selectedFlow)) selectedFlow = undefined;
     live = snapshot.mode === "codex";
@@ -393,25 +409,35 @@ document.addEventListener("click", event => {
   const control = event.target.closest?.("[data-track]");
   if (control) audit.click(view(), control.dataset.track, control.dataset.subject);
 }, { capture: true });
-document.querySelector("#home").addEventListener("click", () => { selectedFlow = undefined; showAudit(false); promptBox.focus(); });
+document.querySelector("#home").addEventListener("click", () => selectFlow());
+document.querySelector("#new-conversation").addEventListener("click", () => selectFlow());
+sidebarToggle.addEventListener("click", () => showSidebar(sidebar.hidden));
+sidebarScrim.addEventListener("click", () => { showSidebar(false); sidebarToggle.focus(); });
+compactLayout.addEventListener("change", updateSidebarOverlay);
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && !sidebar.hidden && !dialog.open && !archive.visible) {
+    showSidebar(false);
+    sidebarToggle.focus();
+  }
+});
 auditButton.addEventListener("click", () => {
+  if (compactLayout.matches) showSidebar(false);
   showAudit(!auditOpen);
   if (auditOpen) {
     document.querySelector("#audit-title").focus();
     void audit.refresh();
   }
 });
-document.querySelector("#open-decisions").addEventListener("click", openDecisions);
+document.querySelector("#open-decisions").addEventListener("click", () => {
+  if (compactLayout.matches) showSidebar(false);
+  openDecisions();
+});
 document.querySelector("#close-decision").addEventListener("click", () => dialog.close());
 dialog.addEventListener("close", () => {
   reportView();
   if (auditOpen) void audit.refresh();
 });
-flowSelect.addEventListener("change", () => {
-  audit.click(view(), "select-flow", flowSelect.value);
-  selectedFlow = flowSelect.value || undefined;
-  showAudit(false);
-});
+openArchive.addEventListener("click", () => archive.show(flows.find(entry => entry.id === selectedFlow)));
 promptBox.addEventListener("keydown", event => {
   if (event.key === "Enter" && !event.isComposing && !event.shiftKey) {
     event.preventDefault();
