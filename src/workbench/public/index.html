@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/style.css">
+    <script type="module" src="/app.mjs"></script>
+    <title>Soulflow</title>
+  </head>
+  <body>
+    <header class="topbar">
+      <button type="button" class="brand" aria-label="Soulflow 首页" id="home">
+        <span class="brand-mark" aria-hidden="true">✦</span><span>Soulflow</span>
+      </button>
+      <div class="topbar-actions">
+        <select id="flow-select" aria-label="选择需求对话" hidden></select>
+        <button type="button" id="open-decisions" class="inbox-button">待决策 <span id="count" aria-live="polite">0</span></button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section id="welcome" class="welcome" aria-labelledby="welcome-title">
+        <span class="brand-mark hero-mark" aria-hidden="true">✦</span>
+        <h1 id="welcome-title">今天想推进什么？</h1>
+        <p>描述你想做的事，Soulflow 会推进调研、需求澄清和交付规划。</p>
+      </section>
+      <section id="conversation" class="conversation" aria-label="需求对话" hidden></section>
+
+      <form id="start-session" class="composer">
+        <textarea id="new-prompt" name="new-prompt" aria-label="描述你的需求" placeholder="描述你的需求…" maxlength="4000" required></textarea>
+        <div class="composer-actions">
+          <span id="mode" class="mode-label">本地演示</span>
+          <button type="submit" class="send-button" aria-label="发送需求"><span aria-hidden="true">→</span></button>
+        </div>
+      </form>
+      <ol id="phases" class="phases" aria-label="任务阶段"></ol>
+      <p id="error" class="error" role="alert" hidden></p>
+    </main>
+
+    <aside id="bubble-dock" class="bubble-dock" aria-labelledby="bubble-title" hidden>
+      <h2 id="bubble-title">需要你决定</h2>
+      <ul id="requests" class="request-list"></ul>
+      <button type="button" id="more-decisions" class="quiet-button" hidden></button>
+    </aside>
+
+    <dialog id="decision-dialog" aria-labelledby="decision-title">
+      <header class="decision-header">
+        <h2 id="decision-title">决策收件箱</h2>
+        <button id="close-decision" type="button" class="icon-button" aria-label="关闭决策">×</button>
+      </header>
+      <select id="decision-select" aria-label="选择待决策事项" hidden></select>
+      <section id="detail" aria-label="当前决策"></section>
+      <p id="decision-error" class="error" role="alert" hidden></p>
+      <footer class="decision-footer">
+        <button type="button" id="reset" class="quiet-button">重置演示</button>
+      </footer>
+    </dialog>
+
+    <template id="detail-template">
+      <div class="detail-meta"><span class="ticket-key"></span><span class="status"></span></div>
+      <h3 class="ticket-title">当前提问</h3>
+      <p class="source-message"></p>
+      <form class="question-form">
+        <div class="questions"></div>
+        <div class="actions"></div>
+      </form>
+      <details class="history"><summary>时间线</summary><ol class="timeline"></ol></details>
+    </template>
+  </body>
+</html>
