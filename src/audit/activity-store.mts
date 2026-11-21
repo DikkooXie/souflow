@@ -36,6 +36,11 @@ const isId = (value: unknown): value is string => typeof value === "string" && u
 const artifactKinds = ["request", "research", "requirements", "technology", "prd", "development-plan", "ticket-drafts"];
 const credentialLabel = /(?:password|passphrase|api[_\s-]?key|private[_\s-]?key|secret|credentials?|authorization|(?:access|refresh|api|github|auth|bearer)[_\s-]?token|密码|口令|密钥|私钥|令牌|验证码)/i;
 const credentialField = (value: string) => /^(?:token|pin)$/i.test(value) || credentialLabel.test(value);
+const credentialAssignment = new RegExp(
+  String.raw`((?<![\w-])(?:[\w-]*(?:${credentialLabel.source}|token)|pin)["']?\s*[:=：]\s*)`
+    + String.raw`(?:(?:Bearer|Basic)[ \t]+)?(?:"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|[^\s,;，；]+)`,
+  "gi",
+);
 
 export function readActivity(input: unknown): Activity | undefined {
   if (!input || typeof input !== "object" || Array.isArray(input)) return;
@@ -60,9 +65,9 @@ export function readActivity(input: unknown): Activity | undefined {
 export function scrubAuditText(text: string) {
   return text
     .replace(/-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-\r\n]*PRIVATE KEY-----|$)/g, "[已隐藏私钥]")
+    .replace(credentialAssignment, "$1[已隐藏凭据]")
     .replace(/\b(?:sk-[\w-]{16,}|gh[pousr]_[\w-]{16,}|github_pat_[\w-]{16,})\b/g, "[已隐藏凭据]")
-    .replace(/\b(Bearer\s+)[\w.+/=~-]{8,}/gi, "$1[已隐藏凭据]")
-    .replace(/((?:[\w-]*(?:token|password|secret|api[_-]?key)|密码|密钥)["']?\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)(?!\w)/gi, "$1[已隐藏凭据]");
+    .replace(/\b(Bearer\s+)[\w.+/=~-]{8,}/gi, "$1[已隐藏凭据]");
 }
 
 export function auditDecisionAnswers(

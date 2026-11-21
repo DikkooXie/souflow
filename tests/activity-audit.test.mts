@@ -86,7 +86,16 @@ test("audits a complete planning path, rejects forged activity, and retains reco
   assert.equal((await fetch(`${origin}/api/audit`, { headers: { "sec-fetch-site": "cross-site" } })).status, 403);
   assert.equal((await fetch(`${origin}/api/audit?days=90`)).status, 422);
 
-  const prompt = "给列表添加导出\nAPI_KEY=sample-secret-value";
+  const prompt = [
+    "给列表添加导出",
+    "API_KEY=sample-secret-value",
+    'passphrase="synthetic passphrase"',
+    "private_key=synthetic-private-value",
+    "口令：synthetic-passcode",
+    "Authorization: Basic c3ludGhldGlj",
+    "DATABASE_PASSWORD=\nsynthetic-on-next-line",
+    "format=CSV",
+  ].join("\n");
   const response = await post("/api/workflows", { prompt });
   assert.equal(response.status, 200);
   const { flowId } = await response.json() as { flowId: string };
@@ -117,12 +126,25 @@ test("audits a complete planning path, rejects forged activity, and retains reco
     assert.equal(report.totals["decision.answered"], 1);
     const timeline = report.recent.filter(row => row.flowId === flowId).reverse();
     assert.equal(timeline[0]?.kind, "request.submitted");
-    assert.deepEqual(timeline[0]?.details, { text: "给列表添加导出\nAPI_KEY=[已隐藏凭据]" });
+    assert.deepEqual(timeline[0]?.details, { text: [
+      "给列表添加导出",
+      "API_KEY=[已隐藏凭据]",
+      "passphrase=[已隐藏凭据]",
+      "private_key=[已隐藏凭据]",
+      "口令：[已隐藏凭据]",
+      "Authorization: [已隐藏凭据]",
+      "DATABASE_PASSWORD=\n[已隐藏凭据]",
+      "format=CSV",
+    ].join("\n") });
     assert.equal(timeline.find(row => row.kind === "decision.updated")?.subject, card.id);
     assert.deepEqual(timeline.at(-1)?.details, { status: "ready", phase: "拆单" });
     assert.deepEqual(report.recent.find(row => row.flowId === canceledId && row.kind === "flow.finished")?.details, { status: "reset" });
     assert.deepEqual(report.recent.find(row => row.kind === "demo.reset")?.details, { flowIds: [canceledId] });
-    assert.doesNotMatch(JSON.stringify(report), /sample-secret-value|untracked typed text|literal-tampered-content/);
+    const serialized = JSON.stringify(report);
+    for (const hidden of ["sample-secret-value", "synthetic passphrase", "synthetic-private-value", "synthetic-passcode", "c3ludGhldGlj",
+      "synthetic-on-next-line", "untracked typed text", "literal-tampered-content"]) {
+      assert.ok(!serialized.includes(hidden), "Unredacted test input was persisted");
+    }
   } finally {
     audit.close();
   }
