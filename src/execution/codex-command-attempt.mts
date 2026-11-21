@@ -36,6 +36,7 @@ export type CodexAttemptEvent =
 type Options = {
   workspace: string;
   prompt: string;
+  model?: string;
   onEvent: (event: CodexAttemptEvent) => void;
   onModel?: (model: string) => void;
   command?: readonly [executable: string, ...args: string[]];
@@ -95,6 +96,8 @@ function readQuestions(value: unknown): readonly DecisionQuestion[] | undefined 
 
 function startAttempt(options: Options, mode: "commands" | "questions") {
   const workspace = realpathSync(options.workspace);
+  const modelSetting = mode === "questions" ? "SOULFLOW_CODEX_PLANNING_MODEL" : "SOULFLOW_CODEX_EXECUTION_MODEL";
+  const requestedModel = (options.model ?? process.env[modelSetting])?.trim();
   const [executable, ...args] = options.command ?? [
     "codex", ...(mode === "questions" ? ["--disable", "apps", "--disable", "plugins", "--disable", "hooks"] : []),
     "app-server", "--listen", "stdio://",
@@ -283,6 +286,7 @@ function startAttempt(options: Options, mode: "commands" | "questions") {
   function openThread(config?: Record<string, unknown>) {
     call("thread/start", {
       cwd: workspace,
+      ...(requestedModel ? { model: requestedModel, allowProviderModelFallback: false } : {}),
       approvalPolicy: mode === "questions" ? "never" : "on-request",
       approvalsReviewer: "user",
       sandbox: mode === "questions" ? "read-only" : "workspace-write",
@@ -292,6 +296,7 @@ function startAttempt(options: Options, mode: "commands" | "questions") {
       const thread = record(result.thread);
       const model = result.model;
       if (typeof thread?.id !== "string" || !thread.id) return connectionLost();
+      if (requestedModel && model !== requestedModel) return connectionLost();
       if (mode === "questions" && typeof model !== "string") return connectionLost();
       threadId = thread.id;
       startingTurn = true;

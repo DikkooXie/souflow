@@ -77,7 +77,9 @@ SOULFLOW_TEST_NATIVE_CODEX=1 node --experimental-strip-types --test tests/codex-
 
 `SOULFLOW_PROMPT_MAX_LENGTH` 和 `SOULFLOW_ANSWER_MAX_LENGTH` 分别控制需求和自定义答复的长度，默认分别为 4,000 和 1,000，两者均可设为 1 到 16,000。页面从 `GET /api/decisions` 的 `inputLimits` 读取同一组上限。自由文本长度按浏览器输入框的 UTF-16 码元计数，一个表情可能占两个码元。预设选项按原问题中的标签验证。
 
-API key 等凭据填写在本机 `.env` 或通过启动进程的环境注入。Git 忽略实际的环境文件，仓库仅提交示例。Soulflow 通过 Codex App Server 运行规划，沿用本机 Codex 的模型及认证配置。启动的 Codex 进程会继承环境变量，使用 API key 时由 Codex 的认证或模型提供方配置读取相应变量。
+Soulflow 通过 Codex App Server 运行规划，复用本机 Codex 登录。`SOULFLOW_CODEX_PLANNING_MODEL` 指定规划模型，`SOULFLOW_CODEX_EXECUTION_MODEL` 指定命令执行适配器的模型。变量留空时沿用本机 Codex 默认模型。指定模型后，适配器核对 App Server 回执的模型标识再启动轮次。正式工单派发接入后由该执行适配器消费执行模型配置。
+
+如需 API key，凭据可填写在本机 `.env` 或通过启动进程的环境注入。Git 忽略实际的环境文件，仓库仅提交示例。使用 API key 时由 Codex 的认证或模型提供方配置读取相应变量。
 
 在仓库根目录用 Node 22.17.1 运行 `npm run dev`，并打开 [Soulflow 首页](http://127.0.0.1:4173/)。输入自然语言需求后，程序依次推进调研、需求澄清、技术选型、开发文档和拆单。页面内可展开阶段产物。顶部「待决策」显示跨会话的待答数，点击可在当前页面打开右侧抽屉。
 

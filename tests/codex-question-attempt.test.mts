@@ -9,7 +9,7 @@ import { type CodexAttemptEvent, startCodexQuestionAttempt } from "../src/execut
 
 const fixture = fileURLToPath(new URL("./fixtures/codex-app-server.mjs", import.meta.url));
 
-type Overrides = Pick<Parameters<typeof startCodexQuestionAttempt>[0], "outputSchema" | "answerMaxLength">;
+type Overrides = Pick<Parameters<typeof startCodexQuestionAttempt>[0], "outputSchema" | "answerMaxLength" | "model">;
 
 function runQuestion(t: TestContext, scenario: string, workspace: string, overrides?: Overrides) {
   const events: CodexAttemptEvent[] = [];
@@ -18,7 +18,7 @@ function runQuestion(t: TestContext, scenario: string, workspace: string, overri
     reportQuestion = resolve;
   });
   const attempt = startCodexQuestionAttempt({
-    workspace, prompt: "验证需求澄清", command: [process.execPath, fixture, scenario],
+    workspace, prompt: "验证需求澄清", command: [process.execPath, fixture, scenario, ...(overrides?.model ? [overrides.model] : [])],
     ...overrides,
     onEvent(event) {
       events.push(event);
@@ -41,6 +41,18 @@ test("keeps invalid, secret, and permission requests out of the decision inbox",
   const invalid = runQuestion(t, "question-invalid-config", workspace);
   assert.equal(await invalid.attempt.finished, "failed");
   assert.deepEqual(invalid.events, []);
+});
+
+test("requests the configured planning model and rejects a fallback before asking", { timeout: 5000 }, async t => {
+  const workspace = await mkdtemp(join(tmpdir(), "souflow-planning-model-"));
+  t.after(() => rm(workspace, { recursive: true }));
+  const model = "fixture-planner";
+  const pinned = runQuestion(t, "question-valid", workspace, { model });
+  const fallback = runQuestion(t, "question-model-mismatch", workspace, { model });
+  assert.equal(await fallback.attempt.finished, "failed");
+  assert.deepEqual(fallback.events, []);
+  assert.equal(pinned.attempt.answerQuestions((await pinned.requested).requestId, { language: " TypeScript" }), true);
+  assert.equal(await pinned.attempt.finished, "completed");
 });
 
 test("preserves option labels and expires or reconciles questions on disconnect", { timeout: 5000 }, async t => {
