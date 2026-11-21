@@ -46,6 +46,7 @@
           <button type="button" id="open-archive" class="archive-entry" data-track="open-archive" aria-haspopup="dialog" aria-controls="archive-dialog" hidden>
             <span class="document-icon" aria-hidden="true"></span>查看项目文档<span aria-hidden="true">↗</span>
           </button>
+          <button type="button" id="open-dispatch" class="archive-entry" data-track="open-local-dispatch" aria-haspopup="dialog" aria-controls="dispatch-dialog" hidden>本地执行工单</button>
         </div>
       </section>
 
@@ -127,6 +128,19 @@
         <!-- biome-ignore lint/a11y/noNoninteractiveTabindex: 让键盘用户能在文档长页内滚动。 -->
         <article id="archive-document" class="archive-document" tabindex="0" aria-labelledby="archive-document-title"></article>
       </div>
+    </dialog>
+    <dialog id="dispatch-dialog" class="archive-dialog" aria-labelledby="dispatch-title">
+      <header class="archive-header">
+        <h2 id="dispatch-title">本地执行工单</h2>
+        <button type="button" class="icon-button" id="close-dispatch" aria-label="关闭工单" autofocus>×</button>
+      </header>
+      <section class="dispatch-body" aria-label="工单及产物">
+        <p id="dispatch-status" role="status"></p>
+        <p class="error" role="alert" hidden></p>
+        <button type="button" id="prepare-dispatch" class="button button-primary" data-track="prepare-local-dispatch">准备工单</button>
+        <button type="button" id="start-dispatch" class="button button-primary" data-track="start-local-dispatch" hidden>确认并执行</button>
+        <ul id="dispatch-jobs" class="dispatch-jobs"></ul>
+      </section>
     </dialog>
     <dialog id="decision-dialog" aria-labelledby="decision-title">
       <header class="decision-header">

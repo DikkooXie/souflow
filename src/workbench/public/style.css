@@ -223,8 +223,13 @@ h1 { font-size: clamp(32px, 4.1vw, 54px); font-weight: 750; letter-spacing: -.04
 .archive-document h4 { margin: 22px 0 7px; font-size: 15px; }
 .archive-version { margin: 3px 0 20px; font-size: 12px; color: var(--muted); }
 .archive-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.75; margin: 0 0 14px; max-width: 65ch; }
+.dispatch-body { overflow: auto; padding: 16px 24px; }
+.dispatch-body > p { margin: 0 0 12px; }
+.dispatch-jobs { display: grid; gap: 8px; list-style: none; padding: 0; }
+.dispatch-job { border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; }
+.dispatch-job summary { cursor: pointer; font-weight: 660; }
 
-body:has(#decision-dialog[open], #archive-dialog[open]) { overflow: hidden; }
+body:has(#decision-dialog[open], #archive-dialog[open], #dispatch-dialog[open]) { overflow: hidden; }
 #decision-dialog {
   position: fixed;
   inset: 0 0 0 auto;

@@ -8,6 +8,7 @@ const controls = {
   "toggle-audit-log": "展开或收起最近记录",
   "toggle-conversations": "展开或收起最近对话", "new-conversation": "新建对话",
   "open-archive": "打开项目文档", "close-archive": "关闭项目文档",
+  "open-local-dispatch": "查看本地工单", "prepare-local-dispatch": "准备本地工单", "start-local-dispatch": "确认并执行工单",
 };
 const names = { home: "首页", conversation: "需求对话", decisions: "决策收件箱", audit: "数据看板", archive: "项目文档" };
 const events = {
@@ -15,6 +16,7 @@ const events = {
   "flow.finished": "流程结束", "decision.opened": "发出决策请求", "decision.answered": "提交决策答复",
   "decision.updated": "决策状态更新", "demo.reset": "重置演示",
   "attempt.started": "启动 Codex 尝试", "attempt.finished": "Codex 尝试结束", "model.started": "Codex 模型配置",
+  "dispatch.prepared": "工单已就绪", "dispatch.started": "确认本地派发", "dispatch.finished": "本地派发结束",
 };
 
 export function createAuditView(node) {

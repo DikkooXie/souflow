@@ -39,9 +39,11 @@ type Options = {
   model?: string;
   onEvent: (event: CodexAttemptEvent) => void;
   onModel?: (model: string) => void;
+  onThread?: (threadId: string) => void;
   command?: readonly [executable: string, ...args: string[]];
   outputSchema?: Record<string, unknown>;
   answerMaxLength?: number;
+  disableWebSearch?: boolean;
 };
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -94,12 +96,12 @@ function readQuestions(value: unknown): readonly DecisionQuestion[] | undefined 
   return Object.freeze(questions);
 }
 
-function startAttempt(options: Options, mode: "commands" | "questions") {
+function startAttempt(options: Options, mode: "commands" | "questions" | "local-task") {
   const workspace = realpathSync(options.workspace);
   const modelSetting = mode === "questions" ? "SOULFLOW_CODEX_PLANNING_MODEL" : "SOULFLOW_CODEX_EXECUTION_MODEL";
   const requestedModel = (options.model ?? process.env[modelSetting])?.trim();
   const [executable, ...args] = options.command ?? [
-    "codex", ...(mode === "questions" ? ["--disable", "apps", "--disable", "plugins", "--disable", "hooks"] : []),
+    "codex", ...(mode !== "commands" ? ["--disable", "apps", "--disable", "plugins", "--disable", "hooks"] : []),
     "app-server", "--listen", "stdio://",
   ];
   const child = spawn(executable, args, { cwd: workspace, stdio: ["pipe", "pipe", "ignore"] });
@@ -176,6 +178,10 @@ function startAttempt(options: Options, mode: "commands" | "questions") {
       return;
     }
     if (!turnId || params.threadId !== threadId || params.turnId !== turnId || typeof params.itemId !== "string") {
+      rejectRequest(id);
+      return;
+    }
+    if (mode === "local-task") {
       rejectRequest(id);
       return;
     }
@@ -287,18 +293,20 @@ function startAttempt(options: Options, mode: "commands" | "questions") {
     call("thread/start", {
       cwd: workspace,
       ...(requestedModel ? { model: requestedModel, allowProviderModelFallback: false } : {}),
-      approvalPolicy: mode === "questions" ? "never" : "on-request",
+      approvalPolicy: mode === "commands" ? "on-request" : "never",
       approvalsReviewer: "user",
-      sandbox: mode === "questions" ? "read-only" : "workspace-write",
+      sandbox: mode === "commands" ? "workspace-write" : "read-only",
       ephemeral: true,
-      ...(mode === "questions" ? { environments: [], config } : {}),
+      ...(mode !== "commands" ? { environments: [] } : {}),
+      ...(config ? { config } : {}),
     }, result => {
       const thread = record(result.thread);
       const model = result.model;
       if (typeof thread?.id !== "string" || !thread.id) return connectionLost();
       if (requestedModel && model !== requestedModel) return connectionLost();
       if (mode === "questions" && typeof model !== "string") return connectionLost();
-      threadId = thread.id;
+      const startedThreadId = thread.id;
+      threadId = startedThreadId;
       startingTurn = true;
       call("turn/start", {
         threadId, input: [{ type: "text", text: options.prompt }],
@@ -313,7 +321,8 @@ function startAttempt(options: Options, mode: "commands" | "questions") {
         }
         turnId = turn.id;
         try {
-          if (mode === "questions" && typeof model === "string") options.onModel?.(model);
+          options.onThread?.(startedThreadId);
+          if (typeof model === "string") options.onModel?.(model);
         } catch {
           return connectionLost();
         }
@@ -342,7 +351,10 @@ function startAttempt(options: Options, mode: "commands" | "questions") {
       const mcp = Object.fromEntries(Object.keys(inherited ?? {}).map(name => [
         name, { command: process.execPath, enabled: false },
       ]));
-      openThread({ mcp_servers: mcp });
+      openThread({
+        mcp_servers: mcp,
+        ...(mode === "local-task" || options.disableWebSearch ? { web_search: "disabled" } : {}),
+      });
     });
   });
 
@@ -388,4 +400,9 @@ export function startCodexCommandAttempt(options: Options) {
 export function startCodexQuestionAttempt(options: Options) {
   const { finished, close, answerQuestions, output } = startAttempt(options, "questions");
   return { finished, close, answerQuestions, output };
+}
+
+export function startCodexReadOnlyTask(options: Options) {
+  const { finished, close, output } = startAttempt(options, "local-task");
+  return { finished, close, output };
 }

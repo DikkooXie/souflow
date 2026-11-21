@@ -4,12 +4,14 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultAuditThresholds, openActivityStore, readActivity } from "../audit/activity-store.mts";
 import { defaultAnswerMaxLength, maxQuestionsPerDecision } from "../decisions/questions.mts";
+import { createLocalDispatch } from "../execution/local-dispatch.mts";
 import { createConversationFlows, phases } from "../planning/conversation-flow.mts";
 import { createCodexInbox } from "./codex-inbox.mts";
 import { createDecisionDemo } from "./demo-state.mts";
 
 const address = "127.0.0.1";
 const defaultLimits = { demo: 24, codex: 4 };
+const defaultDispatchConcurrency = 2;
 const defaultInputLimits = { promptMaxLength: 4000, answerMaxLength: defaultAnswerMaxLength };
 const maxConfigurableInputLength = 16_000;
 const jsonMetadataBudget = 16_384;
@@ -18,6 +20,7 @@ const files = [
   ["/style.css", "style.css", "text/css"],
   ["/app.mjs", "app.mjs", "text/javascript"],
   ["/archive.mjs", "archive.mjs", "text/javascript"],
+  ["/dispatch.mjs", "dispatch.mjs", "text/javascript"],
   ["/audit.mjs", "audit.mjs", "text/javascript"],
 ] as const;
 
@@ -42,10 +45,13 @@ type WorkbenchOptions = {
   limits?: typeof defaultLimits;
   inputLimits?: typeof defaultInputLimits;
   auditThresholds?: typeof defaultAuditThresholds;
+  dispatchConcurrency?: number;
+  dispatchAdapters?: Omit<NonNullable<Parameters<typeof createLocalDispatch>[2]>, "record">;
 };
 
 export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions, auditPath?: string, {
   limits = defaultLimits, inputLimits = defaultInputLimits, auditThresholds = defaultAuditThresholds,
+  dispatchConcurrency = defaultDispatchConcurrency, dispatchAdapters,
 }: WorkbenchOptions = {}) {
   const audit = openActivityStore(auditPath, Date.now, auditThresholds);
   const { promptMaxLength, answerMaxLength } = inputLimits;
@@ -58,7 +64,10 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
   }) : undefined;
   const inbox = codex ?? demo;
   const flows = createConversationFlows(inbox.runPhase, codex ? limits.codex : limits.demo, audit.record);
-  const snapshot = () => ({ ...inbox.snapshot(), flows: flows.list(), phases: phases.map(phase => phase.title), inputLimits });
+  const dispatch = live ? createLocalDispatch(live[0], dispatchConcurrency, { ...dispatchAdapters, record: audit.record }) : undefined;
+  const snapshot = () => ({
+    ...inbox.snapshot(), flows: flows.list(), phases: phases.map(phase => phase.title), inputLimits, dispatches: dispatch?.list() ?? [],
+  });
   const assets = new Map<string, { content: Buffer; mime: string }>(files.map(([path, name, mime]) => [
     path, { content: readFileSync(new URL(`./public/${name}`, import.meta.url)), mime },
   ]));
@@ -133,6 +142,18 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         flows.reset();
         return send(200, snapshot());
       }
+      const dispatchAction = /^\/api\/workflows\/([a-f0-9-]+)\/local-dispatch\/(prepare|start)$/.exec(path);
+      if (dispatchAction && dispatch) {
+        const flow = flows.list().find(item => item.id === dispatchAction[1]);
+        if (!flow) return send(404, { error: "需求对话不存在。" });
+        if (dispatchAction[2] === "prepare") {
+          return dispatch.prepare(flow) === 200 ? send(200, snapshot()) : send(409, { error: "请等待其他本地任务结束，再准备已完成计划的工单。" });
+        }
+        const body = await readJson(request);
+        if ("status" in body) return send(body.status, { error: body.error });
+        const id = (body.value as { id?: unknown } | null)?.id;
+        return dispatch.start(flow, id) === 200 ? send(200, snapshot()) : send(409, { error: "工单尚未就绪，或确认的计划已失效。" });
+      }
       const action = /^\/api\/decisions\/([a-f0-9-]+)\/(answer|disconnect)$/.exec(path);
       if (action?.[1]) {
         let status: ReturnType<typeof demo.submit>;
@@ -160,7 +181,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
   server.on("close", () => {
     const attempts = inbox.close();
     // 结束尝试时仍会产生最终状态，先让编排写完这些事件再关闭存储。
-    void Promise.allSettled([attempts, flows.settled()]).then(audit.close);
+    void Promise.allSettled([attempts, flows.settled(), dispatch?.close()]).then(audit.close);
   });
   return server;
 }
@@ -199,7 +220,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     quickReturnMs: integerSetting("SOULFLOW_AUDIT_QUICK_RETURN_MS", defaultAuditThresholds.quickReturnMs, 1),
     insightMinCount: integerSetting("SOULFLOW_AUDIT_INSIGHT_MIN_COUNT", defaultAuditThresholds.insightMinCount, 1),
   };
-  const server = createWorkbenchServer(undefined, live ? [process.cwd()] : undefined, auditPath, { limits, inputLimits, auditThresholds });
+  const dispatchConcurrency = integerSetting("SOULFLOW_DISPATCH_MAX_CONCURRENT", defaultDispatchConcurrency, 1, 6);
+  const server = createWorkbenchServer(undefined, live ? [process.cwd()] : undefined, auditPath, { limits, inputLimits, auditThresholds, dispatchConcurrency });
   server.listen(port, address, () => {
     const bound = server.address();
     if (bound && typeof bound !== "string") {
