@@ -62,3 +62,13 @@ body:has(#monitor-dialog[open]) { overflow: hidden; }
   .monitor-grid { grid-template-columns: minmax(0, 1fr); gap: 14px; }
   .monitor-body { padding-inline: 15px; }
 }
+@media (max-width: 480px) {
+  body:has(#open-monitor:not([hidden])) { --topbar-height: 88px; }
+  .topbar:has(#open-monitor:not([hidden])) {
+    flex-direction: column;
+    justify-content: center;
+    align-items: stretch;
+    gap: 4px;
+  }
+  .topbar:has(#open-monitor:not([hidden])) .topbar-actions { justify-content: flex-end; }
+}
