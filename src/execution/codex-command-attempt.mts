@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
+import { type DecisionQuestion, readDecisionAnswers } from "../decisions/questions.mts";
 
 type CommandDecision = "accept" | "decline" | "cancel";
 type Outcome = "completed" | "failed" | "interrupted" | "needs-reconciliation";
@@ -13,12 +14,13 @@ type Approval = Readonly<{
   availableDecisions: readonly CommandDecision[];
 }>;
 type RequestId = number | string;
-type PendingApproval = {
+type PendingRequest = {
   id: string;
+  method: string;
   params: Record<string, unknown>;
-  availableDecisions: readonly CommandDecision[];
   submitted: boolean;
-};
+} & ({ kind: "approval"; availableDecisions: readonly CommandDecision[] }
+  | { kind: "question"; questions: readonly DecisionQuestion[] });
 
 const defaultDecisions = Object.freeze<CommandDecision[]>(["accept", "decline"]);
 
@@ -27,13 +29,16 @@ export type CodexAttemptEvent =
   | { kind: "approval-submitted"; approvalId: string }
   | { kind: "approval-cleared"; approvalId: string }
   | { kind: "approval-expired"; approvalId: string }
-  | { kind: "approval-uncertain"; approvalId: string };
+  | { kind: "approval-uncertain"; approvalId: string }
+  | { kind: "question-requested"; requestId: string; questions: readonly DecisionQuestion[] }
+  | { kind: "question-submitted" | "question-cleared" | "question-expired" | "question-uncertain"; requestId: string };
 
 type Options = {
   workspace: string;
   prompt: string;
   onEvent: (event: CodexAttemptEvent) => void;
   command?: readonly [executable: string, ...args: string[]];
+  outputSchema?: Record<string, unknown>;
 };
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -59,13 +64,44 @@ function readAvailableDecisions(value: unknown): readonly CommandDecision[] | un
   }
 }
 
-export function startCodexCommandAttempt(options: Options) {
+function readQuestions(value: unknown): readonly DecisionQuestion[] | undefined {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 3) return;
+  const ids = new Set<string>();
+  const questions: DecisionQuestion[] = [];
+  for (const item of value) {
+    const question = record(item);
+    if (question?.isSecret !== false || typeof question.isOther !== "boolean"
+      || typeof question.id !== "string" || !question.id || ids.has(question.id)
+      || typeof question.header !== "string" || !question.header.trim()
+      || typeof question.question !== "string" || !question.question.trim()) return;
+    if (question.options !== null && !Array.isArray(question.options)) return;
+    const options: DecisionQuestion["options"][number][] = [];
+    for (const candidate of question.options ?? []) {
+      const option = record(candidate);
+      if (!option || typeof option.label !== "string" || !option.label.trim()
+        || typeof option.description !== "string" || options.some(previous => previous.label === option.label)) return;
+      options.push(Object.freeze({ label: option.label, description: option.description }));
+    }
+    ids.add(question.id);
+    questions.push(Object.freeze({
+      id: question.id, title: question.header, prompt: question.question,
+      options: Object.freeze(options), allowCustom: question.isOther || options.length === 0,
+    }));
+  }
+  return Object.freeze(questions);
+}
+
+function startAttempt(options: Options, mode: "commands" | "questions") {
   const workspace = realpathSync(options.workspace);
-  const [executable, ...args] = options.command ?? ["codex", "app-server", "--listen", "stdio://"];
+  const [executable, ...args] = options.command ?? [
+    "codex", ...(mode === "questions" ? ["--disable", "apps", "--disable", "plugins", "--disable", "hooks"] : []),
+    "app-server", "--listen", "stdio://",
+  ];
   const child = spawn(executable, args, { cwd: workspace, stdio: ["pipe", "pipe", "ignore"] });
   const input = createInterface({ input: child.stdout });
   let threadId: string | undefined;
   let turnId: string | undefined;
+  let output: string | undefined;
   let startingTurn = false;
   let closed = false;
   let callId = 0;
@@ -73,7 +109,7 @@ export function startCodexCommandAttempt(options: Options) {
   const earlyMessages: { method: string; id: RequestId | undefined; params: Record<string, unknown> }[] = [];
   let complete!: (outcome: Outcome) => void;
   const finished = new Promise<Outcome>(resolve => { complete = resolve; });
-  const serverRequests = new Map<RequestId, PendingApproval | null>();
+  const serverRequests = new Map<RequestId, PendingRequest | null>();
   const answerable = new Map<string, RequestId>();
   const startupDeadline = setTimeout(connectionLost, 15_000);
 
@@ -101,12 +137,8 @@ export function startCodexCommandAttempt(options: Options) {
     child.stdin.destroy();
     input.close();
     child.kill();
-    for (const approval of serverRequests.values()) {
-      if (approval === null) continue;
-      publish({
-        kind: approval.submitted ? "approval-uncertain" : "approval-expired",
-        approvalId: approval.id,
-      });
+    for (const request of serverRequests.values()) {
+      if (request) publishState(request, request.submitted ? "uncertain" : "expired");
     }
     serverRequests.clear();
     complete(outcome);
@@ -125,46 +157,72 @@ export function startCodexCommandAttempt(options: Options) {
     }
   }
 
+  function publishState(request: PendingRequest, state: "submitted" | "cleared" | "expired" | "uncertain") {
+    if (request.kind === "question") publish({ kind: `question-${state}`, requestId: request.id });
+    else publish({ kind: `approval-${state}`, approvalId: request.id });
+  }
+
   function handleRequest(id: RequestId, method: string, params: Record<string, unknown>) {
     const previous = serverRequests.get(id);
     if (previous !== undefined) {
-      if (previous && (method !== "item/commandExecution/requestApproval" || !isDeepStrictEqual(params, previous.params))) {
+      if (previous && (method !== previous.method || !isDeepStrictEqual(params, previous.params))) {
         connectionLost();
       }
+      return;
+    }
+    if (!turnId || params.threadId !== threadId || params.turnId !== turnId || typeof params.itemId !== "string") {
+      rejectRequest(id);
+      return;
+    }
+    if (mode === "questions") {
+      const questions = method === "item/tool/requestUserInput" ? readQuestions(params.questions) : undefined;
+      if (!questions) {
+        rejectRequest(id);
+        return;
+      }
+      const requestId = randomUUID();
+      serverRequests.set(id, { id: requestId, kind: "question", method, params, questions, submitted: false });
+      answerable.set(requestId, id);
+      publish({ kind: "question-requested", requestId, questions });
       return;
     }
     const { command, cwd } = params;
     const availableDecisions = readAvailableDecisions(params.availableDecisions);
     if (method !== "item/commandExecution/requestApproval"
       || (params.kind !== undefined && params.kind !== "command")
-      || !turnId || params.threadId !== threadId || params.turnId !== turnId
-      || typeof params.itemId !== "string"
       || typeof command !== "string" || !command.trim() || cwd !== workspace
       || params.networkApprovalContext != null || params.additionalPermissions != null
       || !availableDecisions) {
-      serverRequests.set(id, null);
-      send({ id, error: { code: -32601, message: "Unsupported approval request" } });
+      rejectRequest(id);
       return;
     }
     const approvalId = randomUUID();
-    serverRequests.set(id, { id: approvalId, params, availableDecisions, submitted: false });
+    serverRequests.set(id, { id: approvalId, kind: "approval", method, params, availableDecisions, submitted: false });
     answerable.set(approvalId, id);
     publish({ kind: "approval-requested", approval: { id: approvalId, command, workspace, availableDecisions } });
+  }
+
+  function rejectRequest(id: RequestId) {
+    serverRequests.set(id, null);
+    send({ id, error: { code: -32601, message: "Unsupported decision request" } });
   }
 
   function handleNotification(method: string, params: Record<string, unknown>) {
     if (!threadId || params.threadId !== threadId) return;
     const turn = record(params.turn);
+    if (options.outputSchema && method === "item/completed" && turnId && params.turnId === turnId) {
+      const item = record(params.item);
+      if (item?.type === "agentMessage" && item.phase !== "commentary") {
+        output = typeof item.text === "string" && item.text.length <= 16_384 ? item.text : undefined;
+      }
+    }
     if (method === "serverRequest/resolved" && isRequestId(params.requestId)) {
       const approval = serverRequests.get(params.requestId);
       if (!approval) return;
       serverRequests.set(params.requestId, null);
       answerable.delete(approval.id);
-      // 服务端清理请求时也发此通知，命令结果须由执行事件另行证明。
-      publish({
-        kind: approval.submitted ? "approval-cleared" : "approval-expired",
-        approvalId: approval.id,
-      });
+      // 回执只证明原请求已关闭，后续执行另由实际事件证明。
+      publishState(approval, approval.submitted ? "cleared" : "expired");
     }
     if (method === "turn/completed" && turnId && turn?.id === turnId) {
       const status = turn.status;
@@ -220,24 +278,27 @@ export function startCodexCommandAttempt(options: Options) {
   input.on("close", connectionLost);
   input.on("line", handleLine);
 
-  call("initialize", {
-    clientInfo: { name: "soulflow", version: "0.1.0" },
-    // 收到完整的权限字段，才能拒绝超出当前适配范围的命令。
-    capabilities: { experimentalApi: true },
-  }, () => {
-    send({ method: "initialized" });
+  function openThread(config?: Record<string, unknown>) {
     call("thread/start", {
       cwd: workspace,
-      approvalPolicy: "on-request",
+      approvalPolicy: mode === "questions" ? "never" : "on-request",
       approvalsReviewer: "user",
-      sandbox: "workspace-write",
+      sandbox: mode === "questions" ? "read-only" : "workspace-write",
       ephemeral: true,
+      ...(mode === "questions" ? { environments: [], config } : {}),
     }, result => {
       const thread = record(result.thread);
       if (typeof thread?.id !== "string" || !thread.id) return connectionLost();
+      if (mode === "questions" && typeof result.model !== "string") return connectionLost();
       threadId = thread.id;
       startingTurn = true;
-      call("turn/start", { threadId, input: [{ type: "text", text: options.prompt }] }, result => {
+      call("turn/start", {
+        threadId, input: [{ type: "text", text: options.prompt }],
+        ...(options.outputSchema ? { outputSchema: options.outputSchema } : {}),
+        ...(mode === "questions" ? { collaborationMode: {
+          mode: "plan", settings: { model: result.model, reasoning_effort: null, developer_instructions: null },
+        } } : {}),
+      }, result => {
         const turn = record(result.turn);
         if (typeof turn?.id !== "string" || !turn.id) {
           return connectionLost();
@@ -247,10 +308,34 @@ export function startCodexCommandAttempt(options: Options) {
         for (const message of earlyMessages.splice(0)) handleMethod(message.method, message.id, message.params);
       });
     });
+  }
+
+  call("initialize", {
+    clientInfo: { name: "soulflow", version: "0.1.0" },
+    // 收到完整的权限字段，才能拒绝超出当前适配范围的命令。
+    capabilities: { experimentalApi: true },
+  }, () => {
+    send({ method: "initialized" });
+    if (mode === "commands") {
+      openThread();
+      return;
+    }
+    call("config/read", { includeLayers: false, cwd: workspace }, result => {
+      const config = record(result.config);
+      if (!config) return connectionLost();
+      const inherited = record(config.mcp_servers);
+      if (config.mcp_servers != null && !inherited) return connectionLost();
+      // 把继承的 MCP 条目换成禁用占位配置，避免读取环境的会话触发外部工具。
+      const mcp = Object.fromEntries(Object.keys(inherited ?? {}).map(name => [
+        name, { command: process.execPath, enabled: false },
+      ]));
+      openThread({ mcp_servers: mcp });
+    });
   });
 
   return {
     finished,
+    output: () => output,
     close: connectionLost,
     answer(approvalId: string, decision: CommandDecision): boolean {
       if (closed || !isCommandDecision(decision)) return false;
@@ -258,12 +343,36 @@ export function startCodexCommandAttempt(options: Options) {
       if (id === undefined) return false;
       const approval = serverRequests.get(id);
       // 取消会结束本轮，必须由操作者明确选择。
-      if (!approval?.availableDecisions.includes(decision)) return false;
+      if (approval?.kind !== "approval" || !approval.availableDecisions.includes(decision)) return false;
       answerable.delete(approvalId);
       approval.submitted = true;
       send({ id, result: { decision } });
       publish({ kind: "approval-submitted", approvalId });
       return true;
     },
+    answerQuestions(requestId: string, input: unknown): boolean {
+      if (closed) return false;
+      const id = answerable.get(requestId);
+      if (id === undefined) return false;
+      const request = serverRequests.get(id);
+      if (request?.kind !== "question") return false;
+      const answers = readDecisionAnswers(request.questions, input);
+      if (!answers) return false;
+      answerable.delete(requestId);
+      request.submitted = true;
+      send({ id, result: { answers: Object.fromEntries(Object.entries(answers).map(([key, value]) => [key, { answers: [value] }])) } });
+      publishState(request, "submitted");
+      return true;
+    },
   };
+}
+
+export function startCodexCommandAttempt(options: Options) {
+  const { finished, close, answer } = startAttempt(options, "commands");
+  return { finished, close, answer };
+}
+
+export function startCodexQuestionAttempt(options: Options) {
+  const { finished, close, answerQuestions, output } = startAttempt(options, "questions");
+  return { finished, close, answerQuestions, output };
 }

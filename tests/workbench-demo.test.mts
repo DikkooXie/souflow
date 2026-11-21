@@ -1,0 +1,119 @@
+import assert from "node:assert/strict";
+import { once } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
+import test, { type TestContext } from "node:test";
+import type { Flow } from "../src/planning/conversation-flow.mts";
+import { createWorkbenchServer } from "../src/workbench/demo-server.mts";
+import type { createDecisionDemo } from "../src/workbench/demo-state.mts";
+
+type Snapshot = ReturnType<ReturnType<typeof createDecisionDemo>["snapshot"]> & { flows: Flow[] };
+
+async function start(t: TestContext, live?: Parameters<typeof createWorkbenchServer>[1]) {
+  const server = createWorkbenchServer(100, live);
+  t.after(async () => {
+    await new Promise<void>((resolve, reject) => {
+      server.close(error => error ? reject(error) : resolve());
+      server.closeAllConnections();
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const url = `http://127.0.0.1:${address.port}`;
+  const post = (path: string, body?: object, origin = url) => fetch(url + path, {
+    method: "POST", headers: body ? { origin, "Content-Type": "application/json" } : { origin },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  const read = async (): Promise<Snapshot> => {
+    const response = await fetch(`${url}/api/decisions`);
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  return { url, post, read };
+}
+
+test("the decision inbox routes answers to the selected session and records one receipt", async t => {
+  const { url, post, read } = await start(t);
+  const page = await fetch(url);
+  assert.match(await page.text(), /决策收件箱/);
+  const [first, second] = (await read()).requests;
+  assert.ok(first && second);
+  const secondAnswer = ["/api/decisions", second.id, "answer"].join("/");
+  const firstAnswer = ["/api/decisions", first.id, "answer"].join("/");
+  const answer = { scope: "当前筛选结果" };
+  assert.equal((await post(secondAnswer, { language: "TypeScript" })).status, 422);
+  assert.equal((await post(secondAnswer, { scope: "所有项目" })).status, 422);
+  assert.equal((await post(secondAnswer, answer, "https://example.test")).status, 403);
+  const results = await Promise.all([post(secondAnswer, answer), post(secondAnswer, answer)]);
+  assert.deepEqual(results.map(result => result.status).sort(), [200, 409]);
+
+  await delay(130);
+  const [unchanged, answered] = (await read()).requests;
+  assert.equal(unchanged?.status, "pending");
+  assert.equal(answered?.status, "acknowledged");
+  assert.deepEqual(answered?.answers, answer);
+  assert.deepEqual(answered?.timeline.map(entry => entry.label), [
+    "Codex 已发出提问", "已提交回答", "原会话已收到回答",
+  ]);
+  assert.equal((await post(firstAnswer, { language: " TypeScript ", genre: "" })).status, 422);
+  assert.equal((await post(firstAnswer, { language: " TypeScript ", genre: " 经营模拟 " })).status, 200);
+  await delay(130);
+  assert.deepEqual((await read()).requests[0]?.answers, { language: "TypeScript", genre: "经营模拟" });
+});
+
+test("disconnect invalidates question requests and reset prevents stale answers", async t => {
+  const { post, read } = await start(t);
+  const [first, second] = (await read()).requests;
+  assert.ok(first && second);
+  const firstPath = ["/api/decisions", first.id].join("/");
+  const secondPath = ["/api/decisions", second.id].join("/");
+  const scope = { scope: "当前筛选结果" };
+  assert.equal((await post(`${firstPath}/disconnect`)).status, 200);
+  assert.equal((await post(`${firstPath}/answer`, { language: "Python", genre: "解谜" })).status, 409);
+  assert.equal((await post(`${secondPath}/answer`, scope)).status, 200);
+  assert.equal((await post(`${secondPath}/disconnect`)).status, 200);
+  await delay(130);
+  assert.deepEqual((await read()).requests.map(request => request.status), ["expired", "uncertain"]);
+
+  assert.equal((await post("/api/demo/reset")).status, 200);
+  assert.equal((await post(`${secondPath}/answer`, scope)).status, 404);
+  assert.deepEqual((await read()).requests.map(request => request.status), ["pending", "pending"]);
+});
+
+test("advances only the workflow whose clarification was answered", { timeout: 5000 }, async t => {
+  const { post, read } = await start(t);
+  assert.equal((await post("/api/workflows", { prompt: "项目 A 的游戏" })).status, 200);
+  assert.equal((await post("/api/workflows", { prompt: "项目 B 的导出" })).status, 200);
+  const { flows, requests } = await read();
+  const [a, b] = flows;
+  assert.ok(a && b);
+  assert.deepEqual(a.outputs.map(output => output.title), ["调研"]);
+  const decision = requests.find(card => card.flowId === b.id);
+  assert.ok(decision);
+  assert.equal((await post(`/api/decisions/${decision.id}/answer`, { scope: "CSV 首版" })).status, 200);
+  const deadline = Date.now() + 2000;
+  let snapshot = await read();
+  while (snapshot.flows[1]?.status !== "ready" && Date.now() < deadline) {
+    await delay(30);
+    snapshot = await read();
+  }
+  assert.equal(snapshot.flows[0]?.status, "running");
+  assert.equal(snapshot.flows[1]?.status, "ready");
+  assert.deepEqual(snapshot.flows[1]?.outputs.map(output => output.title), ["调研", "需求澄清", "技术选型", "开发文档", "拆单"]);
+  assert.match(snapshot.flows[1]?.outputs[3]?.artifacts[0]?.sections[0]?.text ?? "", /CSV 首版/);
+  assert.equal(snapshot.requests.find(card => card.flowId === a.id)?.status, "pending");
+});
+
+test("rejects a new workflow when existing Codex sessions have filled capacity", async t => {
+  const { post, read } = await start(t, [process.cwd(), () => {
+    let close!: () => void;
+    const finished = new Promise<"interrupted">(resolve => { close = () => resolve("interrupted"); });
+    return { finished, close, answerQuestions: () => false, output: () => undefined };
+  }]);
+  for (let session = 0; session < 4; session += 1) {
+    assert.equal((await post("/api/sessions", { prompt: `澄清会话 ${session}` })).status, 200);
+  }
+  assert.equal((await post("/api/workflows", { prompt: "开发一个游戏" })).status, 409);
+  assert.deepEqual((await read()).flows, []);
+});

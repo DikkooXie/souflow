@@ -4,6 +4,8 @@
   "type": "module",
   "engines": { "node": ">=22.17.1" },
   "scripts": {
+    "dev": "node --experimental-strip-types src/workbench/demo-server.mts",
+    "dev:codex": "node --experimental-strip-types src/workbench/demo-server.mts --codex",
     "typecheck": "tsc --noEmit",
     "lint": "biome lint --error-on-warnings src tests",
     "test": "node --experimental-strip-types --test \"tests/**/*.test.mts\"",
