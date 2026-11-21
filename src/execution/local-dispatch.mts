@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { type RecordBusiness, scrubAuditText } from "../audit/activity-store.mts";
+import { type BusinessEvent, scrubAuditText } from "../audit/activity-store.mts";
 import { currentDevelopmentPlan, type Flow } from "../planning/conversation-flow.mts";
 import { type TicketDraft, validateTicketPlan } from "../planning/validate-ticket-plan.mts";
 import { startCodexQuestionAttempt, startCodexReadOnlyTask } from "./codex-command-attempt.mts";
@@ -225,7 +225,7 @@ async function evidenceCatalog(workspace: string, revision: string) {
 
 export function createLocalDispatch(workspace: string, concurrency: number, {
   split = startCodexQuestionAttempt, execute = startCodexReadOnlyTask, record, routing, monitor,
-}: { split?: typeof startCodexQuestionAttempt; execute?: Start; record?: RecordBusiness; routing?: ModelRouting; monitor?: DispatchMonitor } = {}) {
+}: { split?: typeof startCodexQuestionAttempt; execute?: Start; record?: (event: BusinessEvent) => boolean; routing?: ModelRouting; monitor?: DispatchMonitor } = {}) {
   const runs = new Map<string, Run>();
   const operations = new Set<Promise<void>>();
   const attempts = new Set<ReturnType<Start>>();
@@ -429,7 +429,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
     list: () => [...runs.values()],
     isRunning: (flowId: string) => [...runs.values()].some(run => run.flowId === flowId && active(run)),
     reviews: pendingReviews,
-    async review(id: string, body: unknown, flows: readonly Flow[]) {
+    async review(id: string, body: unknown, flows: readonly Flow[], actor?: string) {
       const pending = pendingReviews().find(item => item.artifact.id === id);
       if (!pending) return [...runs.values()].some(run => run.jobs.some(job => job.artifact?.id === id)) ? 409 : 404;
       if (shutdown.signal.aborted) return 409;
@@ -451,10 +451,10 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
       const plan = planFor(flow)?.plan;
       if (shutdown.signal.aborted || plan?.id !== run.plan.id || plan.version !== run.plan.version
         || !pendingReviews().some(item => item.artifact === artifact)) return 409;
-      artifact.review = decision;
-      record?.({ kind: "dispatch.reviewed", flowId: run.flowId, subject: run.id,
+      if (record?.({ kind: "dispatch.reviewed", flowId: run.flowId, subject: run.id,
         details: { jobId: job.id, artifactId: artifact.id, patchSha256: artifact.patchSha256,
-          plan: run.plan, revision: run.revision, decision } });
+          plan: run.plan, revision: run.revision, decision, actor } }) === false) return 503;
+      artifact.review = decision;
       wakeDispatch();
       return decision === "invalid" ? 409 : 200;
     },

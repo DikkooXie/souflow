@@ -11,6 +11,7 @@ const errors = document.querySelectorAll(".error");
 const count = document.querySelector("#count");
 const reset = document.querySelector("#reset");
 const modeLabel = document.querySelector("#mode");
+const memberLabel = document.querySelector("#member-label");
 const start = document.querySelector("#start-session");
 const promptBox = document.querySelector("#new-prompt");
 const template = document.querySelector("#detail-template");
@@ -51,6 +52,8 @@ let busy = false;
 let cycle = 0;
 let poll;
 let live = false;
+let member;
+let acceptanceNoteMaxLength;
 let active = 0;
 let auditOpen = false;
 let recordedView = "home";
@@ -202,7 +205,8 @@ function renderQueue(pending) {
 }
 
 function pendingDecisions() {
-  const pending = requests.filter(request => request.status === "pending");
+  const pending = requests.filter(request => request.status === "pending"
+    && (!member || (request.kind === "code-review") === (member.id === "reviewer")));
   return selectedFlow ? pending.sort((a, b) => Number(b.flowId === selectedFlow) - Number(a.flowId === selectedFlow)) : pending;
 }
 
@@ -215,8 +219,11 @@ function render() {
   renderRecent();
   const flow = flows.find(entry => entry.id === selectedFlow);
   renderConversation(flow, pending);
-  archive.update(flow, planMaxLength);
-  dispatch.update(flow, dispatches, live, pending.some(item => item.kind === "code-review" && item.flowId === flow?.id));
+  const canEdit = member?.id !== "reviewer" && !dispatches.some(run => run.flowId === flow?.id
+    && ["submitted", "accepted"].includes(run.acceptance?.at(-1)?.decision));
+  archive.update(flow, planMaxLength, canEdit);
+  dispatch.update(flow, dispatches, live, pending.some(item => item.kind === "code-review" && item.flowId === flow?.id),
+    member, acceptanceNoteMaxLength);
   // 另一会话收到回执时，保留当前会话表单的焦点及正在输入的文字。
   const detailKey = current ? `${current.id}:${current.timeline.length}` : "empty";
   if (detailKey === renderedDetail) return;
@@ -375,6 +382,8 @@ function later() {
   if (active > 0 || flows.some(flow => flow.status === "running") || requests.some(request => request.status === "submitted")
     || dispatches.some(run => ["preparing", "running", "waiting"].includes(run.status))) {
     poll = setTimeout(() => void refresh(), 400);
+  } else if (member) {
+    poll = setTimeout(() => void refresh(), 1500);
   }
 }
 
@@ -389,6 +398,11 @@ function applySnapshot(snapshot) {
     if (snapshot.flowId) selectedFlow = snapshot.flowId;
     if (selectedFlow && !flows.some(flow => flow.id === selectedFlow)) selectedFlow = undefined;
     live = snapshot.mode === "codex";
+    member = snapshot.member;
+    acceptanceNoteMaxLength = snapshot.acceptanceNoteMaxLength;
+    memberLabel.hidden = !member;
+    memberLabel.textContent = member?.label ?? "";
+    start.hidden = member?.id === "reviewer";
     monitor.setAvailable(live);
     active = snapshot.active ?? 0;
     modeLabel.textContent = live ? "Codex · 规划" : "本地演示";

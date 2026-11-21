@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
@@ -15,12 +16,15 @@ import type { createDecisionDemo } from "../src/workbench/demo-state.mts";
 
 type Snapshot = ReturnType<ReturnType<typeof createDecisionDemo>["snapshot"]> & {
   flows: Flow[];
-  dispatches: ReturnType<ReturnType<typeof createLocalDispatch>["list"]>;
+  dispatches: (ReturnType<ReturnType<typeof createLocalDispatch>["list"]>[number] & {
+    acceptance?: { decision: string; actor: { id: string }; note: string }[];
+  })[];
   inputLimits: { promptMaxLength: number; answerMaxLength: number };
 };
 
-async function start(t: TestContext, live?: Parameters<typeof createWorkbenchServer>[1], limits?: Parameters<typeof createWorkbenchServer>[3]) {
-  const server = createWorkbenchServer(100, live, undefined, limits);
+async function start(t: TestContext, live?: Parameters<typeof createWorkbenchServer>[1],
+  options?: Parameters<typeof createWorkbenchServer>[3], auditPath?: string) {
+  const server = createWorkbenchServer(100, live, auditPath, options);
   t.after(async () => {
     await new Promise<void>((resolve, reject) => {
       server.close(error => error ? reject(error) : resolve());
@@ -32,17 +36,141 @@ async function start(t: TestContext, live?: Parameters<typeof createWorkbenchSer
   const address = server.address();
   assert.ok(address && typeof address === "object");
   const url = `http://127.0.0.1:${address.port}`;
-  const post = (path: string, body?: object, origin = url) => fetch(url + path, {
-    method: "POST", headers: body ? { origin, "Content-Type": "application/json" } : { origin },
+  const post = (path: string, body?: object, origin = url, authorization?: string) => fetch(url + path, {
+    method: "POST", headers: { origin, ...(body ? { "Content-Type": "application/json" } : {}), ...(authorization ? { authorization } : {}) },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
-  const read = async (): Promise<Snapshot> => {
-    const response = await fetch(`${url}/api/decisions`);
+  const read = async (authorization?: string): Promise<Snapshot> => {
+    const response = await fetch(`${url}/api/decisions`, authorization ? { headers: { authorization } } : undefined);
     assert.equal(response.status, 200);
     return response.json();
   };
   return { url, post, read };
 }
+
+async function withAuditWriteBlocked(path: string, check: () => Promise<void>) {
+  const writer = new DatabaseSync(path);
+  try {
+    writer.exec("BEGIN IMMEDIATE");
+    await check();
+  } finally {
+    writer.close();
+  }
+}
+
+test("two authenticated members return a code delivery and accept only the revised batch", { timeout: 10000 }, async t => {
+  const repo = await mkdtemp(join(tmpdir(), "souflow-member-workbench-"));
+  const runDirectories = new Set<string>();
+  t.after(async () => {
+    await Promise.all([...runDirectories, repo].map(path => rm(path, { recursive: true, force: true })));
+  });
+  const file = "docs/guide.md";
+  const auditPath = join(repo, "audit.sqlite");
+  await mkdir(join(repo, "docs"));
+  await writeFile(join(repo, file), "草稿\n");
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+  git("init", "-q");
+  git("add", "docs");
+  git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--no-gpg-sign", "-qm", "fixture");
+  const terminal = { finished: Promise.resolve("completed" as const), close() {}, answerQuestions: () => false };
+  const members = { implementer: "a".repeat(32), reviewer: "b".repeat(32) };
+  const credential = (member: keyof typeof members) => `Basic ${Buffer.from(`${member}:${members[member]}`).toString("base64")}`;
+  const { url, post, read } = await start(t, [repo, options => ({
+    ...terminal,
+    output: () => JSON.stringify(Object.fromEntries(((options.outputSchema?.required ?? []) as string[]).map(field => [field, `示例${field}`]))),
+  })], { members, dispatchAdapters: {
+    split(options) {
+      const revised = options.prompt.includes("补齐验收步骤");
+      return { ...terminal, output: () => JSON.stringify({ tickets: [{
+        id: "T1", title: "编写指引", instructions: revised ? "修改后交付" : "提交初稿",
+        criteria: ["AC-1"], dependsOn: [], sources: [], editPaths: [file],
+      }] }) };
+    },
+    execute(options) {
+      runDirectories.add(join(options.workspace, "..", ".."));
+      return { ...terminal, output: () => JSON.stringify({ report: "交付指引",
+        edits: [{ path: file, before: "草稿", after: options.prompt.includes("修改后交付") ? "带验收步骤的指引" : "初稿" }],
+      }) };
+    },
+  } }, auditPath);
+  const write = async (actor: keyof typeof members, path: string, payload?: object) => (await post(path, payload, url, credential(actor))).status;
+  async function waitFor<T>(find: (snapshot: Snapshot) => T | undefined): Promise<T> {
+    for (let index = 0; index < 100; index++) {
+      const value = find(await read(credential("reviewer")));
+      if (value !== undefined) return value;
+      await delay(20);
+    }
+    throw Error("等待批次状态超时");
+  }
+  const noIdentity = await fetch(url);
+  assert.equal(noIdentity.status, 401);
+  assert.match(noIdentity.headers.get("www-authenticate") ?? "", /^Basic /);
+  assert.equal((await fetch(`${url}/api/decisions`)).status, 401);
+  assert.equal((await fetch(`${url}/api/audit`)).status, 401);
+  assert.equal((await fetch(`${url}/api/dispatch-status`)).status, 401);
+  for (const actor of ["implementer", "reviewer"] as const) {
+    const monitor = await fetch(`${url}/api/dispatch-status`, { headers: { authorization: credential(actor) } });
+    assert.equal(monitor.status, 200);
+  }
+  assert.equal((await post("/api/workflows", { prompt: "跳过登录" })).status, 401);
+  assert.equal((await post("/api/workflows", { prompt: "交换密钥" }, url,
+    `Basic ${Buffer.from(`implementer:${members.reviewer}`).toString("base64")}`)).status, 401);
+  assert.equal(await write("reviewer", "/api/workflows", { prompt: "越权创建" }), 403);
+  assert.equal(await write("implementer", "/api/workflows", { prompt: "更新使用指引" }), 200);
+  const flow = await waitFor(snapshot => snapshot.flows.find(item => item.status === "ready"));
+  const dispatch = `/api/workflows/${flow.id}/local-dispatch`;
+  const revise = `/api/workflows/${flow.id}/plan/revise`;
+  const note = { note: "已核对交付" };
+  assert.equal(await write("reviewer", `${dispatch}/prepare`, { kind: "code" }), 403);
+  assert.equal(await write("reviewer", revise, { version: 1, text: "越权改写" }), 403);
+  async function finish(version: number) {
+    assert.equal(await write("implementer", `${dispatch}/prepare`, { kind: "code" }), 200);
+    const ready = await waitFor(snapshot => snapshot.dispatches.find(run => run.plan.version === version && run.status === "ready"));
+    assert.equal(await write("implementer", `${dispatch}/start`, { id: ready.id }), 200);
+    return waitFor(snapshot => snapshot.dispatches.find(run => run.id === ready.id && run.status === "finished"));
+  }
+  const first = await finish(1);
+  const old = `/api/acceptance/${first.id}`;
+  assert.equal(await write("reviewer", `${old}/submit`, note), 403);
+  assert.equal(await write("reviewer", `${old}/accept`, note), 409);
+  assert.equal(await write("implementer", `${old}/submit`, { note: " " }), 422);
+  const firstSubmit = await Promise.all([write("implementer", `${old}/submit`, note), write("implementer", `${old}/submit`, note)]);
+  assert.deepEqual(firstSubmit.sort(), [200, 409]);
+  assert.equal(await write("implementer", `${old}/return`, note), 403);
+  assert.equal(await write("implementer", `${old}/accept`, note), 403);
+  assert.equal(await write("implementer", revise, { version: 1, text: "试图换掉待验收版本" }), 409);
+  assert.equal(await write("reviewer", `${old}/return`, { note: "补齐验收步骤" }), 200);
+  assert.equal(await write("reviewer", `${old}/accept`, note), 409);
+  assert.equal(await write("implementer", `${old}/submit`, note), 409);
+  assert.equal(await write("implementer", `${dispatch}/prepare`, { kind: "report" }), 409);
+  assert.equal(await write("implementer", `${dispatch}/start`, { id: first.id }), 409);
+  assert.equal(await write("implementer", revise, { version: 1, text: "补齐验收步骤" }), 200);
+  assert.equal(await write("implementer", `${dispatch}/start`, { id: first.id }), 409);
+  const second = await finish(2);
+  const next = `/api/acceptance/${second.id}`;
+  assert.notEqual(first.jobs[0]?.artifact?.patchSha256, second.jobs[0]?.artifact?.patchSha256);
+  assert.equal(await write("implementer", `${next}/submit`, note), 200);
+  const patch = second.jobs[0]?.patchPath;
+  assert.ok(patch);
+  const originalPatch = await readFile(patch);
+  await writeFile(patch, "被替换的文件");
+  assert.equal(await write("reviewer", `${next}/accept`, note), 409);
+  await writeFile(patch, originalPatch);
+  await withAuditWriteBlocked(auditPath, async () => {
+    assert.equal(await write("reviewer", `${next}/accept`, note), 503);
+    const stuck = await waitFor(snapshot => snapshot.dispatches.find(run => run.id === second.id));
+    assert.deepEqual(stuck.acceptance?.map(receipt => receipt.decision), ["submitted"]);
+  });
+  assert.equal(await write("reviewer", `${next}/accept`, note), 200);
+  assert.equal(await write("reviewer", `${next}/return`, note), 409);
+  assert.equal(await write("implementer", revise, { version: 2, text: "试图换掉已验收版本" }), 409);
+  const audit = await (await fetch(`${url}/api/audit`, { headers: { authorization: credential("reviewer") } })).json();
+  assert.deepEqual(audit.recent.filter((event: { kind: string }) => event.kind === "acceptance.decided")
+    .map((event: { subject: string; details: { decision: string; actor: { id: string } } }) => [event.subject, event.details.decision, event.details.actor.id]),
+  [[second.id, "accepted", "reviewer"], [second.id, "submitted", "implementer"],
+    [first.id, "returned", "reviewer"], [first.id, "submitted", "implementer"]]);
+  assert.doesNotMatch(JSON.stringify(audit), new RegExp(`${members.implementer}|${members.reviewer}`));
+});
 
 test("the decision inbox routes answers to the selected session and records one receipt", async t => {
   const { url, post, read } = await start(t);
@@ -255,10 +383,16 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
     ];
     const directories = new Set<string>();
     const started: string[] = [];
-    const { post, read, url } = await start(t, [repo, options => ({
+    const members = outcome === "rejected" || outcome === "approved"
+      ? { implementer: "i".repeat(32), reviewer: "r".repeat(32) } : undefined;
+    const auditPath = outcome === "approved" ? join(repo, "audit.sqlite") : undefined;
+    const identity = (actor: "implementer" | "reviewer") => members
+      ? `Basic ${Buffer.from(`${actor}:${members[actor]}`).toString("base64")}` : undefined;
+    const reviewer = identity("reviewer");
+    const server = await start(t, [repo, options => ({
       ...terminal, answerQuestions: () => false,
       output: () => JSON.stringify(Object.fromEntries(((options.outputSchema?.required ?? []) as string[]).map(field => [field, `示例${field}`]))),
-    })], { dispatchAdapters: {
+    })], { ...(members ? { members } : {}), dispatchAdapters: {
       split() {
         return { ...terminal, answerQuestions: () => false, output: () => JSON.stringify({
           tickets: [steps[3], steps[2], steps[1], steps[0]].map(step => ({
@@ -278,7 +412,11 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
         if (step.id === "T4") assert.equal(input.evidence[0]?.text, "汇总指引\n");
         return { ...terminal, output: () => JSON.stringify({ report: step.id, edits: [step] }) };
       },
-    } });
+    } }, auditPath);
+    const { url } = server;
+    const read = () => server.read(identity("reviewer"));
+    const post = (path: string, body: object, origin = url) =>
+      server.post(path, body, origin, identity(path.startsWith("/api/decisions/") ? "reviewer" : "implementer"));
     t.after(async () => {
       for (const directory of directories) await rm(directory, { recursive: true, force: true });
       await rm(repo, { recursive: true, force: true });
@@ -302,7 +440,7 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
     const pending = await waitFor(snapshot => snapshot.requests.length === 2 ? snapshot : undefined);
     assert.deepEqual([...started].sort(), ["T1", "T2"]);
     const monitor = async () => {
-      const response = await fetch(`${url}/api/dispatch-status`);
+      const response = await fetch(`${url}/api/dispatch-status`, reviewer ? { headers: { authorization: reviewer } } : undefined);
       assert.equal(response.status, 200);
       const { jobs } = await response.json() as { jobs: {
         batchId: string; ticketId: string; status: string; reviewing: boolean; waitingOn: string[];
@@ -318,6 +456,9 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
     const firstPatch = pending.dispatches[0]?.jobs.find(job => job.id === "T1")?.patchPath;
     assert.ok(firstPatch);
     assert.equal((await post(reviewPath(first.id), { review: "通过此版本" }, "https://example.test")).status, 403);
+    if (members) {
+      assert.equal((await server.post(reviewPath(first.id), { review: "通过此版本" }, url, identity("implementer"))).status, 403);
+    }
     assert.equal((await post(reviewPath(first.id), { review: "模型自行批准" })).status, 422);
     assert.equal((await post(`/api/workflows/${flow.id}/plan/revise`, { version: 1, text: "改版" })).status, 409);
     if (outcome === "tampered-after") {
@@ -327,6 +468,15 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
     assert.equal((await post(reviewPath(second.id), { review: "通过此版本" })).status, 200);
     assert.equal((await post(reviewPath(second.id), { review: "通过此版本" })).status, 409);
     assert.deepEqual([...started].sort(), ["T1", "T2"]);
+    if (auditPath) {
+      await withAuditWriteBlocked(auditPath, async () => {
+        assert.equal((await post(reviewPath(first.id), { review: "通过此版本" })).status, 503);
+        const snapshot = await read();
+        assert.ok(snapshot.requests.some(card => card.id === first.id && card.status === "pending"));
+        assert.equal(snapshot.dispatches[0]?.jobs.find(job => job.id === "T3")?.status, "queued");
+        assert.deepEqual([...started].sort(), ["T1", "T2"]);
+      });
+    }
     if (outcome === "tampered-before") await writeFile(firstPatch, "通过前被替换的补丁");
     if (outcome === "approved") {
       const repeated = await Promise.all([
@@ -358,9 +508,10 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
     await Promise.all([guide, rules].map(async (file, index) => {
       assert.equal(await readFile(join(repo, file), "utf8"), `${steps[index]?.before}\n`);
     }));
-    const audit = await (await fetch(`${url}/api/audit`)).json();
+    const audit = await (await fetch(`${url}/api/audit`, reviewer ? { headers: { authorization: reviewer } } : undefined)).json();
     const reviews = audit.recent.filter((entry: { kind: string }) => entry.kind === "dispatch.reviewed");
     assert.equal(reviews.length, outcome === "approved" ? 3 : 2);
+    if (members) assert.ok(reviews.every((entry: { details: { actor: string } }) => entry.details.actor === "reviewer"));
     assert.ok(reviews.every((entry: { subject: string; details: { patchSha256: string } }) =>
       entry.subject === run.id && /^[a-f0-9]{64}$/.test(entry.details.patchSha256)));
   });

@@ -234,6 +234,14 @@ h1 { font-size: clamp(32px, 4.1vw, 54px); font-weight: 750; letter-spacing: -.04
 .plan-editor textarea { width: 100%; min-height: 140px; resize: vertical; border: 1px solid var(--line); border-radius: 9px; padding: 10px; color: inherit; font: inherit; }
 .dispatch-body { overflow: auto; padding: 16px 24px; }
 .dispatch-body > p { margin: 0 0 12px; }
+.member-label { font-size: .78rem; color: var(--muted); white-space: nowrap; }
+.delivery-review { margin-block: 20px 8px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; }
+.delivery-review h3 { margin: 0 0 8px; }
+.delivery-history { padding-inline-start: 18px; margin: 0; }
+.delivery-history li { padding-block: 6px; }
+.delivery-history time { margin-inline-start: 10px; font-size: .8rem; }
+.delivery-history p { margin-block: 4px; }
+.delivery-review textarea { display: block; width: 100%; margin-block: 6px 10px; padding: 8px; font: inherit; }
 .dispatch-jobs { display: grid; gap: 8px; list-style: none; padding: 0; }
 .dispatch-job { border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; }
 .dispatch-job summary { cursor: pointer; font-weight: 660; }

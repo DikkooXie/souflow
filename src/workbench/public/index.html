@@ -20,6 +20,7 @@
         </button>
       </div>
       <div class="topbar-actions">
+        <span id="member-label" class="member-label" hidden></span>
         <button type="button" id="open-monitor" class="audit-nav" data-track="open-monitor" aria-haspopup="dialog" aria-controls="monitor-dialog" hidden>调度面板</button>
         <button type="button" id="open-decisions" class="inbox-button" data-track="open-decisions" aria-haspopup="dialog" aria-controls="decision-dialog">待决策 <span id="count" aria-live="polite">0</span></button>
         <button type="button" id="open-audit" class="audit-nav" data-track="open-audit" aria-pressed="false">数据看板</button>
@@ -187,6 +188,20 @@
         <button type="button" id="start-dispatch" class="button button-primary" data-track="start-local-dispatch" hidden>确认并执行</button>
         <button type="button" id="review-dispatch" class="button button-primary" data-track="open-decisions" hidden>查看待验收补丁</button>
         <ul id="dispatch-jobs" class="dispatch-jobs"></ul>
+        <section id="delivery-review" class="delivery-review" aria-labelledby="delivery-title" hidden>
+          <h3 id="delivery-title">最终验收</h3>
+          <p id="delivery-status" role="status"></p>
+          <ol id="delivery-history" class="delivery-history"></ol>
+          <form id="delivery-actions" hidden>
+            <label for="delivery-note">交付说明或验收备注</label>
+            <textarea id="delivery-note" rows="3" required></textarea>
+            <div class="actions">
+              <button type="submit" class="button button-primary" value="submit">提交验收</button>
+              <button type="submit" class="button" value="return">退回修订</button>
+              <button type="submit" class="button button-primary" value="accept">通过最终验收</button>
+            </div>
+          </form>
+        </section>
       </section>
     </dialog>
     <dialog id="decision-dialog" aria-labelledby="decision-title">
