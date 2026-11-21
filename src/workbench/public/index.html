@@ -6,7 +6,7 @@
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="/style.css">
     <script type="module" src="/app.mjs"></script>
-    <title>Soulflow</title>
+    <title>souflow</title>
   </head>
   <body>
     <header class="topbar">
@@ -14,8 +14,8 @@
         <button type="button" id="toggle-conversations" class="sidebar-toggle" aria-label="展开最近对话" title="展开最近对话" aria-expanded="false" aria-controls="conversation-sidebar" data-track="toggle-conversations">
           <span class="sidebar-icon" aria-hidden="true"></span>
         </button>
-        <button type="button" class="brand" aria-label="Soulflow 首页" id="home" data-track="open-home">
-          <span class="brand-mark" aria-hidden="true">✦</span><span>Soulflow</span>
+        <button type="button" class="brand" aria-label="souflow 首页" id="home" data-track="open-home">
+          <span class="brand-mark" aria-hidden="true">✦</span><span>souflow</span>
         </button>
       </div>
       <div class="topbar-actions">
@@ -43,6 +43,10 @@
         <p id="conversation-message" class="user-message"></p>
         <div class="conversation-reply">
           <p id="conversation-status" class="flow-status" role="status"></p>
+          <details id="project-context" class="history project-context" hidden>
+            <summary>本轮参考资料</summary>
+            <ul id="project-sources"></ul>
+          </details>
           <button type="button" id="open-archive" class="archive-entry" data-track="open-archive" aria-haspopup="dialog" aria-controls="archive-dialog" hidden>
             <span class="document-icon" aria-hidden="true"></span>查看项目文档<span aria-hidden="true">↗</span>
           </button>

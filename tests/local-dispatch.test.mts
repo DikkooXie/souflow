@@ -23,6 +23,8 @@ test("local dispatch requires criterion coverage, an acyclic graph and approved 
   const allowed = new Set([guide]);
   const read = (tickets: unknown) => readDispatchTickets(JSON.stringify({ tickets }), criteria, allowed);
   assert.deepEqual(read(draft), draft);
+  assert.throws(() => readDispatchTickets(JSON.stringify({ tickets: draft }), criteria, allowed,
+    "report", { routine: "fixture-sol", advanced: "fixture-astra" }), /任务难度或理由/);
   assert.throws(() => read(draft.slice(0, 2)), /uncovered:AC-3/);
   assert.throws(() => read([{ ...draft[0], dependsOn: ["T3"] }, ...draft.slice(1)]), /cycle/);
   assert.throws(() => read([{ ...draft[0], sources: ["docs/linked.md"] }, ...draft.slice(1)]), /冻结版本/);
@@ -137,18 +139,24 @@ test("prepares without executing, rejects stale confirmation and reads only the 
     ],
   };
   const terminal = () => ({ finished: Promise.resolve("completed" as const), close() {} });
+  const routing = { routine: "fixture-sol", advanced: "fixture-astra" };
+  const classified = draft.map(ticket => ({
+    ...ticket, difficulty: ticket.id === "T2" ? "advanced" : "routine", routingReason: `核对 ${ticket.id} 的验收范围`,
+  }));
   const dispatch = createLocalDispatch(repo, 2, {
+    routing,
     split(options) {
       assert.equal(options.disableWebSearch, true);
       assert.doesNotMatch(options.prompt, /docs\/linked\.md/);
       return { ...terminal(), answerQuestions() { return false; },
-        output: () => JSON.stringify({ tickets: allowValid ? draft : [{ ...draft[0], sources: ["docs/linked.md"] }, ...draft.slice(1)] }) };
+        output: () => JSON.stringify({ tickets: allowValid ? classified : [{ ...classified[0], sources: ["docs/linked.md"] }, ...classified.slice(1)] }) };
     },
     execute(options) {
       actualWorkspaces.push(options.workspace);
       const input = JSON.parse(options.prompt.split("\n\n").at(-1) ?? "{}");
       assert.ok(input.evidence.every((entry: { text: string }) => entry.text === "frozen evidence"));
-      options.onModel?.("fixture-sol");
+      assert.ok(options.model);
+      options.onModel?.(options.model);
       options.onThread?.(`thread-${actualWorkspaces.length}`);
       const names = [...input.evidence.map((item: { path: string }) => item.path), ...input.previousReports.map((item: { id: string }) => item.id)];
       return { ...terminal(), output: () => JSON.stringify({ report: `核验 ${names.join(" ")}` }) };
@@ -177,6 +185,7 @@ test("prepares without executing, rejects stale confirmation and reads only the 
   assert.equal(dispatch.prepare(flow), 200);
   const ready = await wait();
   assert.equal(ready.status, "ready");
+  assert.deepEqual(ready.jobs.map(job => job.modelRoute?.requestedModel), ["fixture-sol", "fixture-astra", "fixture-sol"]);
   assert.notEqual(ready.id, rejected.id);
   assert.equal(dispatch.start(flow, rejected.id), 409);
   const updatedPlan = structuredClone(flow);
@@ -194,6 +203,6 @@ test("prepares without executing, rejects stale confirmation and reads only the 
   assert.equal(actualWorkspaces.length, 3);
   assert.equal(new Set(actualWorkspaces).size, 3);
   assert.equal(new Set(done.jobs.map(job => job.threadId)).size, 3);
-  assert.ok(done.jobs.every(job => job.model === "fixture-sol"));
+  assert.deepEqual(done.jobs.map(job => job.model), ["fixture-sol", "fixture-astra", "fixture-sol"]);
   assert.equal(JSON.parse(await readFile(join(done.directory ?? "", "run.json"), "utf8")).status, "finished");
 });

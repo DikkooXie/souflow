@@ -17,6 +17,8 @@ const welcome = document.querySelector("#welcome");
 const conversation = document.querySelector("#conversation");
 const conversationMessage = document.querySelector("#conversation-message");
 const conversationStatus = document.querySelector("#conversation-status");
+const projectContext = document.querySelector("#project-context");
+const projectSources = document.querySelector("#project-sources");
 const sidebarToggle = document.querySelector("#toggle-conversations");
 const sidebar = document.querySelector("#conversation-sidebar");
 const sidebarScrim = document.querySelector("#sidebar-scrim");
@@ -232,8 +234,35 @@ function renderConversation(flow, pending) {
     : flow.status === "failed" ? "这项需求暂未完成。"
       : waiting ? "有一个问题需要你决定。" : "正在推进你的需求…";
   if (conversationStatus.textContent !== note) conversationStatus.textContent = note;
+  renderProjectSources(flow);
   openArchive.hidden = !flow.outputs.some(output => output.artifacts.length);
   openArchive.dataset.subject = flow.id;
+}
+
+function renderProjectSources(flow) {
+  const project = flow.project;
+  projectContext.hidden = !project;
+  if (projectContext.dataset.flow === flow.id && projectContext.dataset.loaded === String(!!project)) return;
+  projectContext.dataset.flow = flow.id;
+  projectContext.dataset.loaded = String(!!project);
+  projectContext.open = false;
+  if (!project) return;
+  const { repository, plan, github } = project;
+  projectSources.replaceChildren(
+    node("li", "", repository ? `仓库提交 ${repository.revision.slice(0, 8)}` : "仓库提交未能读取"),
+    node("li", "", plan.status === "read" ? `计划 ${plan.path}` : plan.status === "unavailable" ? "计划未能读取" : "未配置项目计划"),
+    node("li", "", github.status === "read" ? `GitHub · 最近 ${github.pullRequests.length} 条 PR`
+      : github.status === "unavailable" ? "GitHub PR 未能读取" : "未配置 GitHub 仓库"),
+  );
+  for (const pr of github.pullRequests ?? []) {
+    const link = node("a", "", `#${pr.number} ${pr.title} · ${{ OPEN: "开放", MERGED: "已合并", CLOSED: "已关闭" }[pr.state]}`);
+    link.href = pr.url;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    const item = node("li");
+    item.append(link);
+    projectSources.append(item);
+  }
 }
 
 function renderDetail(current) {
