@@ -10,16 +10,17 @@
   </head>
   <body>
     <header class="topbar">
-      <button type="button" class="brand" aria-label="Soulflow 首页" id="home">
+      <button type="button" class="brand" aria-label="Soulflow 首页" id="home" data-track="open-home">
         <span class="brand-mark" aria-hidden="true">✦</span><span>Soulflow</span>
       </button>
       <div class="topbar-actions">
         <select id="flow-select" aria-label="选择需求对话" hidden></select>
-        <button type="button" id="open-decisions" class="inbox-button">待决策 <span id="count" aria-live="polite">0</span></button>
+        <button type="button" id="open-decisions" class="inbox-button" data-track="open-decisions" aria-haspopup="dialog" aria-controls="decision-dialog">待决策 <span id="count" aria-live="polite">0</span></button>
+        <button type="button" id="open-audit" class="audit-nav" data-track="open-audit" aria-pressed="false">数据看板</button>
       </div>
     </header>
 
-    <main class="workspace">
+    <main class="workspace" id="workspace">
       <section id="welcome" class="welcome" aria-labelledby="welcome-title">
         <span class="brand-mark hero-mark" aria-hidden="true">✦</span>
         <h1 id="welcome-title">今天想推进什么？</h1>
@@ -31,41 +32,94 @@
         <textarea id="new-prompt" name="new-prompt" aria-label="描述你的需求" placeholder="描述你的需求…" maxlength="4000" required></textarea>
         <div class="composer-actions">
           <span id="mode" class="mode-label">本地演示</span>
-          <button type="submit" class="send-button" aria-label="发送需求"><span aria-hidden="true">→</span></button>
+          <button type="submit" class="send-button" aria-label="发送需求" data-track="send-request"><span aria-hidden="true">→</span></button>
         </div>
       </form>
       <ol id="phases" class="phases" aria-label="任务阶段"></ol>
       <p id="error" class="error" role="alert" hidden></p>
     </main>
 
-    <aside id="bubble-dock" class="bubble-dock" aria-labelledby="bubble-title" hidden>
-      <h2 id="bubble-title">需要你决定</h2>
-      <ul id="requests" class="request-list"></ul>
-      <button type="button" id="more-decisions" class="quiet-button" hidden></button>
-    </aside>
+    <main id="audit" class="audit" hidden>
+      <header class="audit-header">
+        <div>
+          <h1 id="audit-title" tabindex="-1">工作台数据看板</h1>
+          <p>查看日常操作、流程记录和值得简化的路径。</p>
+        </div>
+        <div class="audit-controls">
+          <select id="audit-range" aria-label="统计时间范围">
+            <option value="1">过去 24 小时</option>
+            <option value="7" selected>过去 7 天</option>
+            <option value="30">过去 30 天</option>
+          </select>
+          <button type="button" class="audit-nav" id="refresh-audit" data-track="refresh-audit">刷新</button>
+        </div>
+      </header>
+      <p id="audit-status" class="audit-status" role="status">正在读取记录…</p>
+      <dl id="audit-totals" class="audit-totals"></dl>
+      <section class="audit-insights" aria-labelledby="audit-insights-title">
+        <h2 id="audit-insights-title">优化线索</h2>
+        <ul id="audit-insights"></ul>
+      </section>
+      <div class="audit-breakdown">
+        <section aria-labelledby="audit-clicks-title">
+          <h2 id="audit-clicks-title">点击与重复</h2>
+          <p class="audit-help">同一标签页、同一视图，两秒内连续操作同一控件和对象，计为重复。</p>
+          <!-- biome-ignore lint/a11y/noNoninteractiveTabindex: 排行没有可聚焦的子元素，键盘用户可聚焦区块后滚动。 -->
+          <section class="audit-ranking-scroll" aria-label="点击与重复排行" tabindex="0">
+            <ul id="audit-clicks" class="audit-ranking"></ul>
+          </section>
+        </section>
+        <section aria-labelledby="audit-paths-title">
+          <h2 id="audit-paths-title">视图切换</h2>
+          <p class="audit-help">同一标签页内，30 秒内切回上一个视图，计为一次返回。</p>
+          <!-- biome-ignore lint/a11y/noNoninteractiveTabindex: 排行没有可聚焦的子元素，键盘用户可聚焦区块后滚动。 -->
+          <section class="audit-ranking-scroll" aria-label="视图切换排行" tabindex="0">
+            <ul id="audit-paths" class="audit-ranking"></ul>
+          </section>
+        </section>
+      </div>
+      <details class="audit-log">
+        <summary data-track="toggle-audit-log"><span id="audit-log-title">最近记录</span><span id="audit-log-count"></span></summary>
+        <div class="audit-log-header">
+          <p class="audit-help">每类最多显示 60 条。</p>
+          <select id="audit-log-type" aria-label="记录类型">
+            <option value="flow">流程事件</option>
+            <option value="interaction">操作事件</option>
+          </select>
+        </div>
+        <section class="audit-log-scroll" aria-labelledby="audit-log-title">
+          <ol id="audit-events"></ol>
+        </section>
+      </details>
+    </main>
 
     <dialog id="decision-dialog" aria-labelledby="decision-title">
       <header class="decision-header">
         <h2 id="decision-title">决策收件箱</h2>
-        <button id="close-decision" type="button" class="icon-button" aria-label="关闭决策">×</button>
+        <button id="close-decision" type="button" class="icon-button" data-track="close-decisions" aria-label="关闭决策" autofocus>×</button>
       </header>
-      <select id="decision-select" aria-label="选择待决策事项" hidden></select>
-      <section id="detail" aria-label="当前决策"></section>
-      <p id="decision-error" class="error" role="alert" hidden></p>
-      <footer class="decision-footer">
-        <button type="button" id="reset" class="quiet-button">重置演示</button>
-      </footer>
+      <div class="decision-body">
+        <p id="decision-feedback" role="status"></p>
+        <section id="decision-queue" aria-label="待决策事项" hidden>
+          <ul id="requests" class="request-list"></ul>
+        </section>
+        <section id="detail" aria-label="当前决策"></section>
+        <p id="decision-error" class="error" role="alert" hidden></p>
+        <footer class="decision-footer">
+          <button type="button" id="reset" class="quiet-button" data-track="reset-demo">重置演示</button>
+        </footer>
+      </div>
     </dialog>
 
     <template id="detail-template">
-      <div class="detail-meta"><span class="ticket-key"></span><span class="status"></span></div>
-      <h3 class="ticket-title">当前提问</h3>
+      <div class="detail-meta"><span class="ticket-key"></span><span class="status">待回答</span></div>
+      <h3 class="ticket-title" tabindex="-1">当前提问</h3>
       <p class="source-message"></p>
       <form class="question-form">
         <div class="questions"></div>
         <div class="actions"></div>
       </form>
-      <details class="history"><summary>时间线</summary><ol class="timeline"></ol></details>
+      <details class="history"><summary data-track="open-history">时间线</summary><ol class="timeline"></ol></details>
     </template>
   </body>
 </html>

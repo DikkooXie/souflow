@@ -1,14 +1,9 @@
-const statuses = {
-  pending: "待回答",
-  submitted: "等待会话回执",
-  acknowledged: "会话已收到",
-  closed: "原提问已关闭",
-  expired: "提问已失效",
-  uncertain: "待核对",
-};
+import { createAuditView } from "./audit.mjs";
 
 const list = document.querySelector("#requests");
+const queue = document.querySelector("#decision-queue");
 const detail = document.querySelector("#detail");
+const feedback = document.querySelector("#decision-feedback");
 const errors = document.querySelectorAll(".error");
 const count = document.querySelector("#count");
 const reset = document.querySelector("#reset");
@@ -20,10 +15,12 @@ const welcome = document.querySelector("#welcome");
 const conversation = document.querySelector("#conversation");
 const phasesList = document.querySelector("#phases");
 const flowSelect = document.querySelector("#flow-select");
-const decisionSelect = document.querySelector("#decision-select");
 const dialog = document.querySelector("#decision-dialog");
-const dock = document.querySelector("#bubble-dock");
-const more = document.querySelector("#more-decisions");
+const decisionBody = dialog.querySelector(".decision-body");
+const auditButton = document.querySelector("#open-audit");
+const auditPanel = document.querySelector("#audit");
+const workspace = document.querySelector("#workspace");
+const audit = createAuditView(node);
 const clock = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const drafts = new Map();
 let requests = [];
@@ -39,6 +36,8 @@ let cycle = 0;
 let poll;
 let live = false;
 let active = 0;
+let auditOpen = false;
+let recordedView = "home";
 
 function setError(message = "") {
   for (const error of errors) {
@@ -61,11 +60,36 @@ function actionButton(text, style, handler) {
   return button;
 }
 
-function openDecision(id) {
-  selected = id ?? pendingDecisions()[0]?.id ?? requests.at(-1)?.id;
+function view() {
+  if (dialog.open) return "decisions";
+  if (auditOpen) return "audit";
+  return selectedFlow ? "conversation" : "home";
+}
+
+function reportView() {
+  const next = view();
+  if (next === recordedView) return;
+  audit.navigate(recordedView, next);
+  recordedView = next;
+}
+
+function showAudit(visible) {
+  auditOpen = visible;
+  workspace.hidden = visible;
+  auditPanel.hidden = !visible;
+  auditButton.setAttribute("aria-pressed", String(visible));
+  render();
+}
+
+function openDecisions() {
+  selected = pendingDecisions()[0]?.id;
+  feedback.textContent = "";
   setError();
   render();
-  if (!dialog.open) dialog.showModal();
+  dialog.showModal();
+  decisionBody.scrollTop = 0;
+  queue.scrollTop = 0;
+  reportView();
 }
 
 function pickOption(entry) {
@@ -76,27 +100,41 @@ function pickOption(entry) {
 
 function renderQueue(pending) {
   const queueKey = JSON.stringify(pending.map(request => request.id));
-  if (queueKey === renderedQueue) return;
-  renderedQueue = queueKey;
-  count.textContent = String(pending.length);
-  dock.hidden = !pending.length;
-  more.hidden = pending.length <= 2;
-  more.textContent = `查看其余 ${Math.max(0, pending.length - 2)} 条`;
-  list.replaceChildren(...pending.slice(0, 2).map(request => {
+  if (queueKey !== renderedQueue) {
+    renderedQueue = queueKey;
+    if (count.textContent !== String(pending.length)) count.textContent = String(pending.length);
+    queue.hidden = !pending.length;
+    const focused = list.contains(document.activeElement) ? document.activeElement.dataset.subject : undefined;
+    list.replaceChildren(...pending.map(decisionRow));
+    if (focused) [...list.querySelectorAll("button")].find(button => button.dataset.subject === focused)?.focus({ preventScroll: true });
+  }
+  for (const button of list.querySelectorAll("button")) {
+    if (button.dataset.subject === selected) button.setAttribute("aria-current", "true");
+    else button.removeAttribute("aria-current");
+  }
+
+  function decisionRow(request) {
     const item = node("li");
     const button = node("button", "request-button");
     button.type = "button";
-    button.addEventListener("click", () => openDecision(request.id));
+    button.dataset.track = "select-decision";
+    button.dataset.subject = request.id;
+    button.addEventListener("click", () => {
+      selected = request.id;
+      setError();
+      render();
+    });
     const summary = node("span");
     summary.append(
-      node("strong", "request-title", request.title), node("span", "row-key", request.questions[0]?.prompt),
+      node("strong", "request-title", request.title),
+      node("span", "row-key", `${request.session} · ${request.questions[0]?.prompt ?? "待回答"}`),
     );
     const arrow = node("span", "row-arrow", "›");
     arrow.setAttribute("aria-hidden", "true");
     button.append(summary, arrow);
     item.append(button);
     return item;
-  }));
+  }
 }
 
 function pendingDecisions() {
@@ -105,27 +143,22 @@ function pendingDecisions() {
 }
 
 function render() {
+  reportView();
   const pending = pendingDecisions();
+  const current = pending.find(request => request.id === selected) ?? pending[0];
+  selected = current?.id;
   renderQueue(pending);
   renderConversation(pending);
-  const current = requests.find(request => request.id === selected);
-  const entries = current && !pending.includes(current) ? [current, ...pending] : pending;
-  const ids = entries.map(request => request.id).join(",");
-  if (decisionSelect.dataset.ids !== ids) {
-    decisionSelect.replaceChildren(...entries.map(pickOption));
-    decisionSelect.dataset.ids = ids;
-  }
-  decisionSelect.hidden = entries.length < 2;
-  decisionSelect.value = selected ?? "";
-  if (!current) {
-    detail.replaceChildren(node("p", "muted", "目前没有待决策事项。"));
-    renderedDetail = undefined;
-    return;
-  }
   // 另一会话收到回执时，保留当前会话表单的焦点及正在输入的文字。
-  const detailKey = [current.id, current.status, current.timeline.length].join(":");
+  const detailKey = current ? `${current.id}:${current.timeline.length}` : "empty";
   if (detailKey === renderedDetail) return;
   renderedDetail = detailKey;
+  if (!current) {
+    const empty = node("p", "muted", "目前没有待决策事项。");
+    empty.tabIndex = -1;
+    detail.replaceChildren(empty);
+    return;
+  }
   renderDetail(current);
 }
 
@@ -169,7 +202,10 @@ function renderConversation(pending) {
     const section = node("details", "flow-output");
     section.dataset.phase = output.title;
     section.open = (previousFlow === flow.id && open.has(output.title)) || index === flow.outputs.length - 1;
-    section.append(node("summary", "", output.title));
+    const heading = node("summary", "", output.title);
+    heading.dataset.track = "open-artifact";
+    heading.dataset.subject = output.artifacts[0]?.id;
+    section.append(heading);
     for (const { sections } of output.artifacts) {
       for (const item of sections) section.append(node("h3", "", item.title), node("p", "", item.text));
     }
@@ -180,10 +216,6 @@ function renderConversation(pending) {
 
 function renderDetail(current) {
   const fragment = template.content.cloneNode(true);
-  const status = fragment.querySelector(".status");
-  status.textContent = statuses[current.status];
-  status.dataset.status = current.status;
-  status.setAttribute("aria-live", "polite");
   fragment.querySelector(".ticket-key").textContent = current.session;
   fragment.querySelector(".ticket-title").textContent = current.title;
   fragment.querySelector(".source-message").textContent = current.prompt;
@@ -191,29 +223,29 @@ function renderDetail(current) {
   const form = fragment.querySelector("form");
   const actions = fragment.querySelector(".actions");
   const questions = fragment.querySelector(".questions");
+  fragment.querySelector(".history summary").dataset.subject = current.id;
   const path = ["/api/decisions", current.id].join("/");
-  if (current.status === "pending") {
-    const draft = drafts.get(current.id) ?? new Map();
-    drafts.set(current.id, draft);
-    const readers = current.questions.map(question => addQuestion(questions, question, draft));
-    actions.append(actionButton("发送回答", "button-primary"));
-    form.addEventListener("submit", async event => {
-      event.preventDefault();
-      const answers = Object.fromEntries(current.questions.map((question, index) => [question.id, readers[index]()]));
-      if (await post(`${path}/answer`, answers)) {
-        dialog.close();
-        document.querySelector("#open-decisions").focus();
-      }
-    });
-  } else {
-    for (const question of current.questions) {
-      const section = node("div", "answer-result");
-      section.append(node("h3", "", question.title), node("p", "", current.answers?.[question.id] ?? "尚无答复"));
-      questions.append(section);
+  const draft = drafts.get(current.id) ?? new Map();
+  drafts.set(current.id, draft);
+  const readers = current.questions.map(question => addQuestion(questions, question, draft));
+  const send = actionButton("发送回答", "button-primary");
+  send.dataset.track = "send-answer";
+  send.dataset.subject = current.id;
+  actions.append(send);
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    feedback.textContent = "";
+    const answers = Object.fromEntries(current.questions.map((question, index) => [question.id, readers[index]()]));
+    if (await post(`${path}/answer`, answers) && dialog.open) {
+      feedback.textContent = "回答已提交。";
+      if (!dialog.contains(document.activeElement)) detail.querySelector('[tabindex="-1"]')?.focus();
     }
-  }
-  if (!live && (current.status === "pending" || current.status === "submitted")) {
-    actions.append(actionButton("模拟断线", "disconnect", () => void post(`${path}/disconnect`)));
+  });
+  if (!live) {
+    const disconnect = actionButton("模拟断线", "disconnect", () => void post(`${path}/disconnect`));
+    disconnect.dataset.track = "simulation-disconnect";
+    disconnect.dataset.subject = current.id;
+    actions.append(disconnect);
   }
   const timeline = fragment.querySelector(".timeline");
   for (const entry of current.timeline) {
@@ -227,7 +259,7 @@ function renderDetail(current) {
 }
 
 function addQuestion(container, question, draft) {
-  const current = draft.get(question.id) ?? { choice: "", text: "" };
+  const current = draft.get(question.id) ?? { choice: "", text: "", optionIds: new Map() };
   draft.set(question.id, current);
   const fieldset = node("fieldset", "question");
   const legend = node("legend", "", question.prompt);
@@ -265,6 +297,9 @@ function addQuestion(container, question, draft) {
     radio.type = "radio";
     radio.name = question.id;
     radio.value = value;
+    if (!current.optionIds.has(value)) current.optionIds.set(value, crypto.randomUUID());
+    radio.dataset.track = "select-option";
+    radio.dataset.subject = current.optionIds.get(value);
     radio.required = true;
     radio.checked = current.choice === value;
     radio.addEventListener("change", () => {
@@ -325,7 +360,7 @@ async function post(path, answers) {
   cycle += 1;
   reset.disabled = true;
   start.querySelector("button").disabled = true;
-  for (const control of detail.querySelectorAll("button,input")) control.disabled = true;
+  detail.inert = true;
   try {
     const options = answers ? {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(answers),
@@ -343,7 +378,7 @@ async function post(path, answers) {
     reset.disabled = false;
     start.querySelector("button").disabled = false;
     render();
-    for (const control of detail.querySelectorAll("button,input")) control.disabled = false;
+    detail.inert = false;
     later();
   }
 }
@@ -351,12 +386,29 @@ async function post(path, answers) {
 reset.addEventListener("click", async () => {
   if (await post("/api/demo/reset")) dialog.close();
 });
-document.querySelector("#home").addEventListener("click", () => { selectedFlow = undefined; render(); promptBox.focus(); });
-document.querySelector("#open-decisions").addEventListener("click", () => openDecision());
+document.addEventListener("click", event => {
+  const control = event.target.closest?.("[data-track]");
+  if (control) audit.click(view(), control.dataset.track, control.dataset.subject);
+}, { capture: true });
+document.querySelector("#home").addEventListener("click", () => { selectedFlow = undefined; showAudit(false); promptBox.focus(); });
+auditButton.addEventListener("click", () => {
+  showAudit(!auditOpen);
+  if (auditOpen) {
+    document.querySelector("#audit-title").focus();
+    void audit.refresh();
+  }
+});
+document.querySelector("#open-decisions").addEventListener("click", openDecisions);
 document.querySelector("#close-decision").addEventListener("click", () => dialog.close());
-more.addEventListener("click", () => openDecision(pendingDecisions()[2]?.id));
-decisionSelect.addEventListener("change", () => openDecision(decisionSelect.value));
-flowSelect.addEventListener("change", () => { selectedFlow = flowSelect.value || undefined; render(); });
+dialog.addEventListener("close", () => {
+  reportView();
+  if (auditOpen) void audit.refresh();
+});
+flowSelect.addEventListener("change", () => {
+  audit.click(view(), "select-flow", flowSelect.value);
+  selectedFlow = flowSelect.value || undefined;
+  showAudit(false);
+});
 promptBox.addEventListener("keydown", event => {
   if (event.key === "Enter" && !event.isComposing && !event.shiftKey) {
     event.preventDefault();

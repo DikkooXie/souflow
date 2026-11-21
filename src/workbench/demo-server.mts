@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { openActivityStore, readActivity } from "../audit/activity-store.mts";
 import { createConversationFlows, phases } from "../planning/conversation-flow.mts";
 import { createCodexInbox } from "./codex-inbox.mts";
 import { createDecisionDemo } from "./demo-state.mts";
@@ -11,6 +12,7 @@ const files = [
   ["/", "index.html", "text/html"],
   ["/style.css", "style.css", "text/css"],
   ["/app.mjs", "app.mjs", "text/javascript"],
+  ["/audit.mjs", "audit.mjs", "text/javascript"],
 ] as const;
 
 async function readJson(request: IncomingMessage): Promise<{ value: unknown } | { status: number; error: string }> {
@@ -29,11 +31,14 @@ async function readJson(request: IncomingMessage): Promise<{ value: unknown } | 
   }
 }
 
-export function createWorkbenchServer(receiptDelay?: number, live?: Parameters<typeof createCodexInbox>) {
-  const demo = createDecisionDemo(receiptDelay);
-  const codex = live ? createCodexInbox(...live) : undefined;
+type LiveOptions = [workspace: string, startAttempt?: Parameters<typeof createCodexInbox>[1]];
+
+export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions, auditPath?: string) {
+  const audit = openActivityStore(auditPath);
+  const demo = createDecisionDemo(receiptDelay, audit.record);
+  const codex = live ? createCodexInbox(live[0], live[1], audit.record) : undefined;
   const inbox = codex ?? demo;
-  const flows = createConversationFlows(inbox.runPhase, codex ? 4 : 24);
+  const flows = createConversationFlows(inbox.runPhase, codex ? 4 : 24, audit.record);
   const snapshot = () => ({ ...inbox.snapshot(), flows: flows.list(), phases: phases.map(phase => phase.title) });
   const assets = new Map<string, { content: Buffer; mime: string }>(files.map(([path, name, mime]) => [
     path, { content: readFileSync(new URL(`./public/${name}`, import.meta.url)), mime },
@@ -55,6 +60,16 @@ export function createWorkbenchServer(receiptDelay?: number, live?: Parameters<t
     }
     if (request.method === "GET") {
       if (path === "/api/decisions") return send(200, snapshot());
+      if (path === "/api/audit" || path.startsWith("/api/audit?")) {
+        if (request.headers["sec-fetch-site"] === "cross-site") return send(403, { error: "请在本机工作台查看活动记录。" });
+        const range = new URLSearchParams(path.split("?")[1]).get("days") ?? "7";
+        if (!["1", "7", "30"].includes(range)) return send(422, { error: "请选择 1、7 或 30 天。" });
+        try {
+          return send(200, audit.report(Number(range)));
+        } catch {
+          return send(503, { error: "暂时无法读取活动记录。" });
+        }
+      }
       const asset = assets.get(path);
       if (asset) {
         response.writeHead(200, { "Content-Type": `${asset.mime}; charset=utf-8` });
@@ -66,6 +81,13 @@ export function createWorkbenchServer(receiptDelay?: number, live?: Parameters<t
       // 页面操作仅接受当前本机地址发起的请求。
       if (request.headers.origin !== `http://${address}:${local.port}`) {
         return send(403, { error: "请求来源与工作台地址不一致。" });
+      }
+      if (path === "/api/activity") {
+        const body = await readJson(request);
+        if ("status" in body) return send(body.status, { error: body.error });
+        const event = readActivity(body.value);
+        if (!event) return send(422, { error: "无法识别操作。" });
+        return audit.recordActivity(event) ? send(200, { recorded: true }) : send(503, { error: "暂时无法记录操作。" });
       }
       if (path === "/api/workflows" || (codex && path === "/api/sessions")) {
         const body = await readJson(request);
@@ -87,8 +109,9 @@ export function createWorkbenchServer(receiptDelay?: number, live?: Parameters<t
         });
       }
       if (!codex && path === "/api/demo/reset") {
-        flows.reset();
+        audit.record({ kind: "demo.reset", details: { flowIds: flows.list().filter(flow => flow.status === "running").map(flow => flow.id) } });
         demo.reset();
+        flows.reset();
         return send(200, snapshot());
       }
       const action = /^\/api\/decisions\/([a-f0-9-]+)\/(answer|disconnect)$/.exec(path);
@@ -115,14 +138,19 @@ export function createWorkbenchServer(receiptDelay?: number, live?: Parameters<t
     }
     send(404, { error: "地址不存在。" });
   });
-  server.on("close", () => codex?.close());
+  server.on("close", () => {
+    const attempts = inbox.close();
+    // 结束尝试时仍会产生最终状态，先让编排写完这些事件再关闭存储。
+    void Promise.allSettled([attempts, flows.settled()]).then(audit.close);
+  });
   return server;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.SOULFLOW_DEMO_PORT ?? "4173");
   const live = process.argv.includes("--codex");
-  const server = createWorkbenchServer(undefined, live ? [process.cwd()] : undefined);
+  const auditPath = process.env.SOULFLOW_AUDIT_DB || resolve(".souflow", live ? "codex-audit.sqlite" : "demo-audit.sqlite");
+  const server = createWorkbenchServer(undefined, live ? [process.cwd()] : undefined, auditPath);
   server.listen(port, address, () => {
     process.stdout.write(`Soulflow 决策收件箱 http://${address}:${port}（${live ? "Codex 会话" : "本地演示"}）\n`);
   });

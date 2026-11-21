@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { auditDecisionAnswers, type RecordBusiness } from "../audit/activity-store.mts";
 import { readDecisionAnswers } from "../decisions/questions.mts";
 import { startCodexQuestionAttempt, type CodexAttemptEvent } from "../execution/codex-command-attempt.mts";
 import { type Flow, makePhasePrompt, type Phase, type PhaseTarget, readPhaseOutput } from "../planning/conversation-flow.mts";
@@ -12,16 +14,20 @@ const terminal = {
   "question-uncertain": { status: "uncertain", label: "答复回执待核对" },
 } as const;
 
-export function createCodexInbox(workspace: string, startAttempt: Start = startCodexQuestionAttempt) {
+export function createCodexInbox(workspace: string, startAttempt: Start = startCodexQuestionAttempt, record?: RecordBusiness) {
   const requests: DecisionCard[] = [];
   const routes = new Map<string, Attempt>();
   const active = new Set<Attempt>();
   let sequence = 0;
   let lastMessage = "";
-  const canBegin = () => active.size < 4;
+  let closed = false;
+  const canBegin = () => !closed && active.size < 4;
 
   function begin(prompt: string, step?: { flow: Flow; phase: Phase; complete: (output: string | undefined) => void }): 200 | 409 | 503 {
     if (!canBegin()) return 409;
+    const attemptId = randomUUID();
+    const flowId = step?.flow.id;
+    const trace = { attemptId, flowId };
     const session = `Codex · 会话 ${++sequence}`;
     const title = [...prompt.split("\n")[0] ?? prompt].slice(0, 40).join("");
     let asked = false;
@@ -36,8 +42,11 @@ export function createCodexInbox(workspace: string, startAttempt: Start = startC
           id: event.requestId, session: step?.phase.title ?? session, title: step?.flow.title ?? title,
           prompt: step?.flow.prompt ?? prompt, questions: event.questions,
           ...(step ? { flowId: step.flow.id } : {}),
+          attemptId,
           status: "pending", timeline: [at("Codex 已发出提问")],
         });
+        record?.({ kind: "decision.opened", ...trace, subject: event.requestId,
+          details: { phase: step?.phase.title, count: event.questions.length } });
         return;
       }
       if (event.kind === "question-submitted") return;
@@ -47,21 +56,27 @@ export function createCodexInbox(workspace: string, startAttempt: Start = startC
       const update = terminal[event.kind];
       request.status = update.status;
       request.timeline.push(at(update.label));
+      record?.({ kind: "decision.updated", ...trace, subject: request.id, details: { status: update.status } });
       routes.delete(request.id);
     };
     try {
       const fields = step?.phase.fields;
-      attempt = startAttempt({ workspace, prompt, onEvent, ...(fields ? { outputSchema: {
+      attempt = startAttempt({ workspace, prompt, onEvent,
+        onModel: model => record?.({ kind: "model.started", ...trace, details: { model, phase: step?.phase.title } }),
+        ...(fields ? { outputSchema: {
         type: "object", additionalProperties: false, required: fields,
         properties: Object.fromEntries(fields.map(key => [key, { type: "string" }])),
       } } : {}) });
     } catch {
       return 503;
     }
+    if (!step) record?.({ kind: "request.submitted", ...trace, details: { text: prompt } });
+    record?.({ kind: "attempt.started", ...trace, details: { phase: step?.phase.title } });
     active.add(attempt);
     lastMessage = "";
     void attempt.finished.then(outcome => {
       active.delete(attempt);
+      record?.({ kind: "attempt.finished", ...trace, details: { outcome } });
       if (step) step.complete(outcome === "completed" && !unanswered ? attempt.output() : undefined);
       else if (outcome !== "completed") lastMessage = `${session} 已结束，状态需核对。`;
       else if (!asked) lastMessage = `${session} 本轮未发出结构化提问。`;
@@ -92,10 +107,15 @@ export function createCodexInbox(workspace: string, startAttempt: Start = startC
       request.status = "submitted";
       request.answers = answers;
       request.timeline.push(at("已提交回答"));
+      record?.({ kind: "decision.answered", flowId: request.flowId, attemptId: request.attemptId,
+        subject: id, details: { answers: auditDecisionAnswers(request.questions, answers) } });
       return 200;
     },
     close() {
-      for (const attempt of active) attempt.close();
+      closed = true;
+      const attempts = [...active];
+      for (const attempt of attempts) attempt.close();
+      return Promise.allSettled(attempts.map(attempt => attempt.finished));
     },
   };
 }

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { RecordBusiness } from "../audit/activity-store.mts";
 
 const definitions = {
   research: { fields: ["场景与已有依据", "待核实事项"], upstream: ["request"] },
@@ -62,13 +63,17 @@ function nextTargets(flow: Flow, phase: Phase): PhaseTarget[] {
   });
 }
 
-export function createConversationFlows(runPhase: RunPhase, limit: number) {
+export function createConversationFlows(runPhase: RunPhase, limit: number, record?: RecordBusiness) {
   const flows: Flow[] = [];
+  const running = new Set<Promise<void>>();
 
   async function run(flow: Flow) {
+    let phaseTitle: string | undefined;
     try {
       for (const phase of phases) {
+        phaseTitle = phase.title;
         const targets = nextTargets(flow, phase);
+        record?.({ kind: "phase.started", flowId: flow.id, subject: phase.title });
         const result = await runPhase(flow, phase, targets);
         if (!flows.includes(flow)) return;
         if (!result || result.length !== phase.fields.length || result.some(text => !text.trim())) {
@@ -79,10 +84,13 @@ export function createConversationFlows(runPhase: RunPhase, limit: number) {
         flow.outputs.push({ title: phase.title, artifacts: targets.map(target => ({
           ...target, sections: definitions[target.kind].fields.map(title => ({ title, text: content.get(title) ?? "" })),
         })) });
+        record?.({ kind: "phase.completed", flowId: flow.id, subject: phase.title, details: { artifacts: targets } });
       }
       flow.status = "ready";
     } catch {
       flow.status = "failed";
+    } finally {
+      if (flows.includes(flow)) record?.({ kind: "flow.finished", flowId: flow.id, details: { status: flow.status, phase: phaseTitle } });
     }
   }
 
@@ -97,10 +105,19 @@ export function createConversationFlows(runPhase: RunPhase, limit: number) {
         status: "running", outputs: [],
       };
       flows.push(flow);
-      void run(flow);
+      record?.({ kind: "request.submitted", flowId: flow.id, subject: flow.source.id, details: { text: prompt } });
+      const runResult = run(flow);
+      running.add(runResult);
+      void runResult.then(() => running.delete(runResult));
       return flow;
     },
-    reset() { flows.length = 0; },
+    reset() {
+      for (const flow of flows) {
+        if (flow.status === "running") record?.({ kind: "flow.finished", flowId: flow.id, details: { status: "reset" } });
+      }
+      flows.length = 0;
+    },
+    settled: () => Promise.allSettled(running),
   };
 }
 
