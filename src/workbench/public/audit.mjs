@@ -126,8 +126,16 @@ export function createAuditView(node) {
       content.open = previous.has(content.dataset.event);
       const shortFlow = entry.flowId?.slice(0, 8);
       const shortAttempt = entry.attemptId?.slice(0, 8);
+      const jobCounts = entry.kind === "dispatch.finished" ? entry.jobCounts : undefined;
       const title = interaction ? entry.kind === "ui.click" ? controls[entry.control] : `${names[entry.view]} → ${names[entry.destination]}`
-        : [events[entry.kind] ?? entry.kind, shortFlow && `流程 ${shortFlow}`, shortAttempt && `尝试 ${shortAttempt}`].filter(Boolean).join(" · ");
+        : [
+          events[entry.kind] ?? entry.kind,
+          shortFlow && `流程 ${shortFlow}`,
+          shortAttempt && `尝试 ${shortAttempt}`,
+          jobCounts && `待验收 ${formatNumber.format(jobCounts.ready)}`,
+          jobCounts && `失败 ${formatNumber.format(jobCounts.failed)}`,
+          jobCounts && `阻塞 ${formatNumber.format(jobCounts.blocked)}`,
+        ].filter(Boolean).join(" · ");
       const detail = interaction ? [names[entry.view], entry.subject].filter(Boolean).join(" · ")
         : entry.details?.text ?? (entry.details ? JSON.stringify(entry.details, null, 2) : entry.subject);
       content.append(node("summary", "", title));

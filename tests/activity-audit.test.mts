@@ -69,6 +69,29 @@ test("uses configured audit windows including the exact boundary", () => {
   }
 });
 
+test("counts recognized job statuses only for finished dispatches", () => {
+  const audit = openActivityStore(":memory:", () => 100_000);
+  try {
+    const jobs = ["ready", "failed", "blocked", "ready", "blocked", "blocked", "skipped"]
+      .map(status => ({ status }));
+    audit.record({ kind: "dispatch.finished", details: { jobs } });
+    audit.record({ kind: "dispatch.finished", details: { text: "历史派发记录" } });
+    audit.record({ kind: "dispatch.started", details: { jobs } });
+
+    const [started, legacy, finished] = audit.report(1).recent;
+    assert.equal(finished?.kind, "dispatch.finished");
+    assert.deepEqual(finished?.jobCounts, { ready: 2, failed: 1, blocked: 3 });
+    assert.ok(legacy);
+    assert.equal(legacy.kind, "dispatch.finished");
+    assert.equal("jobCounts" in legacy, false);
+    assert.ok(started);
+    assert.equal(started.kind, "dispatch.started");
+    assert.equal("jobCounts" in started, false);
+  } finally {
+    audit.close();
+  }
+});
+
 test("hides unprefixed credentials in structured answers without losing ordinary text", () => {
   const audit = openActivityStore();
   try {
