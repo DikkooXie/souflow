@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
+import { setImmediate, setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { promisify } from "node:util";
 import { createLocalDispatch, readDispatchTickets, runLocalJobs } from "../src/execution/local-dispatch.mts";
@@ -67,6 +67,50 @@ test("independent jobs overlap and a failed dependency blocks its successor", as
     if (job.id === "T1") throw Error("fixture failure");
   });
   assert.deepEqual(jobs.map(job => job.status), ["failed", "ready", "blocked"]);
+});
+
+test("a ready successor starts while an independent job is still running", { timeout: 8000 }, async t => {
+  const jobs: Parameters<typeof runLocalJobs>[0] = draft.map(ticket => ({
+    ...ticket, dependsOn: ticket.id === "T3" ? ["T1"] : ticket.dependsOn, status: "queued",
+  }));
+  const gate = () => {
+    let release!: () => void;
+    const wait = new Promise<void>(resolve => { release = resolve; });
+    return { wait, release };
+  };
+  const t1 = { started: gate(), finish: gate() };
+  const t2 = { started: gate(), finish: gate() };
+  const started: string[] = [];
+
+  const dispatch = runLocalJobs(jobs, 2, async job => {
+    started.push(job.id);
+    if (job.id === "T3") return;
+    const control = job.id === "T1" ? t1 : t2;
+    control.started.release();
+    await control.finish.wait;
+  });
+  t.after(async () => {
+    t1.finish.release();
+    t2.finish.release();
+    await dispatch;
+  });
+
+  await Promise.all([t1.started.wait, t2.started.wait]);
+  assert.deepEqual(started, ["T1", "T2"]);
+  assert.deepEqual(jobs.map(job => job.status), ["running", "running", "queued"]);
+
+  t1.finish.release();
+  await setImmediate();
+  assert.deepEqual(started, ["T1", "T2", "T3"]);
+  assert.equal(jobs[0]?.status, "ready");
+  assert.equal(typeof jobs[0]?.finishedAt, "number");
+  assert.equal(jobs[1]?.status, "running");
+  assert.equal(jobs[1]?.finishedAt, undefined);
+
+  t2.finish.release();
+  await dispatch;
+  assert.deepEqual(jobs.map(job => job.status), ["ready", "ready", "ready"]);
+  assert.ok(jobs.every(job => typeof job.startedAt === "number" && typeof job.finishedAt === "number"));
 });
 
 test("prepares without executing, rejects stale confirmation and reads only the pinned Git blobs", { timeout: 8000 }, async t => {

@@ -110,27 +110,36 @@ export function readDispatchTickets(text: string | undefined, criteria: readonly
 
 export async function runLocalJobs(jobs: Job[], concurrency: number, execute: (job: Job, inputs: readonly Job[]) => Promise<void>) {
   if (!Number.isInteger(concurrency) || concurrency < 1) throw Error("必须设置有效的派发并发上限。");
-  while (jobs.some(job => job.status === "queued")) {
-    const ready = jobs.filter(job => job.status === "queued" &&
-      job.dependsOn.every(id => jobs.some(dependency => dependency.id === id && dependency.status === "ready")));
-    if (!ready.length) {
-      for (const job of jobs) if (job.status === "queued") job.status = "blocked";
-      return;
+  const running = new Set<Promise<void>>();
+
+  async function runJob(job: Job) {
+    job.status = "running";
+    job.startedAt = Date.now();
+    try {
+      await execute(job, jobs.filter(input => job.dependsOn.includes(input.id)));
+      job.status = "ready";
+    } catch {
+      job.status = "failed";
+    } finally {
+      job.finishedAt = Date.now();
     }
-    // 每张工单在调用异步执行器前领取一次，失败的前置单不开放后续工单。
-    await Promise.all(ready.slice(0, concurrency).map(async job => {
-      job.status = "running";
-      job.startedAt = Date.now();
-      try {
-        await execute(job, jobs.filter(input => job.dependsOn.includes(input.id)));
-        job.status = "ready";
-      } catch {
-        job.status = "failed";
-      } finally {
-        job.finishedAt = Date.now();
-      }
-    }));
   }
+
+  while (true) {
+    for (const job of jobs) {
+      if (running.size === concurrency) break;
+      if (job.status !== "queued" ||
+        !job.dependsOn.every(id => jobs.some(dependency => dependency.id === id && dependency.status === "ready"))) continue;
+      const operation = runJob(job).then(() => {
+        running.delete(operation);
+      });
+      running.add(operation);
+    }
+    if (!running.size) break;
+    // 任一工单完成就重新查找可运行的工单，空出的名额不必等整批结束。
+    await Promise.race(running);
+  }
+  for (const job of jobs) if (job.status === "queued") job.status = "blocked";
 }
 
 function planFor(flow: Flow) {
