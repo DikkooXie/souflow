@@ -5,14 +5,15 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultAuditThresholds, openActivityStore, readActivity, scrubAuditText } from "../audit/activity-store.mts";
 import { defaultAnswerMaxLength, maxQuestionsPerDecision } from "../decisions/questions.mts";
-import { codeReviewOptions, createLocalDispatch } from "../execution/local-dispatch.mts";
+import { codeReviewOptions, createLocalDispatch, type Run } from "../execution/local-dispatch.mts";
 import { createDispatchMonitor } from "../execution/dispatch-monitor.mts";
-import { createConversationFlows, currentDevelopmentPlan, maxArtifactTextLength, phases, readPlanRevision } from "../planning/conversation-flow.mts";
+import { createConversationFlows, currentDevelopmentPlan, maxArtifactTextLength, phases, readPlanRevision, type StoredFlow } from "../planning/conversation-flow.mts";
 import { createProjectContextReader, type ProjectSettings } from "../planning/project-context.mts";
 import { createCodexInbox } from "./codex-inbox.mts";
 import { createDecisionDemo, type DecisionCard } from "./demo-state.mts";
-import { createAcceptance, maxAcceptanceNote, type AcceptanceAction } from "./acceptance.mts";
+import { createAcceptance, maxAcceptanceNote, type AcceptanceAction, type StoredAcceptance } from "./acceptance.mts";
 import { createMembers, type Member, type MemberKeys } from "./members.mts";
+import { bindWorkbench, lockWorkbench } from "./recovery.mts";
 
 const address = "127.0.0.1";
 const defaultLimits = { demo: 24, codex: 4 };
@@ -55,7 +56,7 @@ type WorkbenchOptions = {
   inputLimits?: typeof defaultInputLimits;
   auditThresholds?: typeof defaultAuditThresholds;
   dispatchConcurrency?: number;
-  dispatchAdapters?: Omit<NonNullable<Parameters<typeof createLocalDispatch>[2]>, "record">;
+  dispatchAdapters?: Omit<NonNullable<Parameters<typeof createLocalDispatch>[2]>, "record" | "store" | "artifactRoot">;
   project?: ProjectSettings;
   members?: MemberKeys;
   hostName?: string;
@@ -68,23 +69,48 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
   const memberFor = members && createMembers(members);
   if (memberFor && !live) throw Error("两位成员模式需要 Codex 工作台。");
   const loadProject = live && project ? createProjectContextReader(live[0], project) : undefined;
-  const audit = openActivityStore(auditPath, Date.now, auditThresholds);
+  const database = auditPath && auditPath !== ":memory:" ? resolve(auditPath) : undefined;
+  const release = database ? lockWorkbench(database) : undefined;
+  const audit = (() => {
+    try {
+      return openActivityStore(database, Date.now, auditThresholds);
+    } catch (error) {
+      release?.();
+      throw error;
+    }
+  })();
+  const closeStore = () => {
+    try { audit.close(); } finally { release?.(); }
+  };
   const { promptMaxLength, answerMaxLength } = inputLimits;
   // JSON 可能将每个 UTF-16 码元转义为六个字节，给包裹字段另留空间。
   const promptBodyBytes = jsonMetadataBudget + 6 * promptMaxLength;
   const answerBodyBytes = jsonMetadataBudget + 6 * answerMaxLength * maxQuestionsPerDecision;
   const demo = createDecisionDemo(receiptDelay, audit.record, answerMaxLength);
   const monitor = live ? createDispatchMonitor(hostName) : undefined;
-  const codex = live ? createCodexInbox(live[0], {
-    limit: limits.codex, answerMaxLength, startAttempt: live[1], record: audit.record,
-    ...(monitor ? { monitor } : {}),
-  }) : undefined;
-  const inbox = codex ?? demo;
-  const flows = createConversationFlows(inbox.runPhase, codex ? limits.codex : limits.demo, audit.record, loadProject);
-  const dispatch = live ? createLocalDispatch(live[0], dispatchConcurrency, { ...dispatchAdapters, record: audit.record,
-    ...(monitor ? { monitor } : {}),
-  }) : undefined;
-  const acceptance = memberFor && createAcceptance(audit.record);
+  const recovery = !!(live && database);
+  const { codex, inbox, flows, dispatch, acceptance } = (() => {
+    try {
+      if (database) bindWorkbench(audit, live ? resolve(live[0]) : "", !!memberFor);
+      const codex = live ? createCodexInbox(live[0], {
+        limit: limits.codex, answerMaxLength, startAttempt: live[1], record: audit.record,
+        ...(monitor ? { monitor } : {}),
+        ...(recovery ? { store: audit.checkpoint<DecisionCard>("decisions") } : {}),
+      }) : undefined;
+      const inbox = codex ?? demo;
+      const flows = createConversationFlows(inbox.runPhase, codex ? limits.codex : limits.demo, audit.record, loadProject,
+        recovery ? audit.checkpoint<StoredFlow>("flows") : undefined);
+      const dispatch = live ? createLocalDispatch(live[0], dispatchConcurrency, { ...dispatchAdapters, record: audit.record,
+        ...(monitor ? { monitor } : {}),
+        ...(recovery ? { store: audit.checkpoint<Run>("dispatch"), artifactRoot: `${database}.artifacts` } : {}),
+      }) : undefined;
+      const acceptance = memberFor && createAcceptance(audit.record, recovery ? audit.checkpoint<StoredAcceptance>("acceptance") : undefined);
+      return { codex, inbox, flows, dispatch, acceptance };
+    } catch (error) {
+      closeStore();
+      throw error;
+    }
+  })();
   const snapshot = (member?: Member) => {
     const conversations = flows.list();
     const reviewCards = dispatch?.reviews().map(({ run, job, artifact, patchPath, successors }): DecisionCard => ({
@@ -203,6 +229,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         }
         if (path === "/api/workflows") {
           const flow = !codex || codex.canBegin() ? flows.begin(prompt.trim()) : undefined;
+          if (flow === null) return send(503, { error: "暂时无法保存需求。" });
           return flow ? send(200, { ...state(), flowId: flow.id }) : send(409, {
             ...state(), error: "进行中的需求已达上限，请先处理待决策事项。",
           });
@@ -218,6 +245,16 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         demo.reset();
         flows.reset();
         return send(200, state());
+      }
+      const resumeFlow = /^\/api\/workflows\/([a-f0-9-]+)\/resume$/.exec(path)?.[1];
+      if (resumeFlow && codex) {
+        if (!allowed("implementer", "flow.resume", resumeFlow)) return;
+        const flow = flows.list().find(item => item.id === resumeFlow);
+        if (!flow) return send(404, { error: "需求对话不存在。" });
+        const status = codex.canBegin() ? flows.resume(flow) : 409;
+        return status === 200 ? send(200, { ...state(), flowId: flow.id }) : send(status, {
+          ...state(), error: status === 503 ? "暂时无法保存规划状态。" : "需求当前不可恢复，或进行中的会话已达上限。",
+        });
       }
       const revisionFlow = /^\/api\/workflows\/([a-f0-9-]+)\/plan\/revise$/.exec(path)?.[1];
       if (revisionFlow) {
@@ -235,7 +272,8 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           details: { actor: member.id, plan: currentDevelopmentPlan(flow)?.version } });
         return status === 200 ? send(200, state()) : send(status, {
           ...state(),
-          error: status === 409 ? "计划版本已变更，或当前批次仍在执行、待验收或已通过。" : "计划内容没有变化。",
+          error: status === 409 ? "计划版本已变更，或当前批次仍在执行、待验收或已通过。"
+            : status === 503 ? "暂时无法保存计划。" : "计划内容没有变化。",
         });
       }
       const dispatchAction = /^\/api\/workflows\/([a-f0-9-]+)\/local-dispatch\/(prepare|start)$/.exec(path);
@@ -250,10 +288,16 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         if (dispatchAction[2] === "prepare") {
           const kind = (body.value as { kind?: unknown } | null)?.kind ?? "report";
           if (kind !== "report" && kind !== "code") return send(422, { error: "请选择已支持的工单类型。" });
-          return dispatch.prepare(flow, kind) === 200 ? send(200, state()) : send(409, { error: "请等待其他本地任务结束，再准备已完成计划的工单。" });
+          const status = dispatch.prepare(flow, kind);
+          return status === 200 ? send(200, state()) : send(status, {
+            error: status === 503 ? "暂时无法保存工单。" : "请等待其他本地任务结束，再准备已完成计划的工单。",
+          });
         }
         const id = (body.value as { id?: unknown } | null)?.id;
-        return dispatch.start(flow, id) === 200 ? send(200, state()) : send(409, { error: "工单尚未就绪，或确认的计划已失效。" });
+        const status = dispatch.start(flow, id);
+        return status === 200 ? send(200, state()) : send(status, {
+          error: status === 503 ? "暂时无法保存工单。" : "工单尚未就绪，或确认的计划已失效。",
+        });
       }
       const delivery = /^\/api\/acceptance\/([a-f0-9-]+)\/(submit|return|accept)$/.exec(path);
       if (delivery && member && acceptance && dispatch) {
@@ -276,7 +320,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       }
       const action = /^\/api\/decisions\/([a-f0-9-]+)\/(answer|disconnect)$/.exec(path);
       if (action?.[1]) {
-        let status: ReturnType<typeof demo.submit>;
+        let status: ReturnType<typeof inbox.submit>;
         if (action[2] === "disconnect") {
           if (codex) return send(404, { error: "该操作用于本地演示。" });
           status = demo.disconnect(action[1]);
@@ -295,7 +339,8 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
             });
           }
         }
-        const errors: Record<404 | 409 | 422, string> = {
+        const errors: Record<404 | 409 | 422 | 503, string> = {
+          503: "暂时无法保存答复，请稍后重试。",
           404: "这条提问已失效或已被移除。",
           409: "这条提问已有答复或已失效。",
           422: `请为每个问题填写有效回答，自定义回答最多 ${answerMaxLength} 字。`,
@@ -311,7 +356,10 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
   server.on("close", () => {
     const attempts = inbox.close();
     // 结束尝试时仍会产生最终状态，先让编排写完这些事件再关闭存储。
-    void Promise.allSettled([attempts, flows.settled(), dispatch?.close()]).then(audit.close);
+    void Promise.allSettled([attempts, flows.settled(), dispatch?.close()]).then(() => {
+      closeStore();
+      server.emit("workbenchClosed");
+    });
   });
   return server;
 }

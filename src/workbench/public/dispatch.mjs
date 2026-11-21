@@ -47,7 +47,7 @@ export function createDispatchPanel(node, post, openDecisions) {
   document.querySelector("#close-dispatch").addEventListener("click", () => dialog.close());
   prepare.addEventListener("click", () => { if (currentFlow) void post(path("prepare"), { kind: kind.value }); });
   start.addEventListener("click", () => {
-    if (currentFlow && !version.value && currentRun?.status === "ready") void post(path("start"), { id: currentRun.id });
+    if (currentFlow && !version.value && ["ready", "paused"].includes(currentRun?.status)) void post(path("start"), { id: currentRun.id });
   });
   review.addEventListener("click", () => {
     dialog.close();
@@ -97,8 +97,8 @@ export function createDispatchPanel(node, post, openDecisions) {
   function render() {
     const plan = currentFlow?.outputs.flatMap(output => output.artifacts).find(artifact => artifact.kind === "development-plan");
     const candidates = currentRuns.filter(run => run.flowId === currentFlow?.id && run.kind === kind.value);
-    currentRun = candidates.find(run => run.plan.id === plan?.id && run.plan.version === plan.version);
-    const older = candidates.filter(run => run.plan.version < plan?.version).toReversed();
+    currentRun = candidates.findLast(run => run.plan.id === plan?.id && run.plan.version === plan.version);
+    const older = candidates.filter(run => run.id !== currentRun?.id && run.plan.version <= plan?.version).toReversed();
     const versionsKey = JSON.stringify([currentFlow?.id, kind.value, plan?.version, older.map(run => run.id)]);
     if (version.dataset.key !== versionsKey) {
       version.dataset.key = versionsKey;
@@ -106,7 +106,7 @@ export function createDispatchPanel(node, post, openDecisions) {
       const latest = node("option", "", `当前计划 v${plan?.version ?? ""}`);
       latest.value = "";
       version.replaceChildren(latest, ...older.map(run => {
-        const option = node("option", "", `计划 v${run.plan.version}（历史）`);
+        const option = node("option", "", `计划 v${run.plan.version} · ${run.id.slice(0, 8)}（历史批次）`);
         option.value = run.id;
         return option;
       }));
@@ -123,13 +123,15 @@ export function createDispatchPanel(node, post, openDecisions) {
     rendered = key;
     prepare.hidden = member?.id === "reviewer" || locked || !!past || (!!run && run.status !== "failed");
     prepare.textContent = run?.status === "failed" ? "重新准备工单" : "准备工单";
-    start.hidden = member?.id === "reviewer" || locked || !!past || run?.status !== "ready";
+    start.hidden = member?.id === "reviewer" || locked || !!past || !["ready", "paused"].includes(run?.status);
+    start.textContent = run?.status === "paused" ? "继续派发剩余工单" : "确认并执行";
     status.textContent = past ? `计划 v${past.plan.version} 的历史批次。请切回当前版本准备或执行工单。`
       : !run ? `从开发计划 v${plan?.version ?? ""} 准备本地工单。代码补丁留在独立工作区，供人工复核。`
       : run.status === "preparing" ? "正在生成工单…"
         : run.status === "ready" ? `核对${run.kind === "code" ? "代码" : "核验"}工单后确认执行。使用开发计划 v${run.plan.version} 和仓库提交 ${run.revision.slice(0, 8)}，工作区未提交内容不在本轮资料内。`
           : run.status === "waiting" ? "前往「待决策」验收前置补丁，通过后继续执行。"
-            : run.status === "running" ? "正在按依赖派发本机 Codex 会话…"
+            : run.status === "paused" ? "批次已恢复。批次中的前置补丁和审批记录已保留，确认后继续等待审批或派发剩余工单。"
+              : run.status === "running" ? "正在按依赖派发本机 Codex 会话…"
             : run.status === "finished" ? (run.kind === "code" ? "代码补丁已生成。" : "核验报告已生成。") : run.error ?? "部分工单未完成。";
     renderDelivery(run, locked, !!past);
     const previouslyOpen = new Set([...list.querySelectorAll("details[open]")].map(item => item.dataset.job));

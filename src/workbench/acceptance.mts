@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
-import { scrubAuditText, type BusinessEvent } from "../audit/activity-store.mts";
+import { scrubAuditText, type BusinessEvent, type Checkpoint } from "../audit/activity-store.mts";
 import type { createLocalDispatch } from "../execution/local-dispatch.mts";
 import { readLocalCodePatch } from "../execution/local-code-changes.mts";
 import { currentDevelopmentPlan, type Flow } from "../planning/conversation-flow.mts";
@@ -26,8 +26,10 @@ async function verifyReport(path: string, text: string) {
   }
 }
 
-export function createAcceptance(record: (event: BusinessEvent) => boolean) {
-  const receipts = new Map<string, Receipt[]>();
+export type StoredAcceptance = { id: string; history: Receipt[] };
+
+export function createAcceptance(record: (event: BusinessEvent) => boolean, store?: Checkpoint<StoredAcceptance>) {
+  const receipts = new Map((store?.load() ?? []).map(({ id, history }) => [id, history]));
   const current = (run: Run) => receipts.get(run.id)?.at(-1)?.decision;
   return {
     history: (id: string) => receipts.get(id) ?? [],
@@ -60,11 +62,13 @@ export function createAcceptance(record: (event: BusinessEvent) => boolean) {
       // 两个请求可能同时核对文件，写入前再次检查当前批次和状态。
       if (!valid()) return 409;
       const receipt = { decision: actions[action], actor, at: new Date().toISOString(), note: scrubAuditText(note.trim()) };
-      if (!record({ kind: "acceptance.decided", flowId: run.flowId, subject: run.id, details: {
+      const history = [...(receipts.get(run.id) ?? []), receipt];
+      const event: BusinessEvent = { kind: "acceptance.decided", flowId: run.flowId, subject: run.id, details: {
         ...receipt, plan: run.plan, revision: run.revision,
         artifacts: run.jobs.map(job => ({ ticketId: job.id, artifactId: job.artifact?.id, patchSha256: job.artifact?.patchSha256 })),
-      } })) return 503;
-      receipts.set(run.id, [...(receipts.get(run.id) ?? []), receipt]);
+      } };
+      if (!(store ? store.save(run.id, { id: run.id, history }, event) : record(event))) return 503;
+      receipts.set(run.id, history);
       return 200;
     },
   };

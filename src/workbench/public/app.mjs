@@ -19,6 +19,9 @@ const welcome = document.querySelector("#welcome");
 const conversation = document.querySelector("#conversation");
 const conversationMessage = document.querySelector("#conversation-message");
 const conversationStatus = document.querySelector("#conversation-status");
+const resumeWorkflow = document.querySelector("#resume-workflow");
+const interruptedDecisions = document.querySelector("#interrupted-decisions");
+const interruptedDecisionList = document.querySelector("#interrupted-decision-list");
 const projectContext = document.querySelector("#project-context");
 const projectSources = document.querySelector("#project-sources");
 const sidebarToggle = document.querySelector("#toggle-conversations");
@@ -242,15 +245,35 @@ function renderConversation(flow, pending) {
   conversation.hidden = !flow;
   promptBox.placeholder = flow ? "发起另一项需求…" : "描述你的需求…";
   if (!flow) return;
+  resumeWorkflow.hidden = !live || member?.id === "reviewer" || flow.status !== "interrupted";
+  resumeWorkflow.dataset.subject = flow.id;
+  renderInterruptedDecisions(flow);
   if (conversationMessage.textContent !== flow.prompt) conversationMessage.textContent = flow.prompt;
   const waiting = pending.some(request => request.flowId === flow.id);
   const note = flow.status === "ready" ? "项目文档已就绪。"
-    : flow.status === "failed" ? "这项需求暂未完成。"
-      : waiting ? "有一个问题需要你决定。" : "正在推进你的需求…";
+    : flow.status === "interrupted" ? "规划已中断，已完成的项目文档已保留。"
+      : flow.status === "failed" ? "这项需求暂未完成。"
+        : waiting ? "有一个问题需要你决定。" : "正在推进你的需求…";
   if (conversationStatus.textContent !== note) conversationStatus.textContent = note;
   renderProjectSources(flow);
   openArchive.hidden = !flow.outputs.some(output => output.artifacts.length);
   openArchive.dataset.subject = flow.id;
+}
+
+function renderInterruptedDecisions(flow) {
+  const cards = requests.filter(card => card.flowId === flow.id && ["expired", "uncertain"].includes(card.status));
+  interruptedDecisions.hidden = cards.length === 0;
+  const key = JSON.stringify([flow.id, cards.map(card => [card.id, card.status])]);
+  if (interruptedDecisions.dataset.key === key) return;
+  if (interruptedDecisions.dataset.flow !== flow.id) interruptedDecisions.open = false;
+  interruptedDecisions.dataset.key = key;
+  interruptedDecisions.dataset.flow = flow.id;
+  interruptedDecisionList.replaceChildren(...cards.map(card => {
+    const item = node("li");
+    item.append(node("strong", "", card.status === "expired" ? "原会话提问已失效" : "答复回执待核对"),
+      node("p", "archive-text", card.questions.map(question => question.prompt).join("\n")));
+    return item;
+  }));
 }
 
 function renderProjectSources(flow) {
@@ -494,6 +517,9 @@ document.querySelector("#close-decision").addEventListener("click", () => dialog
 dialog.addEventListener("close", () => {
   reportView();
   if (auditOpen) void audit.refresh();
+});
+resumeWorkflow.addEventListener("click", () => {
+  if (selectedFlow) void post(`/api/workflows/${selectedFlow}/resume`);
 });
 openArchive.addEventListener("click", () => archive.show(flows.find(entry => entry.id === selectedFlow)));
 promptBox.addEventListener("keydown", event => {
