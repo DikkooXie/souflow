@@ -14,7 +14,8 @@ const controls = [
 export type BusinessEvent = {
   kind: "request.submitted" | "phase.started" | "phase.completed" | "flow.finished" | "decision.opened"
     | "decision.answered" | "decision.updated" | "demo.reset" | "attempt.started" | "attempt.finished" | "model.started"
-    | "dispatch.prepared" | "dispatch.started" | "dispatch.reviewed" | "dispatch.finished" | "plan.revised";
+    | "dispatch.prepared" | "dispatch.started" | "dispatch.reviewed" | "dispatch.finished" | "plan.revised"
+    | "member.denied" | "member.revised" | "acceptance.decided";
   flowId?: string | undefined;
   attemptId?: string | undefined;
   subject?: string;
@@ -172,15 +173,17 @@ export function openActivityStore(path = ":memory:", now = Date.now, thresholds 
 
   return {
     record(event: BusinessEvent) {
-      if (closed) return;
+      if (closed) return false;
       try {
         const details = event.details ? JSON.stringify(event.details, (key, value: unknown) => {
           if (typeof value !== "string") return value;
           return credentialField(key) ? "[已隐藏凭据]" : scrubAuditText(value);
         }) : null;
         insertBusiness.run(now(), event.kind, event.flowId ?? null, event.attemptId ?? null, event.subject ?? null, details);
+        return true;
       } catch {
         missed += 1;
+        return false;
       }
     },
     recordActivity(event: Activity) {
