@@ -3,6 +3,7 @@ import { basename } from "node:path";
 
 const scenario = process.argv[2];
 const expectedModel = process.argv[3];
+let delayedAccount;
 const threadId = basename(process.cwd());
 const turnId = "turn-1";
 const questionMode = scenario.startsWith("question-");
@@ -50,6 +51,20 @@ input.on("line", line => {
       return;
     case "initialized":
       return;
+    case "account/read": {
+      if (message.params.refreshToken !== false) throw Error("观察账号不得刷新凭据。");
+      if (scenario === "question-account-silent") return;
+      if (scenario === "question-account-unsupported") {
+        send({ id: message.id, error: { code: -32601 } });
+        return;
+      }
+      const account = { type: scenario === "question-account-key" ? "apiKey" : "chatgpt", email: "private@example.invalid" };
+      const userId = scenario === "question-account-missing" ? null : scenario === "question-account-other" ? "fixture-other" : "fixture-primary";
+      const reply = { id: message.id, result: { account, userId } };
+      if (scenario === "question-account-late") delayedAccount = reply;
+      else send(reply);
+      return;
+    }
     case "config/read":
       if (scenario === "question-invalid-config") {
         send({ id: message.id, result: { config: { mcp_servers: [] } } });
@@ -74,7 +89,7 @@ input.on("line", line => {
         const request = structuredClone(scenario === "question-command" ? approval : question);
         if (scenario === "question-foreign-thread") request.params.threadId = "another-thread";
         if (scenario === "question-foreign-turn") request.params.turnId = "another-turn";
-        send({ id: message.id, result: { turn: { id: turnId } } }, request);
+        send({ id: message.id, result: { turn: { id: turnId } } }, ...(delayedAccount ? [delayedAccount] : []), request);
         return;
       }
       const request = structuredClone(approval);

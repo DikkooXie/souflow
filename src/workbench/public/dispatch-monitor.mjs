@@ -9,6 +9,7 @@ const labels = {
 const clock = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const pollMs = 1500;
 const overviewJobLimit = 6;
+const accountLabel = item => item.accountRef ? `账号 ${item.accountRef}` : "账号未知";
 const jobKey = item => item.ticketId ? `${item.batchId}/${item.ticketId}` : undefined;
 
 function stageFor(job, session) {
@@ -52,9 +53,9 @@ export function createMonitorView(node, selectFlow, onViewChange) {
     const detail = node("p", "monitor-project", [item.title, item.planVersion ? `计划 v${item.planVersion}` : "", host].filter(Boolean).join(" · "));
     row.append(heading, detail);
     if (job?.dependsOn.length) row.append(node("p", "monitor-meta", `依赖 ${job.dependsOn.join("、")}`));
-    if (item.model || item.threadId) {
+    if (item.model || item.threadId || item.accountRef) {
       const thread = item.threadId ? `会话 …${item.threadId.slice(-8)}` : "";
-      const meta = node("p", "monitor-meta", [item.model, thread].filter(Boolean).join(" · "));
+      const meta = node("p", "monitor-meta", [accountLabel(item), item.model, thread].filter(Boolean).join(" · "));
       if (item.threadId) meta.title = item.threadId;
       row.append(meta);
     }
@@ -174,7 +175,7 @@ export function createMonitorView(node, selectFlow, onViewChange) {
         const title = session.threadId ? `Codex Agent · …${session.threadId.slice(-8)}` : "Codex Agent";
         const stage = stageFor(jobs.get(jobKey(session)), session);
         const task = [session.ticketId, session.task].filter(Boolean).join(" · ");
-        const agent = topologyNode("agent", session.id, title, task, labels[stage], session.status);
+        const agent = topologyNode("agent", session.id, title, task, `${labels[stage]} · ${accountLabel(session)}`, session.status);
         routes.push({ from: device, to: agent, state: session.status });
         agents.append(agent);
       }

@@ -184,7 +184,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
                 const input = byId.get(id);
                 return input?.status !== "ready" || (run.kind === "code" && input.artifact?.review !== "accepted");
               }) : [],
-              startedAt: job.startedAt, finishedAt: job.finishedAt,
+              startedAt: job.startedAt, finishedAt: job.finishedAt, accountRef: job.accountRef,
               reviewing: job.artifact ? reviewing.has(job.artifact.id) : false, review: job.artifact?.review,
             }));
           });
