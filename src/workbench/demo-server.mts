@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { openActivityStore, readActivity } from "../audit/activity-store.mts";
+import { defaultAuditThresholds, openActivityStore, readActivity } from "../audit/activity-store.mts";
 import { defaultAnswerMaxLength, maxQuestionsPerDecision } from "../decisions/questions.mts";
 import { createConversationFlows, phases } from "../planning/conversation-flow.mts";
 import { createCodexInbox } from "./codex-inbox.mts";
@@ -40,12 +40,13 @@ type LiveOptions = [workspace: string, startAttempt?: Parameters<typeof createCo
 type WorkbenchOptions = {
   limits?: typeof defaultLimits;
   inputLimits?: typeof defaultInputLimits;
+  auditThresholds?: typeof defaultAuditThresholds;
 };
 
 export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions, auditPath?: string, {
-  limits = defaultLimits, inputLimits = defaultInputLimits,
+  limits = defaultLimits, inputLimits = defaultInputLimits, auditThresholds = defaultAuditThresholds,
 }: WorkbenchOptions = {}) {
-  const audit = openActivityStore(auditPath);
+  const audit = openActivityStore(auditPath, Date.now, auditThresholds);
   const { promptMaxLength, answerMaxLength } = inputLimits;
   // JSON 可能将每个 UTF-16 码元转义为六个字节，给包裹字段另留空间。
   const promptBodyBytes = jsonMetadataBudget + 6 * promptMaxLength;
@@ -192,7 +193,12 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     promptMaxLength: integerSetting("SOULFLOW_PROMPT_MAX_LENGTH", defaultInputLimits.promptMaxLength, 1, maxConfigurableInputLength),
     answerMaxLength: integerSetting("SOULFLOW_ANSWER_MAX_LENGTH", defaultInputLimits.answerMaxLength, 1, maxConfigurableInputLength),
   };
-  const server = createWorkbenchServer(undefined, live ? [process.cwd()] : undefined, auditPath, { limits, inputLimits });
+  const auditThresholds = {
+    repeatClickMs: integerSetting("SOULFLOW_AUDIT_REPEAT_CLICK_MS", defaultAuditThresholds.repeatClickMs, 1),
+    quickReturnMs: integerSetting("SOULFLOW_AUDIT_QUICK_RETURN_MS", defaultAuditThresholds.quickReturnMs, 1),
+    insightMinCount: integerSetting("SOULFLOW_AUDIT_INSIGHT_MIN_COUNT", defaultAuditThresholds.insightMinCount, 1),
+  };
+  const server = createWorkbenchServer(undefined, live ? [process.cwd()] : undefined, auditPath, { limits, inputLimits, auditThresholds });
   server.listen(port, address, () => {
     const bound = server.address();
     if (bound && typeof bound !== "string") {

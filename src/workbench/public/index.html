@@ -63,7 +63,7 @@
       <div class="audit-breakdown">
         <section aria-labelledby="audit-clicks-title">
           <h2 id="audit-clicks-title">点击与重复</h2>
-          <p class="audit-help">同一标签页、同一视图，两秒内连续操作同一控件和对象，计为重复。</p>
+          <p id="audit-click-rule" class="audit-help"></p>
           <!-- biome-ignore lint/a11y/noNoninteractiveTabindex: 排行没有可聚焦的子元素，键盘用户可聚焦区块后滚动。 -->
           <section class="audit-ranking-scroll" aria-label="点击与重复排行" tabindex="0">
             <ul id="audit-clicks" class="audit-ranking"></ul>
@@ -71,7 +71,7 @@
         </section>
         <section aria-labelledby="audit-paths-title">
           <h2 id="audit-paths-title">视图切换</h2>
-          <p class="audit-help">同一标签页内，30 秒内切回上一个视图，计为一次返回。</p>
+          <p id="audit-return-rule" class="audit-help"></p>
           <!-- biome-ignore lint/a11y/noNoninteractiveTabindex: 排行没有可聚焦的子元素，键盘用户可聚焦区块后滚动。 -->
           <section class="audit-ranking-scroll" aria-label="视图切换排行" tabindex="0">
             <ul id="audit-paths" class="audit-ranking"></ul>

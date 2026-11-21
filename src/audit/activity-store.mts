@@ -18,6 +18,11 @@ export type BusinessEvent = {
   details?: object;
 };
 export type RecordBusiness = (event: BusinessEvent) => void;
+export const defaultAuditThresholds = {
+  repeatClickMs: 2000,
+  quickReturnMs: 30_000,
+  insightMinCount: 3,
+};
 
 type Activity = {
   id: string;
@@ -78,7 +83,7 @@ export function auditDecisionAnswers(
   ]));
 }
 
-export function openActivityStore(path = ":memory:", now = Date.now) {
+export function openActivityStore(path = ":memory:", now = Date.now, thresholds = defaultAuditThresholds) {
   if (path !== ":memory:") {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     const fd = openSync(path, constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
@@ -125,7 +130,7 @@ export function openActivityStore(path = ":memory:", now = Date.now) {
       FROM activity_events WHERE browser_session IS NOT NULL AND recorded_at >= ?
       WINDOW per_tab AS (PARTITION BY browser_session ORDER BY seq)
     )
-    SELECT control, count(*) AS count, sum(CASE WHEN gap BETWEEN 0 AND 2000 AND prev_kind = 'ui.click'
+    SELECT control, count(*) AS count, sum(CASE WHEN gap BETWEEN 0 AND ? AND prev_kind = 'ui.click'
       AND prev_view = view AND prev_control = control AND prev_subject IS subject THEN 1 ELSE 0 END) AS repeated
     FROM actions WHERE kind = 'ui.click' GROUP BY control ORDER BY count DESC, control LIMIT 12
   `);
@@ -137,7 +142,7 @@ export function openActivityStore(path = ":memory:", now = Date.now) {
       WINDOW per_tab AS (PARTITION BY browser_session ORDER BY seq)
     )
     SELECT min(view, destination) AS first, max(view, destination) AS second, count(*) AS count,
-      sum(CASE WHEN gap BETWEEN 0 AND 30000 AND prev_view = destination AND prev_destination = view THEN 1 ELSE 0 END) AS reversals
+      sum(CASE WHEN gap BETWEEN 0 AND ? AND prev_view = destination AND prev_destination = view THEN 1 ELSE 0 END) AS reversals
     FROM moves GROUP BY first, second ORDER BY reversals DESC, count DESC, first, second LIMIT 12
   `);
   const recent = db.prepare(`
@@ -179,9 +184,10 @@ export function openActivityStore(path = ":memory:", now = Date.now) {
       const generatedAt = now();
       const since = generatedAt - days * 86_400_000;
       return {
-        days, generatedAt, missed,
+        days, generatedAt, missed, thresholds,
         totals: Object.fromEntries(totals.all(since).map(row => [row.kind, row.total])),
-        clicks: clicks.all(since), transitions: transitions.all(since), interactions: recentInteractions.all(since),
+        clicks: clicks.all(since, thresholds.repeatClickMs), transitions: transitions.all(since, thresholds.quickReturnMs),
+        interactions: recentInteractions.all(since),
         recent: recent.all(since).map(row => ({
           id: row.id as number, version: row.version as number, at: row.at as number, kind: row.kind as BusinessEvent["kind"],
           flowId: row.flowId as string | null, attemptId: row.attemptId as string | null, subject: row.subject as string | null,

@@ -138,6 +138,9 @@ test("loads local environment settings at startup and keeps the file off HTTP", 
     "SOULFLOW_DEMO_MAX_CONCURRENT=1",
     "SOULFLOW_PROMPT_MAX_LENGTH=8000",
     "SOULFLOW_ANSWER_MAX_LENGTH=6",
+    "SOULFLOW_AUDIT_REPEAT_CLICK_MS=600",
+    "SOULFLOW_AUDIT_QUICK_RETURN_MS=1500",
+    "SOULFLOW_AUDIT_INSIGHT_MIN_COUNT=1",
     `SOULFLOW_AUDIT_DB="${auditPath}"`,
     "OPENAI_API_KEY=synthetic-test-value",
   ].join("\n"), { mode: 0o600 });
@@ -164,6 +167,9 @@ test("loads local environment settings at startup and keeps the file off HTTP", 
   assert.doesNotMatch(await envResponse.text(), /synthetic-test-value/);
   const snapshot = await (await fetch(`${origin}/api/decisions`)).json() as Snapshot;
   assert.deepEqual(snapshot.inputLimits, { promptMaxLength: 8000, answerMaxLength: 6 });
+  const report = await fetch(`${origin}/api/audit`);
+  assert.equal(report.status, 200);
+  assert.deepEqual((await report.json()).thresholds, { repeatClickMs: 600, quickReturnMs: 1500, insightMinCount: 1 });
   const firstCard = snapshot.requests[0];
   assert.ok(firstCard);
   const post = (path: string, body: object) => fetch(origin + path, {

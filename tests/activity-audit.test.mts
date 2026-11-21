@@ -44,6 +44,31 @@ test("counts retries once and measures repeats and returns within a tab", () => 
   }
 });
 
+test("uses configured audit windows including the exact boundary", () => {
+  const thresholds = { repeatClickMs: 600, quickReturnMs: 1500, insightMinCount: 1 };
+  const audit = openActivityStore(":memory:", () => 100_000, thresholds);
+  const session = randomUUID();
+  const click = { kind: "ui.click", view: "home", control: "open-home" };
+  try {
+    for (const input of [
+      { ...click, elapsed: 0 }, { ...click, elapsed: 600 }, { ...click, elapsed: 1201 },
+      { kind: "ui.navigate", view: "home", destination: "audit", elapsed: 2000 },
+      { kind: "ui.navigate", view: "audit", destination: "home", elapsed: 3500 },
+      { kind: "ui.navigate", view: "home", destination: "audit", elapsed: 5001 },
+    ]) {
+      const event = readActivity({ id: randomUUID(), session, ...input });
+      assert.ok(event);
+      assert.ok(audit.recordActivity(event));
+    }
+    const report = audit.report(1);
+    assert.deepEqual(report.thresholds, thresholds);
+    assert.deepEqual({ ...report.clicks[0] }, { control: "open-home", count: 3, repeated: 1 });
+    assert.deepEqual({ ...report.transitions[0] }, { first: "audit", second: "home", count: 3, reversals: 1 });
+  } finally {
+    audit.close();
+  }
+});
+
 test("hides unprefixed credentials in structured answers without losing ordinary text", () => {
   const audit = openActivityStore();
   try {
