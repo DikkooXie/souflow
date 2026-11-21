@@ -1,6 +1,6 @@
 import { readDecisionAnswers } from "../decisions/questions.mts";
 import { startCodexQuestionAttempt, type CodexAttemptEvent } from "../execution/codex-command-attempt.mts";
-import { type Flow, makePhasePrompt, type Phase, readPhaseOutput } from "../planning/conversation-flow.mts";
+import { type Flow, makePhasePrompt, type Phase, type PhaseTarget, readPhaseOutput } from "../planning/conversation-flow.mts";
 import type { DecisionCard } from "./demo-state.mts";
 
 type Attempt = ReturnType<typeof startCodexQuestionAttempt>;
@@ -73,9 +73,9 @@ export function createCodexInbox(workspace: string, startAttempt: Start = startC
     snapshot: () => ({ requests, mode: "codex" as const, active: active.size, lastMessage }),
     begin,
     canBegin,
-    runPhase(flow: Flow, phase: Phase) {
+    runPhase(flow: Flow, phase: Phase, targets: readonly PhaseTarget[]) {
       return new Promise<string[] | undefined>(resolve => {
-        const status = begin(makePhasePrompt(flow, phase), {
+        const status = begin(makePhasePrompt(flow, phase, targets), {
           flow, phase, complete: output => resolve(readPhaseOutput(phase, output)),
         });
         if (status !== 200) resolve(undefined);

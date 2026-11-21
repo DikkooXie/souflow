@@ -153,7 +153,11 @@ test("real App Server question replies reach their originating sessions through 
     assert.ok(flow);
     if (flow.status === "ready") {
       assert.deepEqual(flow.outputs.map(entry => entry.title), phases.map(entry => entry.title));
-      assert.equal(flow.outputs[3]?.sections[0]?.text, "合成产物 PRD");
+      const [prd, plan] = flow.outputs[3]?.artifacts ?? [];
+      assert.ok(prd && plan);
+      assert.equal(prd.sections[0]?.text, "合成产物 PRD");
+      assert.deepEqual(plan.upstream[0], { id: prd.id, version: prd.version });
+      assert.deepEqual(flow.outputs[4]?.artifacts[0]?.upstream, [{ id: plan.id, version: plan.version }]);
       break;
     }
     assert.equal(flow.status, "running", `流程停在第 ${flow.outputs.length + 1} 阶段`);

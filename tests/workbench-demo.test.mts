@@ -101,7 +101,7 @@ test("advances only the workflow whose clarification was answered", { timeout: 5
   assert.equal(snapshot.flows[0]?.status, "running");
   assert.equal(snapshot.flows[1]?.status, "ready");
   assert.deepEqual(snapshot.flows[1]?.outputs.map(output => output.title), ["调研", "需求澄清", "技术选型", "开发文档", "拆单"]);
-  assert.match(snapshot.flows[1]?.outputs[3]?.sections[0]?.text ?? "", /CSV 首版/);
+  assert.match(snapshot.flows[1]?.outputs[3]?.artifacts[0]?.sections[0]?.text ?? "", /CSV 首版/);
   assert.equal(snapshot.requests.find(card => card.flowId === a.id)?.status, "pending");
 });
 

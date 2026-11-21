@@ -73,6 +73,8 @@ SOULFLOW_TEST_NATIVE_CODEX=1 node --experimental-strip-types --test tests/codex-
 
 本地服务只监听回环地址，最多同时运行四条 Codex 规划流程。卡片、路由和阶段草稿保存在内存中。当前流程产出可审阅的工单草稿，正式工单校验、确认版本后的派发、成员鉴权和持久化仍待实现。现有 Codex Desktop 对话尚未接入。真实模式的「原提问已关闭」来自 `serverRequest/resolved`，产物必须来自完成后的有效输出。
 
+工作台接口为原始请求和每份规划产物返回独立 ID、整数版本和上游 `{ id, version }` 引用。引用在启动阶段前由程序根据实际输入记录，并随阶段交给 Codex。PRD 和开发计划各自编号，两份文档在同一个阶段校验通过后一起记录。工单草稿集引用开发计划的具体版本，开发计划可再追到 PRD 和技术选型。当前每条新流程生成其产物的 v1，重启后内存记录随服务清除。
+
 ```sh
 SOULFLOW_TEST_NATIVE_CODEX=1 node --experimental-strip-types --test tests/codex-decision-inbox.test.mts
 ```

@@ -170,7 +170,9 @@ function renderConversation(pending) {
     section.dataset.phase = output.title;
     section.open = (previousFlow === flow.id && open.has(output.title)) || index === flow.outputs.length - 1;
     section.append(node("summary", "", output.title));
-    for (const item of output.sections) section.append(node("h3", "", item.title), node("p", "", item.text));
+    for (const { sections } of output.artifacts) {
+      for (const item of sections) section.append(node("h3", "", item.title), node("p", "", item.text));
+    }
     return section;
   });
   conversation.replaceChildren(node("h1", "visually-hidden", "需求对话"), node("p", "user-message", flow.prompt), ...outputs, status);

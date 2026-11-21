@@ -96,7 +96,10 @@ export function createDecisionDemo(receiptDelay = 650) {
           return;
         }
         case "技术选型": return ["优先复用现有技术栈和项目约定。", "依据已确认范围，先核对接入、维护与验收成本。"];
-        case "开发文档": return [flow.outputs[1]?.sections.map(section => section.text).join("\n\n") ?? "", "先实现核心路径（AC-1），再验证结果和失败状态（AC-2）。"];
+        case "开发文档": {
+          const requirements = flow.outputs.flatMap(output => output.artifacts).find(artifact => artifact.kind === "requirements");
+          return [requirements?.sections.map(section => section.text).join("\n\n") ?? "", "先实现核心路径（AC-1），再验证结果和失败状态（AC-2）。"];
+        }
         case "拆单": return ["T1 · 实现核心路径（AC-1）\nT2 · 补齐失败反馈与验收（AC-2）", "T2 依赖 T1。逐条执行验收条件，记录实际结果。"];
       }
     },
