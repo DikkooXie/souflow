@@ -235,6 +235,125 @@ test("revises a plan without reusing the old dispatch confirmation or changing a
   assert.deepEqual((await read()).flows[0]?.planHistory, [original, draft, current]);
 });
 
+for (const outcome of ["approved", "rejected", "tampered-before", "tampered-after"] as const) {
+  test(`code successors use only reviewed upstream patches (${outcome})`, { timeout: 10000 }, async t => {
+    const repo = await mkdtemp(join(tmpdir(), "souflow-dependency-workbench-"));
+    const guide = "docs/guide.md";
+    const rules = "docs/rules.md";
+    await mkdir(join(repo, "docs"));
+    await Promise.all([writeFile(join(repo, guide), "原始指引\n"), writeFile(join(repo, rules), "原始规则\n")]);
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+    git("init", "-q");
+    git("add", "docs");
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--no-gpg-sign", "-qm", "fixture");
+    const terminal = { finished: Promise.resolve("completed" as const), close() {} };
+    const steps = [
+      { id: "T1", dependsOn: [], path: guide, before: "原始指引", after: "已核准指引" },
+      { id: "T2", dependsOn: [], path: rules, before: "原始规则", after: "已核准规则" },
+      { id: "T3", dependsOn: ["T2", "T1"], path: guide, before: "已核准指引", after: "汇总指引" },
+      { id: "T4", dependsOn: ["T3", "T1"], path: rules, before: "已核准规则", after: "最终规则" },
+    ];
+    const directories = new Set<string>();
+    const started: string[] = [];
+    const { post, read, url } = await start(t, [repo, options => ({
+      ...terminal, answerQuestions: () => false,
+      output: () => JSON.stringify(Object.fromEntries(((options.outputSchema?.required ?? []) as string[]).map(field => [field, `示例${field}`]))),
+    })], { dispatchAdapters: {
+      split() {
+        return { ...terminal, answerQuestions: () => false, output: () => JSON.stringify({
+          tickets: [steps[3], steps[2], steps[1], steps[0]].map(step => ({
+            id: step?.id, title: step?.id, instructions: "更新两份说明", criteria: ["AC-1"],
+            dependsOn: step?.dependsOn, sources: [guide, rules], editPaths: [step?.path],
+          })),
+        }) };
+      },
+      execute(options) {
+        directories.add(join(options.workspace, "..", ".."));
+        const input = JSON.parse(options.prompt.split("\n\n").at(-1) ?? "{}");
+        const step = steps.find(item => item.id === input.title);
+        assert.ok(step);
+        started.push(step.id);
+        assert.equal(input.editableFiles[0]?.text, `${step.before}\n`);
+        if (step.id === "T3" || step.id === "T4") assert.equal(input.evidence[1]?.text, "已核准规则\n");
+        if (step.id === "T4") assert.equal(input.evidence[0]?.text, "汇总指引\n");
+        return { ...terminal, output: () => JSON.stringify({ report: step.id, edits: [step] }) };
+      },
+    } });
+    t.after(async () => {
+      for (const directory of directories) await rm(directory, { recursive: true, force: true });
+      await rm(repo, { recursive: true, force: true });
+    });
+    async function waitFor<T>(find: (snapshot: Snapshot) => T | undefined): Promise<T> {
+      for (let index = 0; index < 100; index++) {
+        const value = find(await read());
+        if (value !== undefined) return value;
+        await delay(20);
+      }
+      throw Error("等待依赖工单超时");
+    }
+    assert.equal((await post("/api/workflows", { prompt: "按依赖更新指引和规则" })).status, 200);
+    const flow = await waitFor(snapshot => snapshot.flows.find(item => item.status === "ready"));
+    const path = `/api/workflows/${flow.id}/local-dispatch`;
+    const reviewPath = (id: string) => `/api/decisions/${id}/answer`;
+    assert.equal((await post(`${path}/prepare`, { kind: "code" })).status, 200);
+    const run = await waitFor(snapshot => snapshot.dispatches.find(item => item.status !== "preparing"));
+    assert.equal(run.status, "ready", run.error);
+    assert.equal((await post(`${path}/start`, { id: run.id })).status, 200);
+    const pending = await waitFor(snapshot => snapshot.requests.length === 2 ? snapshot : undefined);
+    assert.deepEqual([...started].sort(), ["T1", "T2"]);
+    const first = pending.requests.find(card => card.title.includes("T1"));
+    const second = pending.requests.find(card => card.title.includes("T2"));
+    assert.ok(first && second);
+    const firstPatch = pending.dispatches[0]?.jobs.find(job => job.id === "T1")?.patchPath;
+    assert.ok(firstPatch);
+    assert.equal((await post(reviewPath(first.id), { review: "通过此版本" }, "https://example.test")).status, 403);
+    assert.equal((await post(reviewPath(first.id), { review: "模型自行批准" })).status, 422);
+    assert.equal((await post(`/api/workflows/${flow.id}/plan/revise`, { version: 1, text: "改版" })).status, 409);
+    if (outcome === "tampered-after") {
+      assert.equal((await post(reviewPath(first.id), { review: "通过此版本" })).status, 200);
+      await writeFile(firstPatch, "通过后被替换的补丁");
+    }
+    assert.equal((await post(reviewPath(second.id), { review: "通过此版本" })).status, 200);
+    assert.equal((await post(reviewPath(second.id), { review: "通过此版本" })).status, 409);
+    assert.deepEqual([...started].sort(), ["T1", "T2"]);
+    if (outcome === "tampered-before") await writeFile(firstPatch, "通过前被替换的补丁");
+    if (outcome === "approved") {
+      const repeated = await Promise.all([
+        post(reviewPath(first.id), { review: "通过此版本" }),
+        post(reviewPath(first.id), { review: "通过此版本" }),
+      ]);
+      assert.deepEqual(repeated.map(response => response.status).sort(), [200, 409]);
+      const third = await waitFor(snapshot => snapshot.requests.find(card => card.title.includes("T3")));
+      assert.deepEqual(started.slice(2), ["T3"]);
+      assert.equal((await post(reviewPath(third.id), { review: "通过此版本" })).status, 200);
+    } else if (outcome !== "tampered-after") {
+      assert.equal((await post(reviewPath(first.id), { review: outcome === "rejected" ? "不通过" : "通过此版本" })).status,
+        outcome === "tampered-before" ? 409 : 200);
+    }
+    const final = await waitFor(snapshot => snapshot.dispatches.find(item => item.status === "finished" || item.status === "failed"));
+    assert.equal(final.status, outcome === "approved" ? "finished" : "failed");
+    assert.deepEqual(started.slice(2), outcome === "approved" ? ["T3", "T4"] : []);
+    assert.equal(final.jobs.find(job => job.id === "T4")?.status, outcome === "approved" ? "ready" : "blocked");
+    assert.match(final.jobs.find(job => job.id === "T3")?.error ?? "", outcome === "tampered-after" ? /前置补丁/ : /^$/);
+    const persisted = JSON.parse(await readFile(join(final.directory ?? "", "run.json"), "utf8"));
+    assert.equal(persisted.status, final.status);
+    if (outcome === "approved") {
+      const upstream = final.jobs.find(job => job.id === "T4")?.artifact?.upstream ?? [];
+      assert.deepEqual(upstream.map(item => item.ticketId).sort(), ["T1", "T2", "T3"]);
+      assert.ok(upstream.every(item => final.jobs.some(job => job.id === item.ticketId && job.artifact?.id === item.artifactId
+        && job.artifact.patchSha256 === item.patchSha256 && job.artifact.review === "accepted")));
+    }
+    await Promise.all([guide, rules].map(async (file, index) => {
+      assert.equal(await readFile(join(repo, file), "utf8"), `${steps[index]?.before}\n`);
+    }));
+    const audit = await (await fetch(`${url}/api/audit`)).json();
+    const reviews = audit.recent.filter((entry: { kind: string }) => entry.kind === "dispatch.reviewed");
+    assert.equal(reviews.length, outcome === "approved" ? 3 : 2);
+    assert.ok(reviews.every((entry: { subject: string; details: { patchSha256: string } }) =>
+      entry.subject === run.id && /^[a-f0-9]{64}$/.test(entry.details.patchSha256)));
+  });
+}
+
 test("loads local environment settings at startup and keeps the file off HTTP", { timeout: 5000 }, async t => {
   const dir = await mkdtemp(join(tmpdir(), "souflow-env-"));
   const auditPath = join(dir, "from-dotenv.sqlite");

@@ -4,11 +4,11 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultAuditThresholds, openActivityStore, readActivity } from "../audit/activity-store.mts";
 import { defaultAnswerMaxLength, maxQuestionsPerDecision } from "../decisions/questions.mts";
-import { createLocalDispatch } from "../execution/local-dispatch.mts";
+import { codeReviewOptions, createLocalDispatch } from "../execution/local-dispatch.mts";
 import { createConversationFlows, maxArtifactTextLength, phases, readPlanRevision } from "../planning/conversation-flow.mts";
 import { createProjectContextReader, type ProjectSettings } from "../planning/project-context.mts";
 import { createCodexInbox } from "./codex-inbox.mts";
-import { createDecisionDemo } from "./demo-state.mts";
+import { createDecisionDemo, type DecisionCard } from "./demo-state.mts";
 
 const address = "127.0.0.1";
 const defaultLimits = { demo: 24, codex: 4 };
@@ -68,10 +68,30 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
   const inbox = codex ?? demo;
   const flows = createConversationFlows(inbox.runPhase, codex ? limits.codex : limits.demo, audit.record, loadProject);
   const dispatch = live ? createLocalDispatch(live[0], dispatchConcurrency, { ...dispatchAdapters, record: audit.record }) : undefined;
-  const snapshot = () => ({
-    ...inbox.snapshot(), flows: flows.list(), phases: phases.map(phase => phase.title), inputLimits,
-    planMaxLength: maxArtifactTextLength, dispatches: dispatch?.list() ?? [],
-  });
+  const snapshot = () => {
+    const conversations = flows.list();
+    const reviewCards = dispatch?.reviews().map(({ run, job, artifact, patchPath, successors }): DecisionCard => ({
+      id: artifact.id,
+      kind: "code-review",
+      flowId: run.flowId,
+      title: `${job.id} ${job.title} · ${conversations.find(flow => flow.id === run.flowId)?.title ?? ""}`,
+      session: `代码产物验收 · 计划 v${run.plan.version}`,
+      prompt: [job.report, `本地补丁 ${patchPath}`, `SHA-256 ${artifact.patchSha256}`].filter(Boolean).join("\n"),
+      status: "pending",
+      questions: [{
+        id: "review", title: "代码产物验收", prompt: `复核这份补丁，通过后可继续 ${successors.map(item => item.id).join("、")}。`,
+        allowCustom: false,
+        options: [{ label: codeReviewOptions[0], description: "仅允许后续工单使用这一版补丁。" },
+          { label: codeReviewOptions[1], description: "阻止依赖这份补丁的工单。" }],
+      }],
+      timeline: [{ label: "前置补丁已就绪", at: new Date(job.finishedAt ?? 0).toISOString() }],
+    })) ?? [];
+    const state = inbox.snapshot();
+    return {
+      ...state, requests: [...state.requests, ...reviewCards], flows: conversations, phases: phases.map(phase => phase.title), inputLimits,
+      planMaxLength: maxArtifactTextLength, dispatches: dispatch?.list() ?? [],
+    };
+  };
   const assets = new Map<string, { content: Buffer; mime: string }>(files.map(([path, name, mime]) => [
     path, { content: readFileSync(new URL(`./public/${name}`, import.meta.url)), mime },
   ]));
@@ -185,6 +205,13 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           const body = await readJson(request, answerBodyBytes);
           if ("status" in body) return send(body.status, { error: body.error });
           status = inbox.submit(action[1], body.value);
+          if (status === 404 && dispatch) {
+            const review = await dispatch.review(action[1], body.value, flows.list());
+            if (review !== 404) return send(review, review === 200 ? snapshot() : {
+              ...snapshot(),
+              error: review === 422 ? "请选择有效的代码产物验收结果。" : "验收事项已处理或补丁版本已失效。",
+            });
+          }
         }
         const errors: Record<404 | 409 | 422, string> = {
           404: "这条提问已失效或已被移除。",

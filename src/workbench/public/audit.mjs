@@ -16,7 +16,7 @@ const events = {
   "flow.finished": "流程结束", "decision.opened": "发出决策请求", "decision.answered": "提交决策答复",
   "decision.updated": "决策状态更新", "demo.reset": "重置演示",
   "attempt.started": "启动 Codex 尝试", "attempt.finished": "Codex 尝试结束", "model.started": "Codex 模型配置",
-  "dispatch.prepared": "工单已就绪", "dispatch.started": "确认本地派发", "dispatch.finished": "本地派发结束",
+  "dispatch.prepared": "工单已就绪", "dispatch.started": "确认本地派发", "dispatch.reviewed": "验收前置补丁", "dispatch.finished": "本地派发结束",
 };
 
 export function createAuditView(node) {

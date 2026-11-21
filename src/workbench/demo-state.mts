@@ -6,6 +6,7 @@ import type { Flow, Phase } from "../planning/conversation-flow.mts";
 export type Status = "pending" | "submitted" | "acknowledged" | "closed" | "expired" | "uncertain";
 export type DecisionCard = {
   id: string;
+  kind?: "code-review";
   session: string;
   title: string;
   flowId?: string;
