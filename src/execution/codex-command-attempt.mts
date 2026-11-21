@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
-import { type DecisionQuestion, readDecisionAnswers } from "../decisions/questions.mts";
+import { type DecisionQuestion, maxQuestionsPerDecision, readDecisionAnswers } from "../decisions/questions.mts";
 
 type CommandDecision = "accept" | "decline" | "cancel";
 type Outcome = "completed" | "failed" | "interrupted" | "needs-reconciliation";
@@ -40,6 +40,7 @@ type Options = {
   onModel?: (model: string) => void;
   command?: readonly [executable: string, ...args: string[]];
   outputSchema?: Record<string, unknown>;
+  answerMaxLength?: number;
 };
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -66,7 +67,7 @@ function readAvailableDecisions(value: unknown): readonly CommandDecision[] | un
 }
 
 function readQuestions(value: unknown): readonly DecisionQuestion[] | undefined {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 3) return;
+  if (!Array.isArray(value) || value.length < 1 || value.length > maxQuestionsPerDecision) return;
   const ids = new Set<string>();
   const questions: DecisionQuestion[] = [];
   for (const item of value) {
@@ -363,7 +364,7 @@ function startAttempt(options: Options, mode: "commands" | "questions") {
       if (id === undefined) return false;
       const request = serverRequests.get(id);
       if (request?.kind !== "question") return false;
-      const answers = readDecisionAnswers(request.questions, input);
+      const answers = readDecisionAnswers(request.questions, input, options.answerMaxLength);
       if (!answers) return false;
       answerable.delete(requestId);
       request.submitted = true;

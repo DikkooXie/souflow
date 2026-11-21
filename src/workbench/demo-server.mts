@@ -3,12 +3,16 @@ import { createServer, type IncomingMessage } from "node:http";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openActivityStore, readActivity } from "../audit/activity-store.mts";
+import { defaultAnswerMaxLength, maxQuestionsPerDecision } from "../decisions/questions.mts";
 import { createConversationFlows, phases } from "../planning/conversation-flow.mts";
 import { createCodexInbox } from "./codex-inbox.mts";
 import { createDecisionDemo } from "./demo-state.mts";
 
 const address = "127.0.0.1";
 const defaultLimits = { demo: 24, codex: 4 };
+const defaultInputLimits = { promptMaxLength: 4000, answerMaxLength: defaultAnswerMaxLength };
+const maxConfigurableInputLength = 16_000;
+const jsonMetadataBudget = 16_384;
 const files = [
   ["/", "index.html", "text/html"],
   ["/style.css", "style.css", "text/css"],
@@ -16,31 +20,43 @@ const files = [
   ["/audit.mjs", "audit.mjs", "text/javascript"],
 ] as const;
 
-async function readJson(request: IncomingMessage): Promise<{ value: unknown } | { status: number; error: string }> {
+async function readJson(request: IncomingMessage, maxBytes = jsonMetadataBudget): Promise<{ value: unknown } | { status: number; error: string }> {
   if (request.headers["content-type"] !== "application/json") return { status: 415, error: "请提交 JSON。" };
   try {
     const chunks: Buffer[] = [];
     let size = 0;
     for await (const chunk of request) {
       size += chunk.length;
-      if (size <= 16_384) chunks.push(chunk);
+      if (size <= maxBytes) chunks.push(chunk);
     }
-    if (size > 16_384) return { status: 413, error: "内容太长。" };
+    if (size > maxBytes) return { status: 413, error: "内容太长。" };
     return { value: JSON.parse(Buffer.concat(chunks).toString("utf8")) };
   } catch {
     return { status: 400, error: "无法读取请求内容。" };
   }
 }
 
-type LiveOptions = [workspace: string, startAttempt?: Parameters<typeof createCodexInbox>[2]];
+type LiveOptions = [workspace: string, startAttempt?: Parameters<typeof createCodexInbox>[1]["startAttempt"]];
+type WorkbenchOptions = {
+  limits?: typeof defaultLimits;
+  inputLimits?: typeof defaultInputLimits;
+};
 
-export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions, auditPath?: string, limits = defaultLimits) {
+export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions, auditPath?: string, {
+  limits = defaultLimits, inputLimits = defaultInputLimits,
+}: WorkbenchOptions = {}) {
   const audit = openActivityStore(auditPath);
-  const demo = createDecisionDemo(receiptDelay, audit.record);
-  const codex = live ? createCodexInbox(live[0], limits.codex, live[1], audit.record) : undefined;
+  const { promptMaxLength, answerMaxLength } = inputLimits;
+  // JSON 可能将每个 UTF-16 码元转义为六个字节，给包裹字段另留空间。
+  const promptBodyBytes = jsonMetadataBudget + 6 * promptMaxLength;
+  const answerBodyBytes = jsonMetadataBudget + 6 * answerMaxLength * maxQuestionsPerDecision;
+  const demo = createDecisionDemo(receiptDelay, audit.record, answerMaxLength);
+  const codex = live ? createCodexInbox(live[0], {
+    limit: limits.codex, answerMaxLength, startAttempt: live[1], record: audit.record,
+  }) : undefined;
   const inbox = codex ?? demo;
   const flows = createConversationFlows(inbox.runPhase, codex ? limits.codex : limits.demo, audit.record);
-  const snapshot = () => ({ ...inbox.snapshot(), flows: flows.list(), phases: phases.map(phase => phase.title) });
+  const snapshot = () => ({ ...inbox.snapshot(), flows: flows.list(), phases: phases.map(phase => phase.title), inputLimits });
   const assets = new Map<string, { content: Buffer; mime: string }>(files.map(([path, name, mime]) => [
     path, { content: readFileSync(new URL(`./public/${name}`, import.meta.url)), mime },
   ]));
@@ -91,11 +107,11 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         return audit.recordActivity(event) ? send(200, { recorded: true }) : send(503, { error: "暂时无法记录操作。" });
       }
       if (path === "/api/workflows" || (codex && path === "/api/sessions")) {
-        const body = await readJson(request);
+        const body = await readJson(request, promptBodyBytes);
         if ("status" in body) return send(body.status, { error: body.error });
         const prompt = (body.value as { prompt?: unknown } | null)?.prompt;
-        if (typeof prompt !== "string" || !prompt.trim() || prompt.length > 4000) {
-          return send(422, { error: "请填写不超过 4,000 字的需求。" });
+        if (typeof prompt !== "string" || !prompt.trim() || prompt.length > promptMaxLength) {
+          return send(422, { error: `请填写不超过 ${promptMaxLength} 字的需求。` });
         }
         if (path === "/api/workflows") {
           const flow = !codex || codex.canBegin() ? flows.begin(prompt.trim()) : undefined;
@@ -122,14 +138,14 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           if (codex) return send(404, { error: "该操作用于本地演示。" });
           status = demo.disconnect(action[1]);
         } else {
-          const body = await readJson(request);
+          const body = await readJson(request, answerBodyBytes);
           if ("status" in body) return send(body.status, { error: body.error });
           status = inbox.submit(action[1], body.value);
         }
         const errors: Record<404 | 409 | 422, string> = {
           404: "这条提问已失效或已被移除。",
           409: "这条提问已有答复或已失效。",
-          422: "请为当前会话的每个问题填写有效回答。",
+          422: `请为每个问题填写有效回答，自定义回答最多 ${answerMaxLength} 字。`,
         };
         return send(status, status === 200 ? snapshot() : {
           ...snapshot(),
@@ -172,7 +188,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     demo: integerSetting("SOULFLOW_DEMO_MAX_CONCURRENT", defaultLimits.demo, 1),
     codex: integerSetting("SOULFLOW_CODEX_MAX_CONCURRENT", defaultLimits.codex, 1),
   };
-  const server = createWorkbenchServer(undefined, live ? [process.cwd()] : undefined, auditPath, limits);
+  const inputLimits = {
+    promptMaxLength: integerSetting("SOULFLOW_PROMPT_MAX_LENGTH", defaultInputLimits.promptMaxLength, 1, maxConfigurableInputLength),
+    answerMaxLength: integerSetting("SOULFLOW_ANSWER_MAX_LENGTH", defaultInputLimits.answerMaxLength, 1, maxConfigurableInputLength),
+  };
+  const server = createWorkbenchServer(undefined, live ? [process.cwd()] : undefined, auditPath, { limits, inputLimits });
   server.listen(port, address, () => {
     const bound = server.address();
     if (bound && typeof bound !== "string") {
