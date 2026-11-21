@@ -2,6 +2,7 @@ import { createInterface } from "node:readline";
 import { basename } from "node:path";
 
 const scenario = process.argv[2];
+const expectedModel = process.argv[3];
 const threadId = basename(process.cwd());
 const turnId = "turn-1";
 const questionMode = scenario.startsWith("question-");
@@ -57,12 +58,16 @@ input.on("line", line => {
       }
       return;
     case "thread/start":
+      if (expectedModel && (message.params.model !== expectedModel || message.params.allowProviderModelFallback !== false)) {
+        send({ id: message.id, error: { code: -32602 } });
+        return;
+      }
       if (questionMode && (scenario === "question-invalid-config" || message.params.approvalPolicy !== "never"
         || message.params.sandbox !== "read-only" || message.params.config?.mcp_servers?.inherited?.enabled !== false)) {
         send({ id: message.id, error: { code: -32602 } });
         return;
       }
-      send({ id: message.id, result: { thread: { id: threadId }, model: "fixture" } });
+      send({ id: message.id, result: { thread: { id: threadId }, model: scenario === "question-model-mismatch" ? "fixture" : message.params.model ?? "fixture" } });
       return;
     case "turn/start": {
       if (questionMode) {

@@ -2,11 +2,12 @@ import { closeSync, constants, fchmodSync, fstatSync, mkdirSync, openSync } from
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-const views = ["home", "conversation", "decisions", "audit"] as const;
+const views = ["home", "conversation", "decisions", "audit", "archive"] as const;
 const controls = [
   "open-home", "open-audit", "select-flow", "open-decisions", "open-card", "more-decisions", "close-decisions",
   "select-decision", "send-request", "send-answer", "select-option", "simulation-disconnect", "reset-demo",
   "open-artifact", "open-history", "change-audit-range", "change-log-type", "refresh-audit", "toggle-audit-log",
+  "toggle-conversations", "new-conversation", "open-archive", "close-archive",
 ] as const;
 
 export type BusinessEvent = {

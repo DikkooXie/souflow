@@ -6,8 +6,10 @@ const controls = {
   "reset-demo": "重置演示", "open-artifact": "查看阶段产物", "open-history": "查看决策时间线",
   "change-audit-range": "切换统计范围", "change-log-type": "切换记录类型", "refresh-audit": "刷新看板",
   "toggle-audit-log": "展开或收起最近记录",
+  "toggle-conversations": "展开或收起最近对话", "new-conversation": "新建对话",
+  "open-archive": "打开项目文档", "close-archive": "关闭项目文档",
 };
-const names = { home: "首页", conversation: "需求对话", decisions: "决策收件箱", audit: "数据看板" };
+const names = { home: "首页", conversation: "需求对话", decisions: "决策收件箱", audit: "数据看板", archive: "项目文档" };
 const events = {
   "request.submitted": "提交需求", "phase.started": "开始阶段", "phase.completed": "完成阶段",
   "flow.finished": "流程结束", "decision.opened": "发出决策请求", "decision.answered": "提交决策答复",

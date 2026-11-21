@@ -18,13 +18,14 @@ async function workspace(t: TestContext) {
   return directory;
 }
 
-function run(t: TestContext, directory: string, scenario: string, notify?: (event: CodexAttemptEvent) => void) {
+function run(t: TestContext, directory: string, scenario: string, notify?: (event: CodexAttemptEvent) => void, model?: string) {
   const events: CodexAttemptEvent[] = [];
   const updates = new EventEmitter();
   const attempt = startCodexCommandAttempt({
     workspace: directory,
     prompt: "验证本地命令审批",
-    command: [process.execPath, fixture, scenario],
+    command: [process.execPath, fixture, scenario, ...(model ? [model] : [])],
+    ...(model ? { model } : {}),
     onEvent(event) {
       events.push(event);
       updates.emit("update");
@@ -70,6 +71,13 @@ test("routes two simultaneous requests with identical protocol IDs in reverse or
   for (const { events } of [a, b]) {
     assert.deepEqual(events.map(event => event.kind), ["approval-requested", "approval-submitted", "approval-cleared"]);
   }
+});
+
+test("requests the configured execution model before routing an approval", { timeout: 5000 }, async t => {
+  const { attempt, waitFor } = run(t, await workspace(t), "accept", undefined, "fixture-executor");
+  const { approval } = await waitFor("approval-requested");
+  assert.equal(attempt.answer(approval.id, "accept"), true);
+  assert.equal(await attempt.finished, "completed");
 });
 
 test("expires a request when Codex clears it before a decision", { timeout: 5_000 }, async t => {

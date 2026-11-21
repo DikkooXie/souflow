@@ -17,6 +17,7 @@ const files = [
   ["/", "index.html", "text/html"],
   ["/style.css", "style.css", "text/css"],
   ["/app.mjs", "app.mjs", "text/javascript"],
+  ["/archive.mjs", "archive.mjs", "text/javascript"],
   ["/audit.mjs", "audit.mjs", "text/javascript"],
 ] as const;
 

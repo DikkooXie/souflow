@@ -10,23 +10,44 @@
   </head>
   <body>
     <header class="topbar">
-      <button type="button" class="brand" aria-label="Soulflow 首页" id="home" data-track="open-home">
-        <span class="brand-mark" aria-hidden="true">✦</span><span>Soulflow</span>
-      </button>
+      <div class="topbar-start">
+        <button type="button" id="toggle-conversations" class="sidebar-toggle" aria-label="展开最近对话" title="展开最近对话" aria-expanded="false" aria-controls="conversation-sidebar" data-track="toggle-conversations">
+          <span class="sidebar-icon" aria-hidden="true"></span>
+        </button>
+        <button type="button" class="brand" aria-label="Soulflow 首页" id="home" data-track="open-home">
+          <span class="brand-mark" aria-hidden="true">✦</span><span>Soulflow</span>
+        </button>
+      </div>
       <div class="topbar-actions">
-        <select id="flow-select" aria-label="选择需求对话" hidden></select>
         <button type="button" id="open-decisions" class="inbox-button" data-track="open-decisions" aria-haspopup="dialog" aria-controls="decision-dialog">待决策 <span id="count" aria-live="polite">0</span></button>
         <button type="button" id="open-audit" class="audit-nav" data-track="open-audit" aria-pressed="false">数据看板</button>
       </div>
     </header>
 
+    <div class="workbench-layout">
+      <aside id="conversation-sidebar" class="conversation-sidebar" aria-labelledby="recent-title" hidden>
+        <button type="button" id="new-conversation" class="new-conversation" data-track="new-conversation"><span aria-hidden="true">+</span> 新对话</button>
+        <h2 id="recent-title">最近对话</h2>
+        <p id="recent-empty" class="muted">暂无对话</p>
+        <ul id="recent-conversations" class="recent-conversations"></ul>
+      </aside>
+      <button type="button" id="sidebar-scrim" class="sidebar-scrim" aria-label="收起最近对话" tabindex="-1" hidden></button>
+
     <main class="workspace" id="workspace">
       <section id="welcome" class="welcome" aria-labelledby="welcome-title">
         <span class="brand-mark hero-mark" aria-hidden="true">✦</span>
         <h1 id="welcome-title">今天想推进什么？</h1>
-        <p>描述你想做的事，Soulflow 会推进调研、需求澄清和交付规划。</p>
       </section>
-      <section id="conversation" class="conversation" aria-label="需求对话" hidden></section>
+      <section id="conversation" class="conversation" aria-labelledby="conversation-title" hidden>
+        <h1 id="conversation-title" class="visually-hidden" tabindex="-1">需求对话</h1>
+        <p id="conversation-message" class="user-message"></p>
+        <div class="conversation-reply">
+          <p id="conversation-status" class="flow-status" role="status"></p>
+          <button type="button" id="open-archive" class="archive-entry" data-track="open-archive" aria-haspopup="dialog" aria-controls="archive-dialog" hidden>
+            <span class="document-icon" aria-hidden="true"></span>查看项目文档<span aria-hidden="true">↗</span>
+          </button>
+        </div>
+      </section>
 
       <form id="start-session" class="composer">
         <textarea id="new-prompt" name="new-prompt" aria-label="描述你的需求" placeholder="描述你的需求…" required></textarea>
@@ -35,7 +56,6 @@
           <button type="submit" class="send-button" aria-label="发送需求" data-track="send-request"><span aria-hidden="true">→</span></button>
         </div>
       </form>
-      <ol id="phases" class="phases" aria-label="任务阶段"></ol>
       <p id="error" class="error" role="alert" hidden></p>
     </main>
 
@@ -92,7 +112,22 @@
         </section>
       </details>
     </main>
+    </div>
 
+    <dialog id="archive-dialog" class="archive-dialog" aria-labelledby="archive-title">
+      <header class="archive-header">
+        <div>
+          <h2 id="archive-title">项目文档</h2>
+          <p id="archive-project"></p>
+        </div>
+        <button type="button" id="close-archive" class="icon-button" aria-label="关闭项目文档" data-track="close-archive" autofocus>×</button>
+      </header>
+      <div class="archive-layout">
+        <nav aria-label="已归档文档"><ul id="archive-list" class="archive-list"></ul></nav>
+        <!-- biome-ignore lint/a11y/noNoninteractiveTabindex: 让键盘用户能在文档长页内滚动。 -->
+        <article id="archive-document" class="archive-document" tabindex="0" aria-labelledby="archive-document-title"></article>
+      </div>
+    </dialog>
     <dialog id="decision-dialog" aria-labelledby="decision-title">
       <header class="decision-header">
         <h2 id="decision-title">决策收件箱</h2>
