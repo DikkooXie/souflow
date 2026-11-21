@@ -44,6 +44,7 @@ type Options = {
   outputSchema?: Record<string, unknown>;
   answerMaxLength?: number;
   disableWebSearch?: boolean;
+  untrustedContext?: string;
 };
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -310,6 +311,9 @@ function startAttempt(options: Options, mode: "commands" | "questions" | "local-
       startingTurn = true;
       call("turn/start", {
         threadId, input: [{ type: "text", text: options.prompt }],
+        ...(options.untrustedContext ? { additionalContext: { github_issue: {
+          kind: "untrusted", name: "github_issue", value: options.untrustedContext,
+        } } } : {}),
         ...(options.outputSchema ? { outputSchema: options.outputSchema } : {}),
         ...(mode === "questions" ? { collaborationMode: {
           mode: "plan", settings: { model, reasoning_effort: null, developer_instructions: null },
@@ -353,6 +357,13 @@ function startAttempt(options: Options, mode: "commands" | "questions" | "local-
       ]));
       openThread({
         mcp_servers: mcp,
+        ...(mode === "local-task" && options.untrustedContext ? { features: {
+          shell_tool: false, unified_exec: false, apps: false, plugins: false, hooks: false,
+          multi_agent: false, multi_agent_v2: false, multi_agent_v2_dynamic_tools: false,
+          agent_message_board: false, agent_message_board_mcp: false, in_app_browser: false,
+          skill_search: false, code_mode: false, sleep_tool: false, tool_suggest: false,
+          request_permissions_tool: false, standalone_web_search: false, untrusted_as_tool_output: true,
+        } } : {}),
         ...(mode === "local-task" || options.disableWebSearch ? { web_search: "disabled" } : {}),
       });
     });
