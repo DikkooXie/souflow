@@ -7,6 +7,8 @@ export function createDispatchPanel(node, post) {
   const trigger = document.querySelector("#open-dispatch");
   const prepare = document.querySelector("#prepare-dispatch");
   const kind = document.querySelector("#dispatch-kind");
+  const history = document.querySelector("#dispatch-history");
+  const version = document.querySelector("#dispatch-version");
   const start = document.querySelector("#start-dispatch");
   const status = document.querySelector("#dispatch-status");
   const list = document.querySelector("#dispatch-jobs");
@@ -21,19 +23,41 @@ export function createDispatchPanel(node, post) {
   trigger.addEventListener("click", () => { if (currentFlow) dialog.showModal(); });
   document.querySelector("#close-dispatch").addEventListener("click", () => dialog.close());
   prepare.addEventListener("click", () => { if (currentFlow) void post(path("prepare"), { kind: kind.value }); });
-  start.addEventListener("click", () => { if (currentFlow && currentRun?.status === "ready") void post(path("start"), { id: currentRun.id }); });
+  start.addEventListener("click", () => {
+    if (currentFlow && !version.value && currentRun?.status === "ready") void post(path("start"), { id: currentRun.id });
+  });
   kind.addEventListener("change", render);
+  version.addEventListener("change", render);
 
   function render() {
-    currentRun = currentRuns.find(run => run.flowId === currentFlow?.id && run.kind === kind.value);
-    const run = currentRun;
-    const key = JSON.stringify([currentFlow?.id, run]);
+    const plan = currentFlow?.outputs.flatMap(output => output.artifacts).find(artifact => artifact.kind === "development-plan");
+    const candidates = currentRuns.filter(run => run.flowId === currentFlow?.id && run.kind === kind.value);
+    currentRun = candidates.find(run => run.plan.id === plan?.id && run.plan.version === plan.version);
+    const older = candidates.filter(run => run.plan.version < plan?.version).toReversed();
+    const versionsKey = JSON.stringify([currentFlow?.id, kind.value, plan?.version, older.map(run => run.id)]);
+    if (version.dataset.key !== versionsKey) {
+      version.dataset.key = versionsKey;
+      const previous = version.value;
+      const latest = node("option", "", `当前计划 v${plan?.version ?? ""}`);
+      latest.value = "";
+      version.replaceChildren(latest, ...older.map(run => {
+        const option = node("option", "", `计划 v${run.plan.version}（历史）`);
+        option.value = run.id;
+        return option;
+      }));
+      version.value = older.some(run => run.id === previous) ? previous : "";
+    }
+    history.hidden = !older.length;
+    const past = older.find(run => run.id === version.value);
+    const run = past ?? currentRun;
+    const key = JSON.stringify([currentFlow?.id, plan?.version, run, !!past]);
     if (rendered === key) return;
     rendered = key;
-    prepare.hidden = !!run && run.status !== "failed";
+    prepare.hidden = !!past || (!!run && run.status !== "failed");
     prepare.textContent = run?.status === "failed" ? "重新准备工单" : "准备工单";
-    start.hidden = run?.status !== "ready";
-    status.textContent = !run ? "从本轮开发计划准备本地工单。代码工单的补丁留在独立工作区，供人工复核。"
+    start.hidden = !!past || run?.status !== "ready";
+    status.textContent = past ? `计划 v${past.plan.version} 的历史批次。请切回当前版本准备或执行工单。`
+      : !run ? `从开发计划 v${plan?.version ?? ""} 准备本地工单。代码补丁留在独立工作区，供人工复核。`
       : run.status === "preparing" ? "正在生成工单…"
         : run.status === "ready" ? `核对${run.kind === "code" ? "代码" : "核验"}工单后确认执行。使用开发计划 v${run.plan.version} 和仓库提交 ${run.revision.slice(0, 8)}，工作区未提交内容不在本轮资料内。`
           : run.status === "running" ? "正在按依赖派发本机 Codex 会话…"

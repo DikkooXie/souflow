@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { defaultAuditThresholds, openActivityStore, readActivity } from "../audit/activity-store.mts";
 import { defaultAnswerMaxLength, maxQuestionsPerDecision } from "../decisions/questions.mts";
 import { createLocalDispatch } from "../execution/local-dispatch.mts";
-import { createConversationFlows, phases } from "../planning/conversation-flow.mts";
+import { createConversationFlows, maxArtifactTextLength, phases, readPlanRevision } from "../planning/conversation-flow.mts";
 import { createProjectContextReader, type ProjectSettings } from "../planning/project-context.mts";
 import { createCodexInbox } from "./codex-inbox.mts";
 import { createDecisionDemo } from "./demo-state.mts";
@@ -69,7 +69,8 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
   const flows = createConversationFlows(inbox.runPhase, codex ? limits.codex : limits.demo, audit.record, loadProject);
   const dispatch = live ? createLocalDispatch(live[0], dispatchConcurrency, { ...dispatchAdapters, record: audit.record }) : undefined;
   const snapshot = () => ({
-    ...inbox.snapshot(), flows: flows.list(), phases: phases.map(phase => phase.title), inputLimits, dispatches: dispatch?.list() ?? [],
+    ...inbox.snapshot(), flows: flows.list(), phases: phases.map(phase => phase.title), inputLimits,
+    planMaxLength: maxArtifactTextLength, dispatches: dispatch?.list() ?? [],
   });
   const assets = new Map<string, { content: Buffer; mime: string }>(files.map(([path, name, mime]) => [
     path, { content: readFileSync(new URL(`./public/${name}`, import.meta.url)), mime },
@@ -144,6 +145,20 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         demo.reset();
         flows.reset();
         return send(200, snapshot());
+      }
+      const revisionFlow = /^\/api\/workflows\/([a-f0-9-]+)\/plan\/revise$/.exec(path)?.[1];
+      if (revisionFlow) {
+        const flow = flows.list().find(item => item.id === revisionFlow);
+        if (!flow) return send(404, { error: "需求对话不存在。" });
+        const body = await readJson(request, jsonMetadataBudget + 6 * maxArtifactTextLength);
+        if ("status" in body) return send(body.status, { error: body.error });
+        const revision = readPlanRevision(body.value);
+        if (!revision) return send(422, { error: `请填写有效计划版本和 1 到 ${maxArtifactTextLength} 字的计划内容。` });
+        const status = dispatch?.isRunning(flow.id) ? 409 : flows.revisePlan(flow, revision);
+        return status === 200 ? send(200, snapshot()) : send(status, {
+          ...snapshot(),
+          error: status === 409 ? "计划版本已变更，或该对话仍有工单在执行。" : "计划内容没有变化。",
+        });
       }
       const dispatchAction = /^\/api\/workflows\/([a-f0-9-]+)\/local-dispatch\/(prepare|start)$/.exec(path);
       if (dispatchAction && dispatch) {

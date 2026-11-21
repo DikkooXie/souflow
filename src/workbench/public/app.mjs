@@ -32,7 +32,7 @@ const auditButton = document.querySelector("#open-audit");
 const auditPanel = document.querySelector("#audit");
 const workspace = document.querySelector("#workspace");
 const audit = createAuditView(node);
-const archive = createArchive(node, reportView);
+const archive = createArchive(node, reportView, post);
 const dispatch = createDispatchPanel(node, post);
 const clock = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const drafts = new Map();
@@ -40,6 +40,7 @@ let requests = [];
 let flows = [];
 let dispatches = [];
 let answerMaxLength;
+let planMaxLength;
 let selectedFlow;
 let selected;
 let renderedDetail;
@@ -208,7 +209,7 @@ function render() {
   renderRecent();
   const flow = flows.find(entry => entry.id === selectedFlow);
   renderConversation(flow, pending);
-  archive.update(flow);
+  archive.update(flow, planMaxLength);
   dispatch.update(flow, dispatches, live);
   // 另一会话收到回执时，保留当前会话表单的焦点及正在输入的文字。
   const detailKey = current ? `${current.id}:${current.timeline.length}` : "empty";
@@ -375,6 +376,7 @@ function applySnapshot(snapshot) {
   if (snapshot.requests) {
     promptBox.maxLength = snapshot.inputLimits.promptMaxLength;
     answerMaxLength = snapshot.inputLimits.answerMaxLength;
+    planMaxLength = snapshot.planMaxLength;
     requests = snapshot.requests;
     flows = snapshot.flows ?? [];
     dispatches = snapshot.dispatches ?? [];
