@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { type RecordBusiness, scrubAuditText } from "../audit/activity-store.mts";
-import type { Flow } from "../planning/conversation-flow.mts";
+import { currentDevelopmentPlan, type Flow } from "../planning/conversation-flow.mts";
 import { type TicketDraft, validateTicketPlan } from "../planning/validate-ticket-plan.mts";
 import { startCodexQuestionAttempt, startCodexReadOnlyTask } from "./codex-command-attempt.mts";
 import { applyLocalCodeChanges, codeResultSchema, readEditableFile } from "./local-code-changes.mts";
@@ -158,7 +158,7 @@ export async function runLocalJobs(jobs: Job[], concurrency: number, execute: (j
 function planFor(flow: Flow) {
   if (flow.status !== "ready") return;
   const artifacts = flow.outputs.flatMap(output => output.artifacts);
-  const plan = artifacts.find(artifact => artifact.kind === "development-plan");
+  const plan = currentDevelopmentPlan(flow);
   const criteria = artifacts.find(artifact => artifact.kind === "requirements")?.sections.find(section => section.title === "验收条件")?.text;
   if (plan && criteria) return { plan, criteria };
 }
@@ -316,14 +316,15 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
 
   return {
     list: () => [...runs.values()],
+    isRunning: (flowId: string) => [...runs.values()].some(run => run.flowId === flowId && run.status === "running"),
     prepare(flow: Flow, kind: DispatchKind = "report") {
       const context = planFor(flow);
       if (closed || !context) return 409;
-      const key = `${flow.id}:${kind}`;
+      const { id, version } = context.plan;
+      const key = `${flow.id}:${kind}:${version}`;
       const previous = runs.get(key);
       if (previous && previous.status !== "failed") return 200;
       if (operations.size) return 409;
-      const { id, version } = context.plan;
       const run: Run = { id: randomUUID(), flowId: flow.id, plan: { id, version }, kind, status: "preparing", jobs: [] };
       runs.set(key, run);
       track(prepare(flow, run, context));

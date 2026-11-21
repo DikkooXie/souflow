@@ -32,7 +32,9 @@ type ArtifactTrace<K extends ArtifactKind = ArtifactKind> = ArtifactVersion & Re
 }>;
 export type PhaseTarget = ArtifactTrace<DraftKind>;
 type Section = { title: string; text: string };
-type Artifact = PhaseTarget & { sections: readonly Section[] };
+type Artifact = PhaseTarget & { sections: readonly Section[]; replaces?: ArtifactVersion };
+
+export const maxArtifactTextLength = 6000;
 
 export type Phase = (typeof phases)[number];
 export type Flow = {
@@ -42,10 +44,23 @@ export type Flow = {
   source: ArtifactTrace<"request">;
   status: "running" | "ready" | "failed";
   outputs: { title: string; artifacts: readonly Artifact[] }[];
+  planHistory?: readonly Artifact[];
   project?: ProjectEvidence;
 };
 
 type RunPhase = (flow: Flow, phase: Phase, targets: readonly PhaseTarget[], planText?: string) => Promise<readonly string[] | undefined>;
+
+export function currentDevelopmentPlan(flow: Flow) {
+  return flow.outputs.flatMap(output => output.artifacts).find(artifact => artifact.kind === "development-plan");
+}
+
+export function readPlanRevision(input: unknown) {
+  if (!input || typeof input !== "object" || !("version" in input) || !("text" in input)) return;
+  const { version, text } = input;
+  if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 1) return;
+  if (typeof text !== "string" || text.length > maxArtifactTextLength || !text.trim()) return;
+  return { version, text: text.trim() };
+}
 
 function nextTargets(flow: Flow, phase: Phase): PhaseTarget[] {
   const versions = new Map<ArtifactKind, ArtifactVersion>([[flow.source.kind, flow.source]]);
@@ -116,6 +131,25 @@ export function createConversationFlows(runPhase: RunPhase, limit: number, recor
       void runResult.then(() => running.delete(runResult));
       return flow;
     },
+    revisePlan(flow: Flow, revision: NonNullable<ReturnType<typeof readPlanRevision>>): 200 | 409 | 422 {
+      const plan = currentDevelopmentPlan(flow);
+      if (!flows.includes(flow) || flow.status !== "ready" || !plan || plan.version !== revision.version) return 409;
+      if (plan.sections[0]?.text.trim() === revision.text) return 422;
+
+      const replaces = { id: plan.id, version: plan.version };
+      const revised = { ...plan, version: plan.version + 1, replaces,
+        sections: [{ title: definitions["development-plan"].fields[0], text: revision.text }] };
+      const oldDrafts = flow.outputs.flatMap(output => output.artifacts).filter(artifact => artifact.kind === "ticket-drafts");
+      // 旧草稿引用的是原计划，留在历史中，避免显示为改版后的执行依据。
+      flow.planHistory = [...(flow.planHistory ?? []), plan, ...oldDrafts];
+      flow.outputs = flow.outputs.map(output => ({
+        ...output, artifacts: output.artifacts.filter(artifact => artifact.kind !== "ticket-drafts")
+          .map(artifact => artifact === plan ? revised : artifact),
+      })).filter(output => output.artifacts.length > 0);
+      record?.({ kind: "plan.revised", flowId: flow.id, subject: plan.id,
+        details: { previousVersion: plan.version, version: revised.version, archivedDrafts: oldDrafts.map(({ id, version }) => ({ id, version })) } });
+      return 200;
+    },
     reset() {
       for (const flow of flows) {
         if (flow.status === "running") record?.({ kind: "flow.finished", flowId: flow.id, details: { status: "reset" } });
@@ -149,7 +183,7 @@ export function readPhaseOutput(phase: Phase, text: string | undefined) {
     const result: unknown = JSON.parse(text.trim().replace(/^```(?:json)?\s+|\s+```$/g, ""));
     if (!result || typeof result !== "object" || Array.isArray(result)) return;
     const values = phase.fields.map(key => Object.hasOwn(result, key) ? (result as Record<string, unknown>)[key] : undefined);
-    if (values.every(value => typeof value === "string" && value.trim() && value.length <= 6000)) return values as string[];
+    if (values.every(value => typeof value === "string" && value.trim() && value.length <= maxArtifactTextLength)) return values as string[];
   } catch {
     return;
   }

@@ -8,7 +8,7 @@ import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
-import type { Flow } from "../src/planning/conversation-flow.mts";
+import { currentDevelopmentPlan, type Flow, maxArtifactTextLength } from "../src/planning/conversation-flow.mts";
 import type { createLocalDispatch } from "../src/execution/local-dispatch.mts";
 import { createWorkbenchServer } from "../src/workbench/demo-server.mts";
 import type { createDecisionDemo } from "../src/workbench/demo-state.mts";
@@ -132,7 +132,7 @@ test("rejects a new workflow when existing Codex sessions have filled capacity",
   assert.deepEqual((await read()).flows, []);
 });
 
-test("confirms an isolated code patch through the workbench without replacing the report run", { timeout: 8000 }, async t => {
+test("revises a plan without reusing the old dispatch confirmation or changing an active code run", { timeout: 10000 }, async t => {
   const repo = await mkdtemp(join(tmpdir(), "souflow-code-workbench-"));
   const file = "docs/guide.md";
   await mkdir(join(repo, "docs"));
@@ -143,12 +143,16 @@ test("confirms an isolated code patch through the workbench without replacing th
   git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--no-gpg-sign", "-qm", "fixture");
   const terminal = { finished: Promise.resolve("completed" as const), close() {} };
   let executions = 0;
+  const splitPrompts: string[] = [];
+  let finishExecution!: () => void;
+  const executionGate = new Promise<"completed">(resolve => { finishExecution = () => resolve("completed"); });
   const executedDirs = new Set<string>();
   const { post, read } = await start(t, [repo, options => ({
     ...terminal, answerQuestions: () => false,
     output: () => JSON.stringify(Object.fromEntries(((options.outputSchema?.required ?? []) as string[]).map(field => [field, `示例${field}`]))),
   })], { dispatchAdapters: {
     split(options) {
+      splitPrompts.push(options.prompt);
       const code = options.prompt.includes("拆成本地代码工单");
       const fields = { id: "T1", title: "整理指引", instructions: "更新使用步骤", criteria: ["AC-1"], dependsOn: [], sources: [file] };
       return { ...terminal, answerQuestions: () => false,
@@ -157,7 +161,7 @@ test("confirms an isolated code patch through the workbench without replacing th
     execute(options) {
       executions += 1;
       executedDirs.add(join(options.workspace, "..", ".."));
-      return { ...terminal, output: () => JSON.stringify({ report: `已核对 ${file}`,
+      return { finished: executionGate, close: finishExecution, output: () => JSON.stringify({ report: `已核对 ${file}`,
         ...(options.prompt.includes("文本替换") ? { edits: [{ path: file, before: "初始文档", after: "已更新" }] } : {}),
       }) };
     },
@@ -177,6 +181,10 @@ test("confirms an isolated code patch through the workbench without replacing th
   assert.equal((await post("/api/workflows", { prompt: "更新使用指引" })).status, 200);
   const flow = await waitFor(snapshot => snapshot.flows.find(item => item.status === "ready"));
   const base = `/api/workflows/${flow.id}/local-dispatch`;
+  const revise = `/api/workflows/${flow.id}/plan/revise`;
+  const original = currentDevelopmentPlan(flow);
+  const draft = flow.outputs.flatMap(output => output.artifacts).find(artifact => artifact.kind === "ticket-drafts");
+  assert.ok(original && draft);
   assert.equal((await post(`${base}/prepare`, { kind: "invalid" })).status, 422);
   assert.equal((await post(`${base}/prepare`)).status, 200);
   const report = await waitFor(snapshot => snapshot.dispatches.find(run => run.kind === "report" && run.status === "ready"));
@@ -185,13 +193,46 @@ test("confirms an isolated code patch through the workbench without replacing th
   assert.equal(executions, 0);
   assert.deepEqual(code.jobs[0]?.editPaths, [file]);
   assert.equal((await post(`${base}/start`, { id: "stale" })).status, 409);
-  assert.equal((await post(`${base}/start`, { id: code.id })).status, 200);
-  const finished = await waitFor(snapshot => snapshot.dispatches.find(run => run.id === code.id && run.status === "finished"));
+  assert.equal((await post(revise, { version: 1, text: "新计划" }, "https://example.test")).status, 403);
+  assert.equal((await post(revise, { version: 1, text: " " })).status, 422);
+  assert.equal((await post(revise, { version: 1, text: "超".repeat(maxArtifactTextLength + 1) })).status, 422);
+  assert.equal((await post(revise, { version: 1, text: original.sections[0]?.text })).status, 422);
+  const revised = await Promise.all([
+    post(revise, { version: 1, text: "只更新使用步骤" }),
+    post(revise, { version: 1, text: "只更新使用步骤" }),
+  ]);
+  assert.deepEqual(revised.map(response => response.status).sort(), [200, 409]);
+  const [updated] = (await read()).flows;
+  assert.ok(updated);
+  const current = currentDevelopmentPlan(updated);
+  assert.equal(current?.version, 2);
+  assert.equal(current?.id, original.id);
+  assert.deepEqual(current?.replaces, { id: original.id, version: 1 });
+  assert.deepEqual(current?.upstream, original.upstream);
+  assert.equal(current?.sections[0]?.text, "只更新使用步骤");
+  assert.deepEqual(updated.planHistory, [original, draft]);
+  assert.ok(updated.outputs.every(output => output.artifacts.every(artifact => artifact.kind !== "ticket-drafts")));
+
+  assert.equal((await post(`${base}/start`, { id: code.id })).status, 409);
+  assert.equal((await post(`${base}/start`, { id: report.id })).status, 409);
+  assert.equal(executions, 0);
+  assert.equal((await post(`${base}/prepare`, { kind: "code" })).status, 200);
+  const newCode = await waitFor(snapshot => snapshot.dispatches.find(run => run.kind === "code" && run.plan.version === 2 && run.status === "ready"));
+  assert.notEqual(newCode.id, code.id);
+  assert.match(splitPrompts.at(-1) ?? "", /只更新使用步骤/);
+  assert.equal((await post(`${base}/start`, { id: newCode.id })).status, 200);
+  assert.equal((await post(revise, { version: 2, text: "另一个新版" })).status, 409);
+  finishExecution();
+  const finished = await waitFor(snapshot => snapshot.dispatches.find(run => run.id === newCode.id && run.status === "finished"));
   assert.equal(executions, 1);
   assert.deepEqual(finished.jobs[0]?.changedFiles, [file]);
   assert.ok(finished.jobs[0]?.patchPath);
   assert.equal(await readFile(join(repo, file), "utf8"), "初始文档\n");
   assert.equal((await read()).dispatches.find(run => run.id === report.id)?.status, "ready");
+  assert.equal((await read()).dispatches.find(run => run.id === code.id)?.status, "ready");
+  assert.equal((await post(revise, { version: 2, text: "保留已交付记录的新计划" })).status, 200);
+  assert.equal((await post(`${base}/start`, { id: newCode.id })).status, 409);
+  assert.deepEqual((await read()).flows[0]?.planHistory, [original, draft, current]);
 });
 
 test("loads local environment settings at startup and keeps the file off HTTP", { timeout: 5000 }, async t => {
