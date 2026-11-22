@@ -12,13 +12,35 @@ import { IssueVerificationUncertain } from "./issue-verification.mts";
 import { applyLocalCodeChanges, codeResultSchema, readEditableFile } from "./local-code-changes.mts";
 
 const exec = promisify(execFile);
-export type DeliverySpec = { instructions: string; files: string[]; dependsOn: number[]; baseRevision?: string };
+export type DeliverySpec = { instructions: string; files: string[]; dependsOn: number[]; baseRevision?: string; basePlanPath?: string };
 export const deliveryPath = /^(src|tests)\/(?:[a-z\d_-]+\/)*[a-z\d_.-]+\.(?:mjs|mts|ts|js|css|html)$/i;
 export type DeliveryTarget = { branch: string; head: string };
 export type PreparedDelivery = DeliveryTarget & { workspace: string; base: string };
 export type PrepareIssue = (input: {
   number: number; flowId?: string; planVersion?: number; spec: DeliverySpec; branch: string; upstream: string[]; publisher: IssuePublisher;
 }, connected: (id: string) => void, signal: AbortSignal, assigned?: (account: AccountAssignment) => void) => Promise<PreparedDelivery>;
+
+export class IssueDeliverySourcesChanged extends Error {
+  constructor() { super("依赖合并改变了已校验的源码或项目计划，请重新规划。"); }
+}
+
+export async function checkoutReviewedIssueBase(git: (args: string[]) => Promise<string>, spec: DeliverySpec, upstream: readonly string[]) {
+  const commits = [...(spec.baseRevision ? [spec.baseRevision] : []), ...upstream];
+  for (const sha of commits) {
+    if (!/^[a-f0-9]{40}$/.test(sha)) throw Error("上游合并提交无效。");
+    await git(["merge-base", "--is-ancestor", sha, "HEAD"]);
+  }
+  if (!spec.baseRevision) return;
+  // 独立工单使用已审查的提交；依赖工单只推进到已声明并验证的上游合并。
+  const base = upstream.length ? await git(["rev-list", "--topo-order", "--max-count=1", ...upstream]) : spec.baseRevision;
+  for (const sha of commits) await git(["merge-base", "--is-ancestor", sha, base]);
+  const paths = [...spec.files, ...(spec.basePlanPath ? [spec.basePlanPath] : [])];
+  if (base !== spec.baseRevision) {
+    try { await git(["--literal-pathspecs", "diff", "--quiet", "--no-ext-diff", "--no-textconv", spec.baseRevision, base, "--", ...paths]); }
+    catch { throw new IssueDeliverySourcesChanged(); }
+  }
+  await git(["switch", "--detach", base]);
+}
 
 export function parseDeliveryPlan(raw: string): ReadonlyMap<number, DeliverySpec> {
   const value: unknown = JSON.parse(raw);
@@ -74,10 +96,7 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
       const { base, author, email } = await publisher.checkout(workspace, signal);
       const git = async (args: string[]) => (await exec("git", ["-C", workspace, "-c", "core.hooksPath=/dev/null", ...args],
         { timeout: timeoutMs, signal })).stdout.trim();
-      for (const sha of [...(spec.baseRevision ? [spec.baseRevision] : []), ...upstream]) {
-        if (!/^[a-f0-9]{40}$/.test(sha)) throw Error("上游合并提交无效。");
-        await git(["merge-base", "--is-ancestor", sha, "HEAD"]);
-      }
+      await checkoutReviewedIssueBase(git, spec, upstream);
       const editable = new Map(await Promise.all(spec.files.map(async file => [file, await readEditableFile(workspace, file)] as const)));
       signal.throwIfAborted();
       const output = await withCodexAccount(codexAccounts, signal, account => {

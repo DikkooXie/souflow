@@ -1,12 +1,60 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { githubPull } from "../src/connections/github-delivery.mts";
 import type { DeliveryTracker, IssueDetail, IssuePull } from "../src/connections/issue-tracker.mts";
-import { parseDeliveryPlan } from "../src/execution/issue-delivery.mts";
+import { qualitySources } from "../src/execution/codex-quality-review.mts";
+import { checkoutReviewedIssueBase, IssueDeliverySourcesChanged, parseDeliveryPlan } from "../src/execution/issue-delivery.mts";
 import { type Claim, createIssueDispatch } from "../src/workbench/issue-dispatch.mts";
 
 const spec = { files: ["src/main.mts"], instructions: "修改校验逻辑。", dependsOn: [] };
+
+test("GitHub 允许编辑的 TS 和 JS 文件使用固定提交的内容复核", async t => {
+  const repo = await mkdtemp(join(tmpdir(), "souflow-quality-sources-"));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
+  const paths = ["src/feature.ts", "tests/feature.js"];
+  git("init", "-q");
+  await Promise.all(paths.map(async path => {
+    await mkdir(join(repo, path.split("/")[0] ?? ""), { recursive: true });
+    await writeFile(join(repo, path), "export const approved = true;\n");
+  }));
+  git("add", "--", ...paths);
+  git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--no-gpg-sign", "-qm", "fixture");
+  await writeFile(join(repo, "src/feature.ts"), "未提交");
+  assert.deepEqual(await qualitySources(repo, git("rev-parse", "HEAD"), paths, new AbortController().signal),
+    Object.fromEntries(paths.map(path => [path, "export const approved = true;\n"])));
+});
+
+test("派发只使用已校验基线或声明的前置合并，拒绝其间变更的已审查文件", async t => {
+  const repo = await mkdtemp(join(tmpdir(), "souflow-issue-base-"));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const git = (args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  const commit = async (path: string, text: string) => {
+    await writeFile(join(repo, path), text);
+    git(["add", "--", path]);
+    git(["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--no-gpg-sign", "-qm", text]);
+    return git(["rev-parse", "HEAD"]);
+  };
+  git(["init", "-q"]);
+  await mkdir(join(repo, "src"));
+  const approved = await commit("src/main.mts", "已审查的文件");
+  const prerequisite = await commit("src/upstream.mts", "指定的前置产物");
+  const pushedAfter = await commit("src/main.mts", "未经审查的源码");
+  const delivery = { ...spec, baseRevision: approved };
+  const runGit = async (args: string[]) => git(args);
+  await checkoutReviewedIssueBase(runGit, delivery, []);
+  assert.equal(git(["rev-parse", "HEAD"]), approved);
+  git(["switch", "--detach", pushedAfter]);
+  await checkoutReviewedIssueBase(runGit, delivery, [prerequisite]);
+  assert.equal(git(["rev-parse", "HEAD"]), prerequisite);
+  git(["switch", "--detach", pushedAfter]);
+  await assert.rejects(checkoutReviewedIssueBase(runGit, delivery, [pushedAfter]), IssueDeliverySourcesChanged);
+});
 
 test("拒绝任何越出已批准源码的路径以及缺失、循环或重复的依赖", () => {
   const parse = (child: object = spec) => parseDeliveryPlan(JSON.stringify({ 1: spec, 2: child }));

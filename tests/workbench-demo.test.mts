@@ -13,6 +13,7 @@ import { currentDevelopmentPlan, type Flow, maxArtifactTextLength } from "../src
 import type { createLocalDispatch } from "../src/execution/local-dispatch.mts";
 import { createWorkbenchServer } from "../src/workbench/demo-server.mts";
 import type { createDecisionDemo } from "../src/workbench/demo-state.mts";
+import { passingQualityReview, qualityReviewOutput, validation } from "./fixtures/planning-quality.mts";
 
 type Snapshot = ReturnType<ReturnType<typeof createDecisionDemo>["snapshot"]> & {
   flows: Flow[];
@@ -24,7 +25,7 @@ type Snapshot = ReturnType<ReturnType<typeof createDecisionDemo>["snapshot"]> & 
 
 async function start(t: TestContext, live?: Parameters<typeof createWorkbenchServer>[1],
   options?: Parameters<typeof createWorkbenchServer>[3], auditPath?: string) {
-  const server = createWorkbenchServer(100, live, auditPath, options);
+  const server = createWorkbenchServer(100, live, auditPath, { qualityReviewer: passingQualityReview, ...options });
   let closing: Promise<unknown> | undefined;
   function close() {
     if (closing) return closing;
@@ -86,7 +87,7 @@ test("two authenticated members return a code delivery and accept only the revis
       const revised = options.prompt.includes("补齐验收步骤");
       return { ...terminal, output: () => JSON.stringify({ tickets: [{
         id: "T1", title: "编写指引", instructions: revised ? "修改后交付" : "提交初稿",
-        criteria: ["AC-1"], dependsOn: [], sources: [], editPaths: [file],
+        criteria: ["AC-1"], dependsOn: [], sources: [], editPaths: [file], validation,
       }] }) };
     },
     execute(options) {
@@ -280,6 +281,7 @@ test("revises a plan without reusing the old dispatch confirmation or changing a
   git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--no-gpg-sign", "-qm", "fixture");
   const terminal = { finished: Promise.resolve("completed" as const), close() {} };
   let executions = 0;
+  let rejected = true;
   const splitPrompts: string[] = [];
   let finishExecution!: () => void;
   const executionGate = new Promise<"completed">(resolve => { finishExecution = () => resolve("completed"); });
@@ -287,13 +289,17 @@ test("revises a plan without reusing the old dispatch confirmation or changing a
   const { post, read } = await start(t, [repo, options => ({
     ...terminal, answerQuestions: () => false,
     output: () => JSON.stringify(Object.fromEntries(((options.outputSchema?.required ?? []) as string[]).map(field => [field, `示例${field}`]))),
-  })], { dispatchAdapters: {
+  })], { async qualityReviewer(packet) {
+    if (!rejected) return passingQualityReview(packet, new AbortController().signal);
+    return JSON.stringify({ ...qualityReviewOutput(packet), scope: { status: "block", summary: "工单超出本次范围",
+      evidence: [{ ref: "request", quote: "更新使用指引" }] } });
+  }, dispatchAdapters: {
     split(options) {
       splitPrompts.push(options.prompt);
       const code = options.prompt.includes("拆成本地代码工单");
       const fields = { id: "T1", title: "整理指引", instructions: "更新使用步骤", criteria: ["AC-1"], dependsOn: [], sources: [file] };
       return { ...terminal, answerQuestions: () => false,
-        output: () => JSON.stringify({ tickets: [code ? { ...fields, editPaths: [file] } : fields] }) };
+        output: () => JSON.stringify({ tickets: [code ? { ...fields, editPaths: [file], validation } : fields] }) };
     },
     execute(options) {
       executions += 1;
@@ -325,6 +331,12 @@ test("revises a plan without reusing the old dispatch confirmation or changing a
   assert.equal((await post(`${base}/prepare`, { kind: "invalid" })).status, 422);
   assert.equal((await post(`${base}/prepare`)).status, 200);
   const report = await waitFor(snapshot => snapshot.dispatches.find(run => run.kind === "report" && run.status === "ready"));
+  assert.equal((await post(`${base}/prepare`, { kind: "code" })).status, 200);
+  const blocked = await waitFor(snapshot => snapshot.dispatches.find(run => run.kind === "code" && run.status === "failed"));
+  assert.match(blocked.error ?? "", /工单超出本次范围/);
+  assert.equal((await post(`${base}/start`, { id: blocked.id })).status, 409);
+  assert.equal(executions, 0);
+  rejected = false;
   assert.equal((await post(`${base}/prepare`, { kind: "code" })).status, 200);
   const code = await waitFor(snapshot => snapshot.dispatches.find(run => run.kind === "code" && run.status === "ready"));
   assert.equal(executions, 0);
@@ -406,7 +418,7 @@ for (const outcome of ["approved", "rejected", "tampered-before", "tampered-afte
         return { ...terminal, answerQuestions: () => false, output: () => JSON.stringify({
           tickets: [steps[3], steps[2], steps[1], steps[0]].map(step => ({
             id: step?.id, title: step?.id, instructions: "更新两份说明", criteria: ["AC-1"],
-            dependsOn: step?.dependsOn, sources: [guide, rules], editPaths: [step?.path],
+            dependsOn: step?.dependsOn, sources: [guide, rules], editPaths: [step?.path], validation,
           })),
         }) };
       },

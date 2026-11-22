@@ -129,8 +129,8 @@ export function createDispatchPanel(node, post, openDecisions) {
     start.textContent = run?.status === "paused" ? "继续派发剩余工单" : "确认并执行";
     status.textContent = past ? `计划 v${past.plan.version} 的历史批次。请切回当前版本准备或执行工单。`
       : !run ? `从开发计划 v${plan?.version ?? ""} 准备本地工单。代码补丁留在独立工作区，供人工复核。`
-      : run.status === "preparing" ? "正在生成工单…"
-        : run.status === "ready" ? `核对${run.kind === "code" ? "代码" : "核验"}工单后确认执行。使用开发计划 v${run.plan.version} 和仓库提交 ${run.revision.slice(0, 8)}，工作区未提交内容不在本轮资料内。`
+      : run.status === "preparing" ? (run.kind === "code" ? "正在生成并复核工单…" : "正在生成工单…")
+        : run.status === "ready" ? `${run.quality ? "质量校验已通过。" : ""}核对${run.kind === "code" ? "代码" : "核验"}工单后确认执行。使用开发计划 v${run.plan.version} 和仓库提交 ${run.revision.slice(0, 8)}，工作区未提交内容不在本轮资料内。`
           : run.status === "waiting" ? "前往「待决策」验收前置补丁，通过后继续执行。"
             : run.status === "paused" ? "批次已恢复。批次中的前置补丁和审批记录已保留，确认后继续等待审批或派发剩余工单。"
               : run.status === "running" ? "正在按依赖派发本机 Codex 会话…"
@@ -143,11 +143,13 @@ export function createDispatchPanel(node, post, openDecisions) {
       item.dataset.job = job.id;
       item.open = previouslyOpen.has(job.id) || run.status === "ready";
       const accepted = run.acceptance?.at(-1)?.decision === "accepted";
-      item.append(node("summary", "", `${job.id} · ${job.title} · ${accepted ? "随批次验收通过" : reviews[job.artifact?.review] ?? states[job.status]}`),
+      const state = run.status === "failed" && job.status === "queued" ? "未派发" : states[job.status];
+      item.append(node("summary", "", `${job.id} · ${job.title} · ${accepted ? "随批次验收通过" : reviews[job.artifact?.review] ?? state}`),
         node("p", "muted", job.dependsOn.length ? `前置工单 ${job.dependsOn.join("、")}` : "可独立执行"),
         node("p", "archive-text", job.instructions));
       if (job.sources.length) item.append(node("p", "muted", job.sources.join("、")));
       if (job.editPaths?.length) item.append(node("p", "archive-text", `允许编辑 · ${job.editPaths.join("、")}`));
+      for (const check of job.validation ?? []) item.append(node("p", "archive-text", `${check.criterion} · ${check.procedure} → ${check.expected}`));
       if (job.changedFiles?.length) item.append(node("p", "archive-text", `已修改 · ${job.changedFiles.join("、")}`));
       if (job.patchPath) item.append(node("p", "archive-text", `本地补丁 · ${job.patchPath}`));
       if (job.artifact?.upstream.length) {

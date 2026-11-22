@@ -2,7 +2,9 @@ import { createGitHubSelector } from "../planning/github-selection.mts";
 import { createConversationDelivery, type IssueProposal } from "./conversation-delivery.mts";
 import { readFile } from "node:fs/promises";
 import { X509Certificate } from "node:crypto";
-import { createIssueDeveloper, parseDeliveryPlan } from "../execution/issue-delivery.mts";
+import { createIssueDeveloper } from "../execution/issue-delivery.mts";
+import { createCodexQualityReviewer, qualitySources } from "../execution/codex-quality-review.mts";
+import type { QualityReviewer } from "../planning/dispatch-quality.mts";
 import { createGitHubIssues } from "../connections/github.mts";
 import type { IssueTracker } from "../connections/issue-tracker.mts";
 import { createIssueVerifier, type VerifyIssue } from "../execution/issue-verification.mts";
@@ -83,12 +85,14 @@ type WorkbenchOptions = {
   hostName?: string;
   codexAccounts?: CodexAccountDispatch;
   remoteLan?: RemoteLanConfig;
+  qualityReviewer?: QualityReviewer;
+  qualityModel?: string;
 };
 
 export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions, auditPath?: string, {
   limits = defaultLimits, inputLimits = defaultInputLimits, auditThresholds = defaultAuditThresholds,
   dispatchConcurrency = defaultDispatchConcurrency, dispatchAdapters, project, members, issueTracker, verifyIssue, issueDelivery,
-  memberTrackers, hostName = hostname(), codexAccounts, remoteLan,
+  memberTrackers, hostName = hostname(), codexAccounts, remoteLan, qualityReviewer, qualityModel,
 }: WorkbenchOptions = {}) {
   const memberFor = members && createMembers(members);
   if (memberFor && !live) throw Error("两位成员模式需要 Codex 工作台。");
@@ -134,32 +138,41 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         ...(recovery ? { store: audit.checkpoint<DecisionCard>("decisions") } : {}),
       }) : undefined;
       const inbox = codex ?? demo;
+      const reviewQuality = live ? qualityReviewer ?? createCodexQualityReviewer(live[0], qualityModel ?? issueDelivery?.planningModel) : undefined;
       const dispatch = live ? createLocalDispatch(live[0], dispatchConcurrency, { ...dispatchAdapters, record: audit.record,
+        ...(reviewQuality ? { qualityReviewer: reviewQuality } : {}),
         ...(monitor ? { monitor } : {}),
         ...(codexAccounts ? { codexAccounts } : {}),
         ...(recovery ? { store: audit.checkpoint<Run>("dispatch"), artifactRoot: `${database}.artifacts` } : {}),
       }) : undefined;
       const acceptance = memberFor && createAcceptance(audit.record, recovery ? audit.checkpoint<StoredAcceptance>("acceptance") : undefined);
       if (issueTracker && (!recovery || !monitor)) throw Error("GitHub 认领需要持久化的 Codex 工作台。");
+      if (issueDelivery && !issueDelivery.conversation) throw Error("GitHub 代码交付需要使用对话规划与派发前质量校验。");
       const github = issueTracker && monitor ? createIssueDispatch(issueTracker,
         audit.checkpoint<Claim>(`github-issues:${issueTracker.repo.toLowerCase()}`),
         verifyIssue ?? createIssueVerifier(monitor, codexAccounts ? { codexAccounts } : {}),
         audit.record, dispatchConcurrency, memberTrackers, issueDelivery && {
-          specs: issueDelivery.specs, pollMs: issueDelivery.pollMs, ...(issueDelivery.conversation ? { conversation: true } : {}),
+          specs: issueDelivery.specs, pollMs: issueDelivery.pollMs, conversation: true, requireQuality: true,
           prepare: createIssueDeveloper(monitor, { ...issueDelivery, root: `${database}.artifacts/github`,
             ...(codexAccounts ? { codexAccounts } : {}) }),
         }) : undefined;
-      const issuePlanning = live && github && issueTracker && issueDelivery?.conversation
+      const issuePlanning = live && github && issueTracker && issueDelivery?.conversation && reviewQuality
         ? createConversationDelivery(github, audit.checkpoint<IssueProposal>(`github-proposals:${issueTracker.repo.toLowerCase()}`),
           createGitHubSelector(live[0], { timeoutMs: issueDelivery.timeoutMs,
-            ...(issueDelivery.planningModel ? { model: issueDelivery.planningModel } : {}) })) : undefined;
+            ...(issueDelivery.planningModel ? { model: issueDelivery.planningModel } : {}) }), reviewQuality,
+          (revision, paths, signal) => qualitySources(live[0], revision, paths, signal)) : undefined;
       const projectContext = loadProject && issuePlanning && github ? async () => {
         const [context, issues] = await Promise.all([loadProject(), github.suggest().catch(() => undefined)]);
         if (issues) context.evidence.issueCandidates = issues.map(({ number, title }) => ({ number, title }));
         return context;
       } : loadProject;
       const flows = createConversationFlows(inbox.runPhase, codex ? limits.codex : limits.demo, audit.record, projectContext,
-        recovery ? audit.checkpoint<StoredFlow>("flows") : undefined, issuePlanning?.begin);
+        recovery ? audit.checkpoint<StoredFlow>("flows") : undefined, issuePlanning?.begin,
+        codex ? flowId => codex.snapshot().requests.flatMap(card => card.flowId === flowId && card.status === "closed"
+          ? card.questions.flatMap(question => {
+            const answer = card.answers?.[question.id];
+            return answer === undefined ? [] : [{ cardId: card.id, questionId: question.id, question: scrubAuditText(question.prompt), answer }];
+          }) : []) : undefined);
       flows.reopenReady();
       return { codex, inbox, flows, dispatch, acceptance, github, issuePlanning };
     } catch (error) {
@@ -581,13 +594,13 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const issuePlan = process.env.SOULFLOW_GITHUB_DELIVERY_PLAN?.trim();
   const image = process.env.SOULFLOW_GITHUB_CHECK_IMAGE?.trim();
   const conversationDelivery = process.env.SOULFLOW_GITHUB_CONVERSATION_DELIVERY === "1";
-  if (conversationDelivery && issuePlan) throw Error("请选择一种 GitHub 交付授权入口。");
+  if (issuePlan) throw Error("静态 GitHub 计划缺少规划产物与校验记录，请改用对话工单交付。");
   if (conversationDelivery && !planPath) throw Error("对话选单需要配置项目开发计划。");
-  if ((issuePlan || conversationDelivery) && (!claimEnabled || !image || !Object.keys(githubAccounts).length)) {
+  if (conversationDelivery && (!claimEnabled || !image || !Object.keys(githubAccounts).length)) {
     throw Error("工单交付需要启用认领并绑定 GitHub 账号和已安装的检查镜像。");
   }
-  const issueDelivery = (issuePlan || conversationDelivery) && image ? {
-    specs: issuePlan ? parseDeliveryPlan(await readFile(issuePlan, "utf8")) : new Map(),
+  const issueDelivery = conversationDelivery && image ? {
+    specs: new Map(),
     image, ...(routine ? { model: routine } : {}), ...(advanced ? { planningModel: advanced } : {}),
     conversation: conversationDelivery,
     pollMs: integerSetting("SOULFLOW_GITHUB_POLL_MS", 20_000, 5000, 3_600_000),
@@ -599,6 +612,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const server = createWorkbenchServer(undefined, live ? [process.cwd()] : undefined, auditPath, {
     limits, inputLimits, auditThresholds, dispatchConcurrency, ...(issueDelivery ? { issueDelivery } : {}),
     ...(codexAccounts ? { codexAccounts } : {}),
+    ...(advanced ? { qualityModel: advanced } : {}),
     ...(remoteLan ? { remoteLan } : {}),
     ...(implementer !== undefined || reviewer !== undefined || extra ? { members: { implementer: implementer ?? "", reviewer: reviewer ?? "", additionalImplementers } } : {}),
     ...(claimEnabled && githubRepo ? {

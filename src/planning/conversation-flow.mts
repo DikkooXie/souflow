@@ -47,6 +47,7 @@ export type Flow = {
   outputs: { title: string; artifacts: readonly Artifact[] }[];
   planHistory?: readonly Artifact[];
   project?: ProjectEvidence;
+  clarifications?: readonly { cardId: string; questionId: string; question: string; answer: string }[];
 };
 
 export type StoredFlow = { flow: Flow; planText?: string };
@@ -85,7 +86,8 @@ function nextTargets(flow: Flow, phase: Phase): PhaseTarget[] {
 
 export function createConversationFlows(runPhase: RunPhase, limit: number, record?: RecordBusiness,
   loadProject?: () => Promise<ProjectContext>, store?: Checkpoint<StoredFlow>,
-  onReady?: (flow: Flow, planText?: string, retry?: boolean) => boolean) {
+  onReady?: (flow: Flow, planText?: string, retry?: boolean) => boolean,
+  readClarifications?: (flowId: string) => NonNullable<Flow["clarifications"]>) {
   const flows: Flow[] = [];
   const planTexts = new Map<string, string>();
   const running = new Set<Promise<void>>();
@@ -142,6 +144,8 @@ export function createConversationFlows(runPhase: RunPhase, limit: number, recor
         })) throw Error();
         flow.outputs.push(output);
       }
+      const clarifications = readClarifications?.(flow.id);
+      if (clarifications?.length) flow.clarifications = clarifications;
       flow.status = "ready";
     } catch {
       flow.status = "interrupted";

@@ -251,14 +251,16 @@ function renderConversation(flow, pending) {
   promptBox.placeholder = flow ? "发起另一项需求…" : "描述你的需求…";
   if (!flow) return;
   const proposal = issuePlans.find(item => item.flowId === flow.id);
-  const retrySelection = proposal?.status === "uncertain" && !proposal.approved;
+  const retrySelection = ["uncertain", "blocked"].includes(proposal?.status) && !proposal.approved;
   resumeWorkflow.hidden = !live || member?.id === "reviewer" || (flow.status !== "interrupted" && !retrySelection);
-  resumeWorkflow.textContent = retrySelection ? "重试 GitHub 选单" : "继续规划";
+  resumeWorkflow.textContent = retrySelection ? "重新选单并校验" : "继续规划";
   resumeWorkflow.dataset.subject = flow.id;
   renderInterruptedDecisions(flow);
   if (conversationMessage.textContent !== flow.prompt) conversationMessage.textContent = flow.prompt;
   const waiting = pending.some(request => request.flowId === flow.id);
   const deliveryStatus = { selecting: "正在从 GitHub 选择适合本轮计划的工单…",
+    reviewing: "正在复核项目文档和 GitHub 工单…",
+    blocked: "GitHub 工单未通过质量校验。",
     pending: "已选好 GitHub 工单。请在「待决策」确认授权范围。",
     authorizing: "授权已记录，正在认领 GitHub 工单…",
     submitted: "已派发到 GitHub 工单，可查看会话、依赖和 PR 进度。",
@@ -266,7 +268,7 @@ function renderConversation(flow, pending) {
     empty: "这轮计划暂无符合条件的未认领 GitHub 工单。",
     uncertain: "GitHub 工单状态待核对。请查看工单列表。",
   };
-  const note = flow.status === "ready" ? deliveryStatus[proposal?.status] ?? "项目文档已就绪。"
+  const note = flow.status === "ready" ? [deliveryStatus[proposal?.status] ?? "项目文档已就绪。", proposal?.error].filter(Boolean).join(" ")
     : flow.status === "interrupted" ? "规划已中断，已完成的项目文档已保留。"
       : flow.status === "failed" ? "这项需求暂未完成。"
         : waiting ? "有一个问题需要你决定。" : "正在推进你的需求…";
@@ -419,7 +421,7 @@ function addQuestion(container, question, draft) {
 function later() {
   clearTimeout(poll);
   if (active > 0 || flows.some(flow => flow.status === "running") || requests.some(request => request.status === "submitted")
-    || issuePlans.some(item => ["selecting", "authorizing"].includes(item.status))
+    || issuePlans.some(item => ["selecting", "reviewing", "authorizing"].includes(item.status))
     || dispatches.some(run => ["preparing", "running", "waiting"].includes(run.status))) {
     poll = setTimeout(() => void refresh(), 400);
   } else if (member) {
@@ -539,7 +541,7 @@ dialog.addEventListener("close", () => {
 });
 resumeWorkflow.addEventListener("click", () => {
   const proposal = issuePlans.find(item => item.flowId === selectedFlow);
-  const action = proposal?.status === "uncertain" && !proposal.approved ? "github-selection/retry" : "resume";
+  const action = ["uncertain", "blocked"].includes(proposal?.status) && !proposal.approved ? "github-selection/retry" : "resume";
   if (selectedFlow) void post(`/api/workflows/${selectedFlow}/${action}`);
 });
 openArchive.addEventListener("click", () => archive.show(flows.find(entry => entry.id === selectedFlow)));

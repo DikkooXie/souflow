@@ -2,44 +2,43 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { issueRevision, type DeliveryTracker, type IssueDetail } from "../src/connections/issue-tracker.mts";
-import type { Flow } from "../src/planning/conversation-flow.mts";
+import { currentDevelopmentPlan } from "../src/planning/conversation-flow.mts";
 import { readGitHubSelection } from "../src/planning/github-selection.mts";
 import { createConversationDelivery, type IssueProposal } from "../src/workbench/conversation-delivery.mts";
 import { type Claim, createIssueDispatch } from "../src/workbench/issue-dispatch.mts";
+import { passingQualityReview, qualityReviewOutput, readyQualityFlow, validation } from "./fixtures/planning-quality.mts";
 
 const makeIssue = (number: number, body = "实施并验证。"): IssueDetail => ({
   number, title: `工单 ${number}`, body, url: `https://github.com/a/b/issues/${number}`, assignees: [], pulls: [], state: "OPEN",
 });
 const available = new Set(["src/main.mts", "tests/main.test.mts"]);
-const up = { number: 1, reason: "首版校验", instructions: "修复校验。", files: ["src/main.mts"], dependsOn: [] };
+const up = { number: 1, reason: "首版校验", instructions: "修复校验。", files: ["src/main.mts"], dependsOn: [],
+  criteria: ["AC-1"], validation };
 const down = { ...up, number: 2, files: ["tests/main.test.mts"], dependsOn: [1] };
 
 test("只选择真实候选及冻结路径，保留 Issue 声明的前置", () => {
   const issues = [makeIssue(1), makeIssue(2, "依赖 https://github.com/a/b/issues/1 合并。")];
-  const read = (value: unknown[]) => readGitHubSelection(JSON.stringify({ issues: value }), issues, available);
+  const read = (value: unknown[]) => readGitHubSelection(JSON.stringify({ issues: value }), issues, available, ["AC-1"]);
   assert.deepEqual(read([up, down]).map(item => item.dependsOn), [[], [1]]);
   for (const bad of [
     [{ ...up, number: 999 }], [{ ...up, files: ["src/not-at-this-version.mts"] }],
     [up, { ...down, files: up.files }], [up, { ...down, dependsOn: [] }],
+    [{ ...up, validation: [] }],
     [{ ...up, dependsOn: [2] }, down],
   ]) assert.throws(() => read(bad));
 });
 
 test("保留 Issue 正文中用井号声明的依赖，拒绝遗漏该依赖的选单", () => {
   const issues = [makeIssue(1), makeIssue(2, "- 依赖 #1")];
-  const read = (value: unknown[]) => readGitHubSelection(JSON.stringify({ issues: value }), issues, available);
+  const read = (value: unknown[]) => readGitHubSelection(JSON.stringify({ issues: value }), issues, available, ["AC-1"]);
 
   assert.deepEqual(read([up, down])[1]?.dependsOn, [1]);
   assert.throws(() => read([up, { ...down, dependsOn: [] }]));
 });
 
 test("授权卡仅由发起者回答，固定计划并阻止双击重复派发", async () => {
-  const flow: Flow = { id: "f", title: "首版", prompt: "继续推进", requestedBy: "member",
-    source: { id: "request", kind: "request", version: 1, upstream: [] }, status: "ready",
-    outputs: [{ title: "文档", artifacts: [{ id: "plan", kind: "development-plan", version: 1, upstream: [],
-      sections: [{ title: "开发计划", text: "版本一" }] }] }],
-    project: { repository: { revision: "f".repeat(40), commits: [] }, plan: { status: "read" }, github: { status: "read" } },
-  };
+  const flow = await readyQualityFlow("继续推进首版开发");
+  flow.project = { repository: { revision: "f".repeat(40), commits: [] }, plan: { status: "read" }, github: { status: "read" } };
   const saved = new Map<string, IssueProposal>();
   const approvals: unknown[] = [];
   const item = makeIssue(1);
@@ -50,7 +49,8 @@ test("授权卡仅由发起者回答，固定计划并阻止双击重复派发",
       if (fail) throw Error("批量认领中断。");
     },
   }, { load: () => [...saved.values()], save(id, p) { saved.set(id, structuredClone(p)); return true; } },
-  async () => readGitHubSelection(JSON.stringify({ issues: [up] }), [item], available));
+  async () => readGitHubSelection(JSON.stringify({ issues: [up] }), [item], available, ["AC-1"]),
+  passingQualityReview, async () => ({}));
   const initial = service();
   initial.begin(flow, "首版");
   await setImmediate();
@@ -76,16 +76,26 @@ test("授权卡仅由发起者回答，固定计划并阻止双击重复派发",
   const resumed = service();
   assert.equal(await resumed.answer(card.id, "other", response, [flow]), 404);
   const revised = structuredClone(flow);
-  const plan = revised.outputs[0]?.artifacts[0];
+  const plan = currentDevelopmentPlan(revised);
   assert.ok(plan);
-  revised.outputs[0] = { title: "文档", artifacts: [{ ...plan, version: 2 }] };
+  const revise = (change: Partial<typeof plan>) => {
+    revised.outputs = flow.outputs.map(output => ({ ...output, artifacts: output.artifacts.map(artifact =>
+      artifact.id === plan.id ? { ...artifact, ...change } : artifact) }));
+  };
+  revise({ version: 2 });
+  assert.equal(await resumed.answer(card.id, "member", response, [revised]), 409);
+  revise({ sections: [{ title: "开发计划", text: "相同版本号、不同正文" }] });
   assert.equal(await resumed.answer(card.id, "member", response, [revised]), 409);
   assert.equal(await resumed.answer(card.id, "member", { ...response, issue: 99 }, [flow]), 422);
   assert.deepEqual((await Promise.all([
     resumed.answer(card.id, "member", response, [flow]), resumed.answer(card.id, "member", response, [flow]),
   ])).sort(), [200, 409]);
-  assert.deepEqual(approvals, [{ actor: "member", approval: { flowId: "f", planId: "plan", version: 1 },
-    specs: new Map([[1, { instructions: up.instructions, files: up.files, dependsOn: [], baseRevision: "f".repeat(40), issueRevision: issueRevision(item) }]]) }]);
+  assert.ok(pending.quality);
+  const { policy, flowDigest, batchDigest } = pending.quality;
+  assert.deepEqual(approvals, [{ actor: "member", approval: { flowId: flow.id, planId: plan.id, version: 1,
+    quality: { policy, flowDigest, batchDigest } },
+    specs: new Map([[1, { instructions: `${up.instructions}\nAC-1：按确认指引操作后检查产物 → 产物符合验收要求`,
+      files: up.files, dependsOn: [], baseRevision: "f".repeat(40), issueRevision: issueRevision(item) }]]) }]);
   assert.ok(resumed.locks(flow.id));
   await resumed.close();
 });
@@ -109,6 +119,34 @@ test("批量认领先核对所有 Issue 内容，变更时不执行外部写操�
       { flowId: "flow", planId: "plan", version: 1 }), /改变|变化/);
     assert.equal(writes, 0);
   } finally { await github.close(); }
+});
+
+test("有验收编号但验证不对应时，不生成 GitHub 授权卡，也不认领", async () => {
+  const flow = await readyQualityFlow();
+  flow.project = { repository: { revision: "a".repeat(40), commits: [] }, plan: { status: "read" }, github: { status: "read" } };
+  const item = makeIssue(1);
+  const checks = [{ criterion: "AC-1", procedure: "首次确认纪要", expected: "发送一次待办" }];
+  const store = new Map<string, IssueProposal>();
+  const service = createConversationDelivery({
+    permits: () => true, suggest: async () => [item],
+    claimApproved: async () => assert.fail("未经复核不能认领"),
+  }, { load: () => [...store.values()], save(id, value) { store.set(id, structuredClone(value)); return true; } },
+  async () => readGitHubSelection(JSON.stringify({ issues: [{ ...up, validation: checks }] }), [item], available, ["AC-1"]),
+  async packet => JSON.stringify({
+    ...qualityReviewOutput(packet),
+    verification: { status: "block", summary: "首次确认没有验证重复确认的幂等行为",
+      evidence: [{ ref: "test:1:AC-1", quote: "首次确认纪要" }] },
+  }), async () => ({}));
+  try {
+    assert.equal(service.begin(flow, "首版"), true);
+    await setImmediate();
+    assert.equal(service.statuses([flow], "member")[0]?.status, "blocked");
+    assert.match(service.statuses([flow], "member")[0]?.error ?? "", /幂等/);
+    assert.deepEqual(service.cards([flow], "member"), []);
+    const id = store.keys().next().value;
+    assert.ok(id);
+    assert.equal(await service.answer(id, "member", { authorization: "授权执行并开草稿 PR" }, [flow]), 409);
+  } finally { await service.close(); }
 });
 
 test("一次授权批量认领后，只派发就绪工单，合并后接续下游", async () => {
