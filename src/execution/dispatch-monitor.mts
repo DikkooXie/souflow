@@ -56,7 +56,12 @@ export function createDispatchMonitor(host: string, now = Date.now) {
       };
     },
     snapshot: () => ({
-      hosts: [{ name: host, kind: "local", active: [...active.values()], recent: [...recent] }],
+      hosts: [{
+        name: host,
+        kind: "local",
+        active: Array.from(active.values(), (session) => ({ ...session })),
+        recent: recent.map((session) => ({ ...session })),
+      }],
       observedAt: now(),
     }),
   };
