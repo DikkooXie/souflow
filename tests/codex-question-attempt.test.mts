@@ -9,7 +9,7 @@ import { type CodexAttemptEvent, startCodexQuestionAttempt } from "../src/execut
 
 const fixture = fileURLToPath(new URL("./fixtures/codex-app-server.mjs", import.meta.url));
 
-type Overrides = Pick<Parameters<typeof startCodexQuestionAttempt>[0], "outputSchema" | "answerMaxLength" | "model">;
+type Overrides = Pick<Parameters<typeof startCodexQuestionAttempt>[0], "outputSchema" | "answerMaxLength" | "model" | "onAccount">;
 
 function runQuestion(t: TestContext, scenario: string, workspace: string, overrides?: Overrides) {
   const events: CodexAttemptEvent[] = [];
@@ -28,6 +28,26 @@ function runQuestion(t: TestContext, scenario: string, workspace: string, overri
   t.after(attempt.close);
   return { attempt, events, requested };
 }
+
+test("账号观察只返回本次运行的短标记，未知及无响应的账号仍可发出澄清", { timeout: 5000 }, async t => {
+  const workspace = await mkdtemp(join(tmpdir(), "souflow-account-"));
+  t.after(() => rm(workspace, { recursive: true }));
+  async function observe(scenario: string) {
+    const refs: string[] = [];
+    const { requested, attempt } = runQuestion(t, `question-account-${scenario}`, workspace, { onAccount: ref => { refs.push(ref); } });
+    await requested;
+    attempt.close();
+    return refs;
+  }
+  const [first, second, late, other, ...unavailable] = await Promise.all(
+    ["first", "second", "late", "other", "missing", "key", "unsupported", "silent"].map(observe),
+  );
+  assert.ok(first?.[0] && /^[a-f0-9]{12}$/.test(first[0]));
+  assert.deepEqual(first, second);
+  assert.deepEqual(first, late);
+  assert.ok(other?.[0] && other[0] !== first[0]);
+  assert.ok(unavailable.every(refs => refs.length === 0));
+});
 
 test("keeps invalid, secret, and permission requests out of the decision inbox", { timeout: 5000 }, async t => {
   const workspace = await mkdtemp(join(tmpdir(), "souflow-question-"));

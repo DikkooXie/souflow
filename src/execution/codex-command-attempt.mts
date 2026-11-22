@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
@@ -40,12 +40,16 @@ type Options = {
   onEvent: (event: CodexAttemptEvent) => void;
   onModel?: (model: string) => void;
   onThread?: (threadId: string) => void;
+  onAccount?: (accountRef: string) => void;
   command?: readonly [executable: string, ...args: string[]];
   outputSchema?: Record<string, unknown>;
   answerMaxLength?: number;
   disableWebSearch?: boolean;
   untrustedContext?: string;
 };
+
+// 同次工作台运行内可对照账号，日志和页面只接收短标记。
+const accountSalt = randomBytes(32);
 
 function record(value: unknown): Record<string, unknown> | undefined {
   if (typeof value === "object" && value !== null && !Array.isArray(value)) {
@@ -113,6 +117,7 @@ function startAttempt(options: Options, mode: "commands" | "questions" | "local-
   let startingTurn = false;
   let closed = false;
   let callId = 0;
+  let accountReadId: number | undefined;
   let pendingCall: { id: number; receive: (result: Record<string, unknown>) => void } | undefined;
   const earlyMessages: { method: string; id: RequestId | undefined; params: Record<string, unknown> }[] = [];
   let complete!: (outcome: Outcome) => void;
@@ -275,6 +280,15 @@ function startAttempt(options: Options, mode: "commands" | "questions" | "local-
       }
       return;
     }
+    if (accountReadId !== undefined && message.id === accountReadId) {
+      accountReadId = undefined;
+      const result = record(message.result);
+      const id = result?.userId;
+      if (!message.error && record(result?.account)?.type === "chatgpt" && typeof id === "string" && id.trim()) {
+        options.onAccount?.(createHmac("sha256", accountSalt).update(id).digest("hex").slice(0, 12));
+      }
+      return;
+    }
     if (pendingCall && message.id === pendingCall.id) {
       const { receive } = pendingCall;
       pendingCall = undefined;
@@ -342,6 +356,11 @@ function startAttempt(options: Options, mode: "commands" | "questions" | "local-
     capabilities: { experimentalApi: true },
   }, () => {
     send({ method: "initialized" });
+    // 观察账号不阻塞业务握手；旧版本或认证提供方可能没有可用的用户标识。
+    if (options.onAccount) {
+      accountReadId = ++callId;
+      send({ id: accountReadId, method: "account/read", params: { refreshToken: false } });
+    }
     if (mode === "commands") {
       openThread();
       return;
