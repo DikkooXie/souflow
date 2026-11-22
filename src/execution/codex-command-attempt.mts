@@ -69,6 +69,8 @@ type Options = AccountOptions & {
   onAccount?: (accountRef: string) => void;
   command?: readonly [executable: string, ...args: string[]];
   outputSchema?: Record<string, unknown>;
+  outputMaxBytes?: number;
+  onOutputOverflow?: (bytes: number | undefined) => void;
   answerMaxLength?: number;
   disableWebSearch?: boolean;
   untrustedContext?: string;
@@ -265,7 +267,11 @@ function startAttempt(options: Options, mode: "commands" | "questions" | "local-
     if (options.outputSchema && method === "item/completed" && turnId && params.turnId === turnId) {
       const item = record(params.item);
       if (item?.type === "agentMessage" && item.phase !== "commentary") {
-        output = typeof item.text === "string" && item.text.length <= 16_384 ? item.text : undefined;
+        const value = typeof item.text === "string" ? item.text : undefined;
+        const bytes = value === undefined ? 0 : Buffer.byteLength(value);
+        const exceeds = options.outputMaxBytes === undefined ? (value?.length ?? 0) > 16_384 : bytes > options.outputMaxBytes;
+        output = exceeds ? undefined : value;
+        options.onOutputOverflow?.(exceeds ? bytes : undefined);
       }
     }
     if (method === "serverRequest/resolved" && isRequestId(params.requestId)) {

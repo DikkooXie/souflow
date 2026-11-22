@@ -5,6 +5,7 @@ import { issueRevision, type DeliveryTracker, type IssueDetail, type IssuePull, 
 import type { AccountAssignment } from "../execution/codex-account-dispatch.mts";
 import { IssueDeliveryFailed, IssueDeliverySourcesChanged, type DeliveryFailure, type DeliverySpec, type DeliveryTarget, type PrepareIssue } from "../execution/issue-delivery.mts";
 import { IssueVerificationUncertain, type VerifyIssue } from "../execution/issue-verification.mts";
+import type { PatchIssue } from "../execution/local-code-changes.mts";
 import { qualityBindingCurrent, type QualityBinding } from "../planning/dispatch-quality.mts";
 
 export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; prepare: PrepareIssue; pollMs: number; conversation?: boolean;
@@ -31,7 +32,7 @@ const reasonNames = { unavailable: "暂无更细的失败记录", format: "替�
 
 function retryable(failure: DeliveryFailure | undefined) {
   return failure?.stage === "tests" && failure.reason === "check-failed"
-    || failure?.stage === "patch" && ["format", "match", "size", "empty"].includes(failure.reason);
+    || failure?.stage === "patch" && !failure.patchIssue && ["format", "match", "size", "empty"].includes(failure.reason);
 }
 export class IssueActionError extends Error {
   status: number;
@@ -53,11 +54,12 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   let candidates: Remote[] = [];
   const allowedIssues = delivery && new Set(delivery.specs.keys());
   const subject = (number: number) => `${tracker.repo}#${number}`;
-  function save(c: Claim, event?: string) {
+  function save(c: Claim, event?: string, patchCheck?: PatchIssue) {
     if (!store.save(String(c.number), c, event ? { kind: "github.issue", subject: subject(c.number),
       ...(c.approval ? { flowId: c.approval.flowId } : {}), details: {
       action: event, ...c.approval, ...(c.target ? { branch: c.target.branch, head: c.target.head } : {}),
       ...(c.failure ? { failure: c.failure } : {}), ...(c.retryCount ? { retryCount: c.retryCount } : {}),
+      ...(patchCheck ? { patchCheck } : {}),
       ...(event === "account-assigned" ? { codexAccount: c.accountAssignment } : {}),
       ...(c.pull ? { pull: c.pull.number, ci: c.pull.ci, merge: c.pull.mergeCommit, state: c.pull.state } : {}), actor: c.claimedBy, githubAccount: c.account, phase: c.phase, session: c.sessionId,
     } } : undefined)) throw new IssueActionError(503, "无法保存 GitHub 工单状态。");
@@ -65,11 +67,14 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   }
   function queueRetry(c: Claim) {
     // 进入远端发布后的尝试只能核对回执。重试沿用原工单的持久化授权和源码版本。
-    if (!delivery?.conversation || c.phase !== "deliveryFailed" || c.retryCount || c.target || c.pull || c.pulls.length
+    if (!delivery?.conversation || c.phase !== "deliveryFailed" || c.target || c.pull || c.pulls.length
       || !c.delivery?.baseRevision || !qualityBindingCurrent(c.approval?.quality)) return;
-    const legacy = !c.failure && delivery.recoverFailedIssue === c.number;
-    if (!legacy && !retryable(c.failure)) return;
-    save({ ...c, phase: "waiting", retryCount: 1, failure: c.failure ?? { stage: "legacy", reason: "unavailable" } }, "retry-queued");
+    const selected = delivery.recoverFailedIssue === c.number;
+    // 旧版的一次重试可能已耗尽，但当时尚未引入补丁接收与纠正。只恢复显式选中的旧记录一次。
+    const oldFormat = selected && c.retryCount === 1 && c.failure?.stage === "patch" && c.failure.reason === "format" && !c.failure.patchIssue;
+    if (!oldFormat && (c.retryCount || !(selected && !c.failure) && !retryable(c.failure))) return;
+    save({ ...c, phase: "waiting", retryCount: oldFormat ? 2 : 1, failure: c.failure ?? { stage: "legacy", reason: "unavailable" } },
+      oldFormat ? "patch-recovery-queued" : "retry-queued");
   }
   for (const c of store.load()) {
     if (["claiming", "running", "developing", "publishing"].includes(c.phase)) save({ ...c, phase: "uncertain" }, "restart");
@@ -163,6 +168,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       const branch = `feat/${c.number}-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
       const prepared = await delivery.prepare({ number: c.number, spec, branch, publisher: remote, upstream,
         ...(c.retryCount && c.failure ? { previousFailure: c.failure } : {}),
+        repairing: diagnostic => save(current(), "patch-repair", diagnostic),
         ...(c.approval ? { flowId: c.approval.flowId, planVersion: c.approval.version } : {}) },
         sessionId => save({ ...current(), sessionId }, "connected"), abort.signal,
         accountAssignment => save({ ...current(), accountAssignment }, "account-assigned"));
