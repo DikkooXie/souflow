@@ -7,10 +7,28 @@ import test from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { githubPull } from "../src/connections/github-delivery.mts";
 import type { DeliveryTracker, IssueDetail, IssuePull } from "../src/connections/issue-tracker.mts";
+import { qualitySources } from "../src/execution/codex-quality-review.mts";
 import { checkoutReviewedIssueBase, IssueDeliverySourcesChanged, parseDeliveryPlan } from "../src/execution/issue-delivery.mts";
 import { type Claim, createIssueDispatch } from "../src/workbench/issue-dispatch.mts";
 
 const spec = { files: ["src/main.mts"], instructions: "修改校验逻辑。", dependsOn: [] };
+
+test("GitHub 允许编辑的 TS 和 JS 文件使用固定提交的内容复核", async t => {
+  const repo = await mkdtemp(join(tmpdir(), "souflow-quality-sources-"));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
+  const paths = ["src/feature.ts", "tests/feature.js"];
+  git("init", "-q");
+  await Promise.all(paths.map(async path => {
+    await mkdir(join(repo, path.split("/")[0] ?? ""), { recursive: true });
+    await writeFile(join(repo, path), "export const approved = true;\n");
+  }));
+  git("add", "--", ...paths);
+  git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--no-gpg-sign", "-qm", "fixture");
+  await writeFile(join(repo, "src/feature.ts"), "未提交");
+  assert.deepEqual(await qualitySources(repo, git("rev-parse", "HEAD"), paths, new AbortController().signal),
+    Object.fromEntries(paths.map(path => [path, "export const approved = true;\n"])));
+});
 
 test("派发只使用已校验基线或声明的前置合并，拒绝其间变更的已审查文件", async t => {
   const repo = await mkdtemp(join(tmpdir(), "souflow-issue-base-"));

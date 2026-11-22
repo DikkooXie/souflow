@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { scrubAuditText } from "../audit/activity-store.mts";
 import { qualityReviewSchema, type QualityReviewer } from "../planning/dispatch-quality.mts";
 import { startCodexReadOnlyTask } from "./codex-command-attempt.mts";
+import { deliveryPath } from "./issue-delivery.mts";
 
 const exec = promisify(execFile);
 const sourceLimit = 12;
@@ -11,7 +12,8 @@ const regularPath = /^(?:docs|src|tests)\/[a-zA-Z0-9._/-]+\.(?:md|mts|mjs|html|c
 
 export async function qualitySources(workspace: string, revision: string, paths: readonly string[], signal: AbortSignal) {
   if (!/^[a-f0-9]{40,64}$/.test(revision)) throw Error("工单校验未通过：缺少固定仓库提交。");
-  const candidates = [...new Set(paths)].filter(path => regularPath.test(path) && !path.split("/").some(part => part.startsWith(".")));
+  const candidates = [...new Set(paths)].filter(path => (regularPath.test(path) || deliveryPath.test(path))
+    && !path.split("/").some(part => part.startsWith(".")));
   const inputs = await Promise.all(candidates.slice(0, sourceLimit).map(async path => {
     const git = (args: string[]) => exec("git", ["-C", workspace, ...args], {
       signal, timeout: 5000, maxBuffer: 96_000, env: { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" },
