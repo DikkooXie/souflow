@@ -89,6 +89,46 @@ test("撤销设备后旧设备凭据无法继续领取或回传", () => {
   assert.equal(hub.snapshot().jobs[0]?.status, "revoked");
 });
 
+test("历史过多时保留离线工单，重连完成后排在历史首位", () => {
+  const events: BusinessEvent[] = [];
+  let time = 0;
+  const hub = createRemoteHandoff(checkpoint<RemoteDevice>(events), checkpoint<RemoteJob>(events), 10, () => time);
+  const first = hub.addDevice("first", "implementer");
+  const other = hub.addDevice("other", "implementer");
+  if (first.status !== 201 || other.status !== 201) assert.fail();
+  const worker = ({ id, key }: typeof first.bundle) => {
+    const instance = randomUUID();
+    return {
+      enqueue: () => hub.enqueue(id, revision, files, "implementer"),
+      poll: (update?: { id: string; receipts: typeof receipt[] }) => hub.poll(id, `Bearer ${key}`, { instance, update }),
+    };
+  };
+  const slow = worker(first.bundle);
+  const busy = worker(other.bundle);
+  const job = slow.enqueue();
+  if (job.status !== 201) assert.fail();
+  assert.equal(slow.poll().status, 200);
+  assert.equal(slow.poll({ id: job.id, receipts: [receipt] }).status, 200);
+  for (let index = 0; index < 25; ++index) {
+    ++time;
+    const item = busy.enqueue();
+    if (item.status !== 201) assert.fail();
+    assert.equal(busy.poll().status, 200);
+    assert.equal(busy.poll({ id: item.id, receipts: [receipt, receipt] }).status, 200);
+  }
+  const offline = hub.snapshot();
+  assert.equal(offline.devices.find(device => device.id === first.bundle.id)?.status, "offline");
+  assert.equal(offline.jobs.length, 25);
+  assert.equal(offline.jobs[0]?.id, job.id);
+  assert.equal(offline.jobs[0]?.receipts.length, 1);
+  ++time;
+  assert.equal(slow.poll({ id: job.id, receipts: [receipt, receipt] }).status, 200);
+  const history = hub.snapshot().jobs;
+  assert.equal(history.length, 24);
+  assert.equal(history[0]?.id, job.id);
+  assert.equal(history[0]?.status, "ready");
+});
+
 test("远端核验只读取固定提交中的普通 Markdown，排除未提交内容和符号链接", async t => {
   const workspace = await mkdtemp(join(tmpdir(), "souflow-remote-files-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));

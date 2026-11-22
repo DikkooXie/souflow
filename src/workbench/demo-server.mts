@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { defaultAuditThresholds, openActivityStore, readActivity, scrubAuditText } from "../audit/activity-store.mts";
 import { defaultAnswerMaxLength, maxQuestionsPerDecision } from "../decisions/questions.mts";
 import { codeReviewOptions, createLocalDispatch, type Run } from "../execution/local-dispatch.mts";
-import { createDispatchMonitor } from "../execution/dispatch-monitor.mts";
+import { createDispatchMonitor, dispatchOverview } from "../execution/dispatch-monitor.mts";
 import { createRemoteHandoff, type RemoteDevice, type RemoteJob } from "../execution/remote-handoff.mts";
 import { createRemoteWorkerIngress, readRemoteFiles, type RemoteLanConfig } from "./remote-worker-ingress.mts";
 import { createCodexAccountDispatch, readCodexProfiles, type CodexAccountDispatch } from "../execution/codex-account-dispatch.mts";
@@ -250,8 +250,10 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
               reviewing: job.artifact ? reviewing.has(job.artifact.id) : false, review: job.artifact?.review,
             }));
           });
-        return send(200, { ...monitor.snapshot(), jobs, waiting: jobs.filter(job => job.status === "queued"), ...(remoteLink ? {
-          remote: { ...remoteLink.handoff.snapshot(), endpoint: remoteLink.ingress.endpoint(), canManage: !member || member.id === "implementer" },
+        const remote = remoteLink?.handoff.snapshot();
+        return send(200, { ...monitor.snapshot(), jobs, overview: dispatchOverview(jobs, remote?.jobs ?? []),
+          waiting: jobs.filter(job => job.status === "queued"), ...(remoteLink ? {
+          remote: { ...remote, endpoint: remoteLink.ingress.endpoint(), canManage: !member || member.id === "implementer" },
         } : {}) });
       }
       if (path === "/api/audit" || path.startsWith("/api/audit?")) {

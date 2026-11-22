@@ -10,7 +10,6 @@ const labels = {
 };
 const clock = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const pollMs = 1500;
-const overviewJobLimit = 6;
 const jobKey = item => item.ticketId ? `${item.batchId}/${item.ticketId}` : undefined;
 
 function stageFor(job, session) {
@@ -219,9 +218,7 @@ export function createMonitorView(node, selectFlow, onViewChange) {
     }
     topology.replaceChildren(hub, machines);
     links.setRoutes(routes);
-    const priority = { running: 0, queued: 1, blocked: 2, failed: 2, ready: 3, revoked: 3 };
-    const items = [...jobs.values(), ...remoteJobs].toReversed()
-      .sort((a, b) => priority[a.status] - priority[b.status]).slice(0, overviewJobLimit);
+    const items = data.overview;
     work.replaceChildren(...items.map(job => {
       const row = node("li");
       if (job.deviceId) {
@@ -231,7 +228,7 @@ export function createMonitorView(node, selectFlow, onViewChange) {
         button.dataset.state = job.status;
         button.dataset.nodeKey = `job/${job.id}`;
         button.setAttribute("aria-haspopup", "dialog");
-        button.append(node("strong", "", title), node("span", "monitor-badge", remoteJobStatus(job)),
+        button.append(node("strong", "", title), node("span", "monitor-badge", remoteJobStatus({ ...job, deviceStatus: deviceStates.get(job.deviceId) })),
           node("span", "monitor-meta", remoteProgress(job)));
         button.addEventListener("click", () => openDetail({ kind: "工单", id: job.id, title }));
         row.append(button);

@@ -15,8 +15,11 @@ export type RemoteJob = {
   id: string; deviceId: string; revision: string;
   files: Array<Omit<RemoteFile, "text"> & { text?: string }>;
   receipts: Receipt[]; status: "queued" | "running" | "ready" | "failed";
+  queuedAt?: number; finishedAt?: number;
 };
 type Store<T extends object> = Checkpoint<T>;
+const historyLimit = 24;
+const unfinished = (status: string) => status === "queued" || status === "running";
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
 
 function object(value: unknown) {
@@ -77,10 +80,10 @@ export function createRemoteHandoff(deviceStore: Store<RemoteDevice>, jobStore: 
     enqueue(deviceId: unknown, revision: string, files: RemoteFile[], actor: string) {
       const device = typeof deviceId === "string" ? devices.get(deviceId) : undefined;
       if (!device || device.revoked) return { status: 404 } as const;
-      if ([...jobs.values()].some(job => job.deviceId === device.id && (job.status === "queued" || job.status === "running"))) {
+      if ([...jobs.values()].some(job => job.deviceId === device.id && unfinished(job.status))) {
         return { status: 409 } as const;
       }
-      const job: RemoteJob = { id: randomUUID(), deviceId: device.id, revision, files, receipts: [], status: "queued" };
+      const job: RemoteJob = { id: randomUUID(), deviceId: device.id, revision, files, receipts: [], status: "queued", queuedAt: now() };
       if (!recordJob(job, "queued", actor)) return { status: 503 } as const;
       return { status: 201, id: job.id } as const;
     },
@@ -115,26 +118,34 @@ export function createRemoteHandoff(deviceStore: Store<RemoteDevice>, jobStore: 
             && receipt.bytes === job.files[index]?.bytes);
           const status = !match ? "failed" : receipts.length === job.files.length ? "ready" : "running";
           const files = status === "running" ? job.files : job.files.map(({ path, sha256, bytes }) => ({ path, sha256, bytes }));
-          if (!recordJob({ ...job, receipts, status, files }, status === "running" ? "progress" : "finished")) {
+          const next: RemoteJob = { ...job, receipts, status, files, ...(status === "running" ? {} : { finishedAt: now() }) };
+          if (!recordJob(next, status === "running" ? "progress" : "finished")) {
             return { status: 503 } as const;
           }
         }
       }
-      const job = [...jobs.values()].find(item => item.deviceId === id && (item.status === "queued" || item.status === "running"));
+      const job = [...jobs.values()].find(item => item.deviceId === id && unfinished(item.status));
       if (!job) return { status: 200, task: null } as const;
       if (job.status === "queued" && !recordJob({ ...job, status: "running" }, "claimed")) return { status: 503 } as const;
       // 未收到上一次领取回执时仍返回同一工单和进度。
       return { status: 200, task: { id: job.id, revision: job.revision, files: job.files, receipts: job.receipts } } as const;
     },
     snapshot() {
+      const visible = [...jobs.values()].reverse().map(({ id, deviceId, revision, status, files, receipts, queuedAt, finishedAt }) => {
+        const device = devices.get(deviceId);
+        return { id, deviceId, revision, deviceName: device?.name,
+          status: device?.revoked && unfinished(status) ? "revoked" as const : status, files, receipts,
+          queuedAt, finishedAt };
+      });
+      const current = visible.filter(job => unfinished(job.status));
+      const history = visible.filter(job => !unfinished(job.status))
+        .sort((a, b) => (b.finishedAt ?? b.queuedAt ?? 0) - (a.finishedAt ?? a.queuedAt ?? 0)).slice(0, historyLimit);
       return {
         devices: [...devices.values()].filter(device => !device.revoked).map(({ id, name, instance, lastSeen }) => ({
           id, name, status: connected(id) ? "online" : instance ? "offline" : "pending", lastSeen: online.get(id) ?? lastSeen,
         })),
-        jobs: [...jobs.values()].slice(-24).reverse().map(({ id, deviceId, revision, status, files, receipts }) => ({
-          id, deviceId, revision, deviceName: devices.get(deviceId)?.name,
-          status: devices.get(deviceId)?.revoked && (status === "queued" || status === "running") ? "revoked" : status,
-          files: files.map(({ path, sha256, bytes }) => ({ path, sha256, bytes })), receipts: receipts.map(receipt => ({ ...receipt })),
+        jobs: [...current, ...history].map(({ files, receipts, ...job }) => ({
+          ...job, files: files.map(({ path, sha256, bytes }) => ({ path, sha256, bytes })), receipts: receipts.map(receipt => ({ ...receipt })),
         })),
       };
     },
