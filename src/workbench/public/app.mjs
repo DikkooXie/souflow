@@ -3,6 +3,7 @@ import { createAuditView } from "./audit.mjs";
 import { createDispatchPanel } from "./dispatch.mjs";
 import { createMonitorView } from "./dispatch-monitor.mjs";
 import { createGithubPanel } from "./github-issues.mjs";
+import { renderQualityDetails } from "./quality-details.mjs";
 
 const list = document.querySelector("#requests");
 const queue = document.querySelector("#decision-queue");
@@ -20,6 +21,7 @@ const welcome = document.querySelector("#welcome");
 const conversation = document.querySelector("#conversation");
 const conversationMessage = document.querySelector("#conversation-message");
 const conversationStatus = document.querySelector("#conversation-status");
+const conversationQuality = document.querySelector("#conversation-quality");
 const resumeWorkflow = document.querySelector("#resume-workflow");
 const interruptedDecisions = document.querySelector("#interrupted-decisions");
 const interruptedDecisionList = document.querySelector("#interrupted-decision-list");
@@ -249,8 +251,9 @@ function renderConversation(flow, pending) {
   welcome.hidden = !!flow;
   conversation.hidden = !flow;
   promptBox.placeholder = flow ? "发起另一项需求…" : "描述你的需求…";
+  const proposal = issuePlans.find(item => item.flowId === flow?.id);
+  renderQualityDetails(conversationQuality, node, flow?.status === "ready" ? proposal?.quality : undefined);
   if (!flow) return;
-  const proposal = issuePlans.find(item => item.flowId === flow.id);
   const retrySelection = ["uncertain", "blocked"].includes(proposal?.status) && !proposal.approved;
   resumeWorkflow.hidden = !live || member?.id === "reviewer" || (flow.status !== "interrupted" && !retrySelection);
   resumeWorkflow.textContent = retrySelection ? "重新选单并校验" : "继续规划";

@@ -49,7 +49,7 @@ npm run dev
 
 已用两张有依赖的真实 Issue 实测。从「继续推进 souflow 首版开发」出发，工作台读取首版计划，自主选单并标明依赖。确认待决策后，本机 Codex 在独立工作区完成上游工单，工作台开出关联 PR 并同步 CI。上游经评审合并后，下游自动唤醒，在另一个工作区完成开发和测试并开出关联 PR，中途无需人工重试或补交。[对话选单与接力实测](docs/acceptance/conversation-github-delivery.md#单句续推与自动接力复验) · [本机交付计划复验](docs/acceptance/b5-delivery.md)
 
-本机账号池已接入，工作台显示工单分配及理由。真实单账号多会话和重启回读通过，双账号选择已做自动化测试。双机单账号代码协作待试用。服务器版再交付网页设备配对与远程代码执行，并在具备多个独立 Codex 登录时复验多机多账号派发。[账号调度验收](docs/acceptance/codex-account-dispatch.md)
+本机账号池已接入，工作台显示工单分配及理由。真实单账号多会话和重启回读通过，双账号选择已做自动化测试。两台 Mac 用同一个 Codex 账号分开开发，并通过 GitHub 合并提交交接，已实测。[双机试用证据](docs/acceptance/two-mac-code-handoff.md)。服务器版再交付网页设备配对与远程代码执行，并在具备多个独立 Codex 登录时复验多机多账号派发。[账号调度验收](docs/acceptance/codex-account-dispatch.md)
 
 ## 每个模块如何选择方案
 

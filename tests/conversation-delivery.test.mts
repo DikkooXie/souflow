@@ -61,6 +61,10 @@ test("授权卡仅由发起者回答，固定计划并阻止双击重复派发",
   await initial.close();
   const pending = saved.get(card.id);
   assert.ok(pending);
+  assert.ok(pending.quality);
+  assert.deepEqual(initial.statuses([flow], "member")[0]?.quality, pending.quality);
+  assert.deepEqual(initial.statuses([flow], "other"), []);
+  assert.equal(Object.hasOwn(card, "quality"), false);
   const response = { authorization: "授权执行并开草稿 PR" };
   const failed = service(true);
   assert.equal(await failed.answer(card.id, "member", response, [flow]), 409);
@@ -83,6 +87,7 @@ test("授权卡仅由发起者回答，固定计划并阻止双击重复派发",
       artifact.id === plan.id ? { ...artifact, ...change } : artifact) }));
   };
   revise({ version: 2 });
+  assert.deepEqual(resumed.statuses([revised], "member"), []);
   assert.equal(await resumed.answer(card.id, "member", response, [revised]), 409);
   revise({ sections: [{ title: "开发计划", text: "相同版本号、不同正文" }] });
   assert.equal(await resumed.answer(card.id, "member", response, [revised]), 409);
@@ -90,7 +95,6 @@ test("授权卡仅由发起者回答，固定计划并阻止双击重复派发",
   assert.deepEqual((await Promise.all([
     resumed.answer(card.id, "member", response, [flow]), resumed.answer(card.id, "member", response, [flow]),
   ])).sort(), [200, 409]);
-  assert.ok(pending.quality);
   const { policy, flowDigest, batchDigest } = pending.quality;
   assert.deepEqual(approvals, [{ actor: "member", approval: { flowId: flow.id, planId: plan.id, version: 1,
     quality: { policy, flowDigest, batchDigest } },
@@ -134,14 +138,20 @@ test("有验收编号但验证不对应时，不生成 GitHub 授权卡，也不
   async () => readGitHubSelection(JSON.stringify({ issues: [{ ...up, validation: checks }] }), [item], available, ["AC-1"]),
   async packet => JSON.stringify({
     ...qualityReviewOutput(packet),
-    verification: { status: "block", summary: "首次确认没有验证重复确认的幂等行为",
+    verification: { status: "block", summary: "首次确认没有验证重复确认的幂等行为 sk-abcdefghijklmnop",
       evidence: [{ ref: "test:1:AC-1", quote: "首次确认纪要" }] },
   }), async () => ({}));
   try {
     assert.equal(service.begin(flow, "首版"), true);
     await setImmediate();
-    assert.equal(service.statuses([flow], "member")[0]?.status, "blocked");
-    assert.match(service.statuses([flow], "member")[0]?.error ?? "", /幂等/);
+    const status = service.statuses([flow], "member")[0];
+    assert.equal(status?.status, "blocked");
+    assert.match(status.error ?? "", /幂等/);
+    assert.deepEqual(status.quality?.checks.verification, {
+      status: "block", summary: "首次确认没有验证重复确认的幂等行为 [已隐藏凭据]",
+      evidence: [{ ref: "test:1:AC-1", quote: "首次确认纪要" }],
+    });
+    assert.deepEqual(service.statuses([flow], "other"), []);
     assert.deepEqual(service.cards([flow], "member"), []);
     const id = store.keys().next().value;
     assert.ok(id);

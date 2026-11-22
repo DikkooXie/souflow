@@ -51,7 +51,7 @@ souflow 首版要让负责人输入「继续推进 souflow 开发」，在一个
 
 使用两台实体电脑和同一个已登录的 Codex 账号。选择同一个真实仓库里的两张不同工单，分别在各自机器的本地会话与独立 Git 工作区完成开发和测试，提交可追溯到对应 Issue 的 PR。至少验证一次通过 GitHub 的跨机交接：上游 PR 合并后，下游电脑从合并后的提交开始或继续其工单。保存两台电脑各自的执行或测试截图，以及关联 Issue、PR、提交和 CI，核对负责人和工单没有串单。此试用以各自机器本地启动执行，GitHub 承载协作和交接。
 
-[B6 局域网双机实测与截图（PR #42）](https://github.com/DikkooXie/souflow/pull/42)记录 Mac 接入包、两台实体 Mac 在线、只读核验在断线后从 `1/3` 恢复到 `3/3`，以及单次领取。它提供设备接入和恢复的证据，双机代码协作仍待实测。单机同账号多会话已有[实测证据](acceptance/session-account.md)。单机跨账号的[接入和测试记录](acceptance/codex-account-dispatch.md)作为以后多机多账号试验的参考。
+[B6 局域网双机实测与截图（PR #42）](https://github.com/DikkooXie/souflow/pull/42)记录 Mac 接入包、两台实体 Mac 在线、只读核验在断线后从 `1/3` 恢复到 `3/3`，以及单次领取。它提供设备接入和恢复的证据。后来用两台 Mac 和同一 Codex 账号实测了不同工单的开发，以及从上游合并提交开始的代码交接。[首版双机验收](acceptance/two-mac-code-handoff.md)。单机同账号多会话已有[实测证据](acceptance/session-account.md)。单机跨账号的[接入和测试记录](acceptance/codex-account-dispatch.md)作为以后多机多账号试验的参考。
 
 ## 编排长期开发计划
 

@@ -47,6 +47,7 @@
         <p id="conversation-message" class="user-message"></p>
         <div class="conversation-reply">
           <p id="conversation-status" class="flow-status" role="status"></p>
+          <details id="conversation-quality" class="history project-context" hidden></details>
           <button type="button" id="resume-workflow" class="archive-entry" data-track="resume-workflow" hidden>继续未完成的规划</button>
           <details id="interrupted-decisions" class="history project-context" hidden>
             <summary>中断的决策记录</summary>
@@ -214,6 +215,7 @@
       </header>
       <section class="dispatch-body" aria-label="工单及产物">
         <p id="dispatch-status" role="status"></p>
+        <details id="dispatch-quality" class="history project-context" hidden></details>
         <p class="error" role="alert" hidden></p>
         <p><label for="dispatch-kind">工单类型</label>
           <select id="dispatch-kind"><option value="report">只读核验</option><option value="code">编写代码</option></select>
