@@ -62,9 +62,10 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
       try {
         if (!planningDigest(snapshot)) throw Error("工单校验未通过：规划产物或上游版本不完整。");
         const eligible = await github.suggest();
-        const frozen = new Map(snapshot.project?.issueCandidates?.filter(item => item.revision).map(item => [item.number, item.revision]));
-        const issues = frozen.size ? eligible.filter(issue => frozen.get(issue.number) === issueRevision(issue)) : eligible;
-        if (frozen.size && !issues.length && eligible.length) {
+        const candidates = snapshot.project?.issueCandidates;
+        const frozen = candidates?.every(item => item.revision) ? new Map(candidates.map(item => [item.number, item.revision])) : undefined;
+        const issues = frozen ? eligible.filter(issue => frozen.get(issue.number) === issueRevision(issue)) : eligible;
+        if (frozen && !issues.length && eligible.length) {
           throw Error("工单校验未通过：候选 Issue 已变化，请按最新资料开启新一轮规划。");
         }
         const items = issues.length ? await select(snapshot, planText, issues, abort.signal) : [];

@@ -175,6 +175,11 @@ test("Issue 正文在规划后变化时不进入选单或授权", async () => {
     await setImmediate();
     assert.match(service.statuses([flow], "member")[0]?.error ?? "", /候选 Issue 已变化/);
     assert.deepEqual(service.cards([flow], "member"), []);
+    flow.project.issueCandidates = [];
+    assert.equal(service.begin(flow, "首版", true), true);
+    await setImmediate();
+    assert.match(service.statuses([flow], "member")[0]?.error ?? "", /候选 Issue 已变化/);
+    assert.deepEqual(service.cards([flow], "member"), []);
   } finally { await service.close(); }
 });
 

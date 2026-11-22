@@ -164,7 +164,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           (revision, paths, signal) => qualitySources(live[0], revision, paths, signal)) : undefined;
       const projectContext = loadProject && issuePlanning && github ? async () => {
         const [context, issues] = await Promise.all([loadProject(), github.suggest().catch(() => undefined)]);
-        if (issues) context.evidence.issueCandidates = snapshotIssueCandidates(issues);
+        context.evidence.issueCandidates = snapshotIssueCandidates(issues ?? []);
         return context;
       } : loadProject;
       const flows = createConversationFlows(inbox.runPhase, codex ? limits.codex : limits.demo, audit.record, projectContext,
