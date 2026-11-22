@@ -71,6 +71,14 @@ class DeliveryTest(unittest.TestCase):
             self.assertEqual(clean_branch(root, pr, merge), {"state": "cleaned", "local": True, "remote": True})
             self.assertEqual(clean_branch(root, pr, merge)["state"], "absent")
 
+            git("push", "origin", "main", f"{head}:refs/heads/test/one")
+            checkout = Path(directory) / "main-only"
+            subprocess.run(["git", "clone", "-q", "--no-local", "--single-branch", "--branch", "main",
+                            str(remote), str(checkout)], check=True)
+            local_object = subprocess.run(["git", "-C", str(checkout), "cat-file", "-e", head], capture_output=True)
+            self.assertNotEqual(local_object.returncode, 0)
+            self.assertEqual(clean_branch(checkout, pr, merge), {"state": "cleaned", "local": False, "remote": True})
+
     def test_document_retry_reuses_merged_section_and_checks_image_bytes(self):
         target = {"url": "https://team.feishu.cn/wiki/Document", "title": "验收", "summary": "实测通过",
                   "screenshots": [{"path": "docs/acceptance/result.png", "caption": "验收页面"}]}

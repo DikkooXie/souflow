@@ -108,6 +108,11 @@ def clean_branch(root, pr, merge):
         return {"state": "absent"}
     if local and f"branch {ref}" in entries:
         return {"state": "pending", "reason": "任务分支仍被工作区使用"}
+    if remote and git("cat-file", "-e", f"{head}^{{commit}}", allow_failure=True) is None:
+        # squash 后的单分支克隆可能缺少原始 PR 头，从已经核对的远端 ref 补齐。
+        if (git("fetch", "--no-tags", "origin", ref, allow_failure=True) is None
+                or git("rev-parse", "FETCH_HEAD").decode().strip() != head):
+            return {"state": "pending", "reason": "无法回读已核对的远端任务分支"}
     merged_tree = git("rev-parse", f"{merge}^{{tree}}").strip()
     expected = git("merge-tree", "--write-tree", f"{merge}^1", head, allow_failure=True)
     if expected is None or expected.strip() != merged_tree:
@@ -120,9 +125,9 @@ def clean_branch(root, pr, merge):
                         repo and (github_repo(url) or "").lower() == repo.lower()]
         if len(push_urls) != 1 or allowed_urls != push_urls:
             return {"state": "pending", "reason": "origin 的推送目标与已核对仓库不一致"}
-        # 使用核对后的单一目标，删除条件同时绑定已合并的远端 SHA。
+        # origin 的有效推送目标已核对，删除条件同时绑定远端 SHA。
         git("-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
-            "push", f"--force-with-lease={ref}:{head}", push_urls[0], f":{ref}")
+            "push", f"--force-with-lease={ref}:{head}", "origin", f":{ref}")
     if local:
         # 再核对工作区，保留其他成员在飞行中的任务分支。
         if f"branch {ref}" in git("worktree", "list", "--porcelain").decode().splitlines():
