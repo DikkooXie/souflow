@@ -1,3 +1,5 @@
+import { accountLabel, assignmentDetail } from "./account-assignment.mjs";
+
 const issueStates = { OPEN: "开放", CLOSED: "已关闭" };
 const pullStates = { OPEN: "待合并", CLOSED: "已关闭", MERGED: "已合并" };
 const ciStates = { NONE: "暂无检查", PENDING: "等待检查", EXPECTED: "等待检查", SUCCESS: "通过", FAILURE: "失败", ERROR: "异常" };
@@ -67,6 +69,8 @@ export function createGithubPanel(node, reportView) {
         row.append(node("p", "github-meta", `分支：${issue.target.branch}`));
       }
       if (issue.claimedBy) row.append(node("p", "github-meta", `本地实施成员：${safeText(issue.claimedBy)}`));
+      if (issue.accountAssignment) row.append(node("p", "github-meta",
+        `Codex ${accountLabel(issue)} · ${assignmentDetail(issue.accountAssignment)}`));
       if (Number.isFinite(issue.syncedAt) && Number.isFinite(new Date(issue.syncedAt).getTime())) {
         row.append(node("p", "github-meta", `GitHub 同步于：${new Date(issue.syncedAt).toLocaleString("zh-CN")}`));
       }

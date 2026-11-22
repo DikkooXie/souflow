@@ -1,3 +1,5 @@
+import { accountLabel, assignmentDetail } from "./account-assignment.mjs";
+
 const states = {
   queued: "排队中", running: "执行中", ready: "产物待验收", failed: "失败", blocked: "前置任务未完成",
 };
@@ -154,6 +156,7 @@ export function createDispatchPanel(node, post, openDecisions) {
       if (job.error) item.append(node("p", "error", job.error));
       if (job.modelRoute) item.append(node("p", "muted", `计划模型 ${job.modelRoute.requestedModel} · ${job.modelRoute.reason}`));
       if (job.model) item.append(node("p", "muted", `实际模型 ${job.model}`));
+      if (job.accountAssignment) item.append(node("p", "muted", `${accountLabel(job)} · ${assignmentDetail(job.accountAssignment)}`));
       if (job.report) item.append(node("p", "archive-text", job.report));
       row.append(item);
       return row;

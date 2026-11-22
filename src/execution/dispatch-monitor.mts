@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { scrubAuditText } from "../audit/activity-store.mts";
+import type { AccountAssignment } from "./codex-account-dispatch.mts";
 
 type Target = {
   title: string;
@@ -8,6 +9,7 @@ type Target = {
   batchId?: string;
   ticketId?: string;
   planVersion?: number;
+  accountAssignment?: AccountAssignment;
 };
 type Outcome = "completed" | "failed" | "interrupted" | "needs-reconciliation";
 type Session = Target & {
@@ -43,6 +45,9 @@ export function createDispatchMonitor(host: string, now = Date.now) {
         account(accountRef: string) {
           if (active.has(session.id)) session.accountRef = accountRef;
         },
+        assignAccount(assignment: AccountAssignment) {
+          if (active.has(session.id)) session.accountAssignment = assignment;
+        },
         waiting(waiting: boolean) {
           if (active.has(session.id) && session.threadId) session.status = waiting ? "waiting" : "running";
         },
@@ -59,12 +64,16 @@ export function createDispatchMonitor(host: string, now = Date.now) {
       hosts: [{
         name: host,
         kind: "local",
-        active: Array.from(active.values(), (session) => ({ ...session })),
-        recent: recent.map((session) => ({ ...session })),
+        active: Array.from(active.values(), copySession),
+        recent: recent.map(copySession),
       }],
       observedAt: now(),
     }),
   };
+}
+
+function copySession(session: Session): Session {
+  return { ...session, ...(session.accountAssignment ? { accountAssignment: { ...session.accountAssignment } } : {}) };
 }
 
 export type DispatchMonitor = ReturnType<typeof createDispatchMonitor>;

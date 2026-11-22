@@ -15,6 +15,7 @@ import { defaultAuditThresholds, openActivityStore, readActivity, scrubAuditText
 import { defaultAnswerMaxLength, maxQuestionsPerDecision } from "../decisions/questions.mts";
 import { codeReviewOptions, createLocalDispatch, type Run } from "../execution/local-dispatch.mts";
 import { createDispatchMonitor } from "../execution/dispatch-monitor.mts";
+import { createCodexAccountDispatch, readCodexProfiles, type CodexAccountDispatch } from "../execution/codex-account-dispatch.mts";
 import { createConversationFlows, currentDevelopmentPlan, maxArtifactTextLength, phases, readPlanRevision, type StoredFlow } from "../planning/conversation-flow.mts";
 import { createProjectContextReader, type ProjectSettings } from "../planning/project-context.mts";
 import { createCodexInbox } from "./codex-inbox.mts";
@@ -39,6 +40,7 @@ const files = [
   ["/dispatch.mjs", "dispatch.mjs", "text/javascript"],
   ["/audit.mjs", "audit.mjs", "text/javascript"],
   ["/dispatch-monitor.mjs", "dispatch-monitor.mjs", "text/javascript"],
+  ["/account-assignment.mjs", "account-assignment.mjs", "text/javascript"],
   ["/dispatch-links.mjs", "dispatch-links.mjs", "text/javascript"],
   ["/dispatch-monitor.css", "dispatch-monitor.css", "text/css"],
 ] as const;
@@ -73,11 +75,13 @@ type WorkbenchOptions = {
   issueDelivery?: Omit<IssueDeliveryOptions, "prepare"> & { image: string; model?: string; planningModel?: string; timeoutMs: number };
   memberTrackers?: ReadonlyMap<string, IssueTracker>;
   hostName?: string;
+  codexAccounts?: CodexAccountDispatch;
 };
 
 export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions, auditPath?: string, {
   limits = defaultLimits, inputLimits = defaultInputLimits, auditThresholds = defaultAuditThresholds,
-  dispatchConcurrency = defaultDispatchConcurrency, dispatchAdapters, project, members, issueTracker, verifyIssue, issueDelivery, memberTrackers, hostName = hostname(),
+  dispatchConcurrency = defaultDispatchConcurrency, dispatchAdapters, project, members, issueTracker, verifyIssue, issueDelivery,
+  memberTrackers, hostName = hostname(), codexAccounts,
 }: WorkbenchOptions = {}) {
   const memberFor = members && createMembers(members);
   if (memberFor && !live) throw Error("两位成员模式需要 Codex 工作台。");
@@ -113,15 +117,18 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       const inbox = codex ?? demo;
       const dispatch = live ? createLocalDispatch(live[0], dispatchConcurrency, { ...dispatchAdapters, record: audit.record,
         ...(monitor ? { monitor } : {}),
+        ...(codexAccounts ? { codexAccounts } : {}),
         ...(recovery ? { store: audit.checkpoint<Run>("dispatch"), artifactRoot: `${database}.artifacts` } : {}),
       }) : undefined;
       const acceptance = memberFor && createAcceptance(audit.record, recovery ? audit.checkpoint<StoredAcceptance>("acceptance") : undefined);
       if (issueTracker && (!recovery || !monitor)) throw Error("GitHub 认领需要持久化的 Codex 工作台。");
       const github = issueTracker && monitor ? createIssueDispatch(issueTracker,
-        audit.checkpoint<Claim>(`github-issues:${issueTracker.repo.toLowerCase()}`), verifyIssue ?? createIssueVerifier(monitor),
+        audit.checkpoint<Claim>(`github-issues:${issueTracker.repo.toLowerCase()}`),
+        verifyIssue ?? createIssueVerifier(monitor, codexAccounts ? { codexAccounts } : {}),
         audit.record, dispatchConcurrency, memberTrackers, issueDelivery && {
           specs: issueDelivery.specs, pollMs: issueDelivery.pollMs, ...(issueDelivery.conversation ? { conversation: true } : {}),
-          prepare: createIssueDeveloper(monitor, { ...issueDelivery, root: `${database}.artifacts/github` }),
+          prepare: createIssueDeveloper(monitor, { ...issueDelivery, root: `${database}.artifacts/github`,
+            ...(codexAccounts ? { codexAccounts } : {}) }),
         }) : undefined;
       const issuePlanning = live && github && issueTracker && issueDelivery?.conversation
         ? createConversationDelivery(github, audit.checkpoint<IssueProposal>(`github-proposals:${issueTracker.repo.toLowerCase()}`),
@@ -220,7 +227,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
                 const input = byId.get(id);
                 return input?.status !== "ready" || (run.kind === "code" && input.artifact?.review !== "accepted");
               }) : [],
-              startedAt: job.startedAt, finishedAt: job.finishedAt, accountRef: job.accountRef,
+              startedAt: job.startedAt, finishedAt: job.finishedAt, accountRef: job.accountRef, accountAssignment: job.accountAssignment,
               reviewing: job.artifact ? reviewing.has(job.artifact.id) : false, review: job.artifact?.review,
             }));
           });
@@ -485,6 +492,14 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     insightMinCount: integerSetting("SOULFLOW_AUDIT_INSIGHT_MIN_COUNT", defaultAuditThresholds.insightMinCount, 1),
   };
   const dispatchConcurrency = integerSetting("SOULFLOW_DISPATCH_MAX_CONCURRENT", defaultDispatchConcurrency, 1, 6);
+  const accountConfig = process.env.SOULFLOW_CODEX_ACCOUNTS_JSON?.trim();
+  const codexAccounts = live && accountConfig ? createCodexAccountDispatch(readCodexProfiles(accountConfig), process.cwd(), {
+    refreshMs: integerSetting("SOULFLOW_CODEX_ACCOUNT_REFRESH_MS", 30_000, 1000, 300_000),
+    probeMs: integerSetting("SOULFLOW_CODEX_ACCOUNT_PROBE_MS", 10_000, 1000, 60_000),
+    waitMs: integerSetting("SOULFLOW_CODEX_ACCOUNT_WAIT_MS", 60_000, 1000, 3_600_000),
+    cooldownMs: integerSetting("SOULFLOW_CODEX_ACCOUNT_COOLDOWN_MS", 60_000, 1000, 3_600_000),
+  }) : undefined;
+  delete process.env.SOULFLOW_CODEX_ACCOUNTS_JSON;
   const planPath = process.env.SOULFLOW_PROJECT_PLAN?.trim();
   const githubRepo = process.env.SOULFLOW_PROJECT_GITHUB_REPO?.trim();
   const advanced = process.env.SOULFLOW_CODEX_PLANNING_MODEL?.trim();
@@ -518,6 +533,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   delete process.env.SOULFLOW_MEMBER_REVIEWER_KEY;
   const server = createWorkbenchServer(undefined, live ? [process.cwd()] : undefined, auditPath, {
     limits, inputLimits, auditThresholds, dispatchConcurrency, ...(issueDelivery ? { issueDelivery } : {}),
+    ...(codexAccounts ? { codexAccounts } : {}),
     ...(implementer !== undefined || reviewer !== undefined || extra ? { members: { implementer: implementer ?? "", reviewer: reviewer ?? "", additionalImplementers } } : {}),
     ...(claimEnabled && githubRepo ? {
       issueTracker: createGitHubIssues(process.cwd(), githubRepo, githubAccounts.implementer ?? githubAccounts.personal),

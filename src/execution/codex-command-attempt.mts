@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
-import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
 import { type DecisionQuestion, maxQuestionsPerDecision, readDecisionAnswers } from "../decisions/questions.mts";
+import type { AccountOptions } from "./codex-account-dispatch.mts";
+import { codexIdentity, codexLoginEnvironment } from "./codex-account-status.mts";
 
 type CommandDecision = "accept" | "decline" | "cancel";
 type Outcome = "completed" | "failed" | "interrupted" | "needs-reconciliation";
@@ -33,7 +35,7 @@ export type CodexAttemptEvent =
   | { kind: "question-requested"; requestId: string; questions: readonly DecisionQuestion[] }
   | { kind: "question-submitted" | "question-cleared" | "question-expired" | "question-uncertain"; requestId: string };
 
-type Options = {
+type Options = AccountOptions & {
   workspace: string;
   prompt: string;
   model?: string;
@@ -48,9 +50,6 @@ type Options = {
   untrustedContext?: string;
   localLoginOnly?: boolean;
 };
-
-// 同次工作台运行内可对照账号，日志和页面只接收短标记。
-const accountSalt = randomBytes(32);
 
 function record(value: unknown): Record<string, unknown> | undefined {
   if (typeof value === "object" && value !== null && !Array.isArray(value)) {
@@ -111,10 +110,7 @@ function startAttempt(options: Options, mode: "commands" | "questions" | "local-
     "app-server", "--listen", "stdio://",
   ];
   // GitHub 代码工单使用本机登录，模型进程不继承工作台、GitHub 或 API 的凭据变量。
-  const env = options.localLoginOnly ? Object.fromEntries(
-    Object.entries(process.env).filter(([key]) => ["HOME", "PATH", "CODEX_HOME", "TMPDIR", "LANG", "LC_ALL",
-      "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "USERPROFILE", "SystemRoot"].includes(key)),
-  ) : process.env;
+  const env = options.localLoginOnly || options.account ? codexLoginEnvironment(options.account?.directory) : process.env;
   const child = spawn(executable, args, { cwd: workspace, env, stdio: ["pipe", "pipe", "ignore"] });
   const input = createInterface({ input: child.stdout });
   let threadId: string | undefined;
@@ -124,6 +120,7 @@ function startAttempt(options: Options, mode: "commands" | "questions" | "local-
   let closed = false;
   let callId = 0;
   let accountReadId: number | undefined;
+  let reportedLimit = false;
   let pendingCall: { id: number; receive: (result: Record<string, unknown>) => void } | undefined;
   const earlyMessages: { method: string; id: RequestId | undefined; params: Record<string, unknown> }[] = [];
   let complete!: (outcome: Outcome) => void;
@@ -165,6 +162,14 @@ function startAttempt(options: Options, mode: "commands" | "questions" | "local-
 
   function connectionLost() {
     finish(startingTurn ? "needs-reconciliation" : "failed");
+  }
+
+  function observeLimit(error: unknown) {
+    const kind = record(error)?.codexErrorInfo;
+    if (!reportedLimit && (kind === "usageLimitExceeded" || kind === "rateLimitExceeded")) {
+      reportedLimit = true;
+      options.account?.onLimited();
+    }
   }
 
   function publish(event: CodexAttemptEvent) {
@@ -249,6 +254,7 @@ function startAttempt(options: Options, mode: "commands" | "questions" | "local-
     }
     if (method === "turn/completed" && turnId && turn?.id === turnId) {
       const status = turn.status;
+      observeLimit(turn.error);
       if (status === "completed" || status === "failed" || status === "interrupted") finish(status);
       else connectionLost();
     }
@@ -288,11 +294,8 @@ function startAttempt(options: Options, mode: "commands" | "questions" | "local-
     }
     if (accountReadId !== undefined && message.id === accountReadId) {
       accountReadId = undefined;
-      const result = record(message.result);
-      const id = result?.userId;
-      if (!message.error && record(result?.account)?.type === "chatgpt" && typeof id === "string" && id.trim()) {
-        options.onAccount?.(createHmac("sha256", accountSalt).update(id).digest("hex").slice(0, 12));
-      }
+      const identity = !message.error && codexIdentity(message.result);
+      if (identity) options.onAccount?.(identity.ref.slice(0, 12));
       return;
     }
     if (pendingCall && message.id === pendingCall.id) {
@@ -300,7 +303,10 @@ function startAttempt(options: Options, mode: "commands" | "questions" | "local-
       pendingCall = undefined;
       const result = record(message.result);
       if (result && message.error === undefined) receive(result);
-      else connectionLost();
+      else {
+        observeLimit(record(message.error)?.data);
+        connectionLost();
+      }
     }
   }
 
@@ -313,6 +319,7 @@ function startAttempt(options: Options, mode: "commands" | "questions" | "local-
   function openThread(config?: Record<string, unknown>) {
     call("thread/start", {
       cwd: workspace,
+      ...(options.account ? { modelProvider: "openai" } : {}),
       ...(requestedModel ? { model: requestedModel, allowProviderModelFallback: false } : {}),
       approvalPolicy: mode === "commands" ? "on-request" : "never",
       approvalsReviewer: "user",
@@ -356,17 +363,7 @@ function startAttempt(options: Options, mode: "commands" | "questions" | "local-
     });
   }
 
-  call("initialize", {
-    clientInfo: { name: "soulflow", version: "0.1.0" },
-    // 收到完整的权限字段，才能拒绝超出当前适配范围的命令。
-    capabilities: { experimentalApi: true },
-  }, () => {
-    send({ method: "initialized" });
-    // 观察账号不阻塞业务握手；旧版本或认证提供方可能没有可用的用户标识。
-    if (options.onAccount) {
-      accountReadId = ++callId;
-      send({ id: accountReadId, method: "account/read", params: { refreshToken: false } });
-    }
+  function openWork() {
     if (mode === "commands") {
       openThread();
       return;
@@ -392,6 +389,29 @@ function startAttempt(options: Options, mode: "commands" | "questions" | "local-
         ...(mode === "local-task" || options.disableWebSearch ? { web_search: "disabled" } : {}),
       });
     });
+  }
+  call("initialize", {
+    clientInfo: { name: "soulflow", version: "0.1.0" },
+    // 收到完整的权限字段，才能拒绝超出当前适配范围的命令。
+    capabilities: { experimentalApi: true },
+  }, () => {
+    send({ method: "initialized" });
+    // 派单前核实的登录可能被切换。执行会话必须在接收工单之前重新验证。
+    if (options.account) {
+      call("account/read", { refreshToken: false }, result => {
+        const identity = codexIdentity(result);
+        if (!identity || identity.ref !== options.account?.expectedRef) return connectionLost();
+        options.onAccount?.(identity.ref.slice(0, 12));
+        openWork();
+      });
+      return;
+    }
+    // 未配置账号池时继续支持旧版 App Server 的非阻塞账号观察。
+    if (options.onAccount) {
+      accountReadId = ++callId;
+      send({ id: accountReadId, method: "account/read", params: { refreshToken: false } });
+    }
+    openWork();
   });
 
   return {
