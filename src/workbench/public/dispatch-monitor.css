@@ -25,6 +25,11 @@ body:has(#monitor-dialog[open]) { overflow: hidden; }
 .monitor-node-dialog #monitor-node-kind { margin: 0 0 3px; color: var(--accent-dark); }
 .monitor-node-dialog #monitor-node-title { overflow-wrap: anywhere; }
 .monitor-body { overflow: auto; padding: 18px 24px 28px; }
+.remote-workers { margin-top: 16px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+.remote-workers > summary { color: var(--accent-dark); cursor: pointer; }
+.remote-workers form { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; margin-block: 12px; }
+.remote-workers label { display: grid; gap: 5px; min-width: 0; color: var(--muted); }
+.remote-workers input, .remote-workers select { max-width: 100%; padding: 7px; border: 1px solid var(--line); border-radius: 8px; }
 .monitor-topline { display: flex; justify-content: space-between; align-items: center; gap: 8px 14px; flex-wrap: wrap; margin-bottom: 12px; }
 .monitor-topline h3, .monitor-jobs h3 { margin: 0; font-size: .96rem; }
 .monitor-link { font-size: .82rem; color: var(--accent-dark); }
@@ -89,6 +94,8 @@ body:has(#monitor-dialog[open]) { overflow: hidden; }
 .monitor-node[data-kind="device"] .monitor-node-icon::after { content: ""; grid-area: 1 / 1; width: 27px; height: 1.5px; margin-top: 18px; background: currentColor; }
 .monitor-node[data-kind="agent"] .monitor-node-icon { border-radius: 50%; background: var(--accent-light); }
 .monitor-node[data-kind="agent"] .monitor-node-icon::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.monitor-node[data-kind="job"] .monitor-node-icon { border-radius: 7px; background: var(--accent-light); }
+.monitor-node[data-kind="job"] .monitor-node-icon::before { content: ""; width: 9px; height: 12px; border: 1.5px solid currentColor; border-radius: 2px; }
 .monitor-node:hover, .monitor-job:hover { border-color: var(--accent); background-color: var(--accent-light); }
 .monitor-dialog[data-connection="offline"] .monitor-topology { opacity: .68; }
 .monitor-idle { margin: 0; }

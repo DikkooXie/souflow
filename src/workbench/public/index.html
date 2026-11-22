@@ -176,6 +176,21 @@
           <h3 id="monitor-work-title">工单进展</h3>
           <ul id="monitor-work" class="monitor-work"></ul>
         </section>
+        <details id="remote-workers" class="remote-workers" hidden>
+          <summary>接入设备与远端工单</summary>
+          <form id="remote-enrol">
+            <label>设备名称 <input name="name" maxlength="40" required placeholder="第二台 Mac"></label>
+            <button type="submit" class="button button-primary">生成接入文件</button>
+          </form>
+          <div id="remote-enrol-result"></div>
+          <ul id="remote-devices" class="monitor-sessions"></ul>
+          <form id="remote-enqueue">
+            <label>执行设备 <select name="device" id="remote-device" required></select></label>
+            <label>仓库文件 <input name="paths" required placeholder="docs/architecture.md"></label>
+            <button type="submit" class="button button-primary">派发远端核验</button>
+          </form>
+          <p id="remote-feedback" role="status"></p>
+        </details>
       </section>
     </dialog>
     <dialog id="monitor-node-dialog" class="monitor-node-dialog" aria-labelledby="monitor-node-title">

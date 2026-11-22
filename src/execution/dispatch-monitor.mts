@@ -24,6 +24,23 @@ type Session = Target & {
 };
 const recentLimit = 24;
 
+const overviewLimit = 6;
+const priority = { running: 0, queued: 1, blocked: 2, failed: 2, ready: 3, revoked: 3 };
+type OverviewJob = {
+  status: keyof typeof priority;
+  queuedAt?: number | undefined;
+  startedAt?: number | undefined;
+  finishedAt?: number | undefined;
+};
+
+export function dispatchOverview<Local extends OverviewJob, Remote extends OverviewJob>(local: Local[], remote: Remote[]) {
+  const recent = (job: OverviewJob) => job.finishedAt ?? job.startedAt ?? job.queuedAt ?? 0;
+  // 本机按批次创建顺序返回，远端快照已经由新到旧。旧记录缺少时间时保持各自的顺序。
+  return [...local.slice().reverse(), ...remote]
+    .sort((a, b) => priority[a.status] - priority[b.status] || recent(b) - recent(a))
+    .slice(0, overviewLimit);
+}
+
 export function createDispatchMonitor(host: string, now = Date.now) {
   const active = new Map<string, Session>();
   const recent: Session[] = [];

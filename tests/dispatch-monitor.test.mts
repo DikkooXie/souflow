@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createDispatchMonitor } from "../src/execution/dispatch-monitor.mts";
+import { createDispatchMonitor, dispatchOverview } from "../src/execution/dispatch-monitor.mts";
+
+test("概览按状态与时间合并本机和远端工单，保留最新完成的工单", () => {
+  const local = [{ id: "old-local", status: "ready" as const, finishedAt: 1 },
+    { id: "new-local", status: "ready" as const, finishedAt: 9 }];
+  const remote = Array.from({ length: 8 }, (_, index) => ({ id: `remote-${index}`, status: "ready" as const, finishedAt: 10 - index }));
+  const pending = { id: "waiting", status: "running" as const, queuedAt: 0 };
+  assert.deepEqual(dispatchOverview(local, [pending, ...remote]).map(job => job.id),
+    ["waiting", "remote-0", "new-local", "remote-1", "remote-2", "remote-3"]);
+});
 
 test("保存的调度快照不随连接和结束而变化", () => {
   const monitor = createDispatchMonitor("本机");

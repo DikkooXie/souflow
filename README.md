@@ -30,6 +30,7 @@ npm run dev
 | 中断恢复 | 强制重启工作台后找回原批次和待验补丁；单独断开 App Server 后，旧澄清答复被拒，恢复时收到新问题。离线恢复数据库和产物目录后，两份补丁的摘要均与原记录一致。此轮规划响应和拆单固定，两张代码工单由本机真实 Sol 会话执行。[验收记录与三张截图](docs/acceptance/b4-recovery.md) |
 | 操作审计 | 本机 SQLite 记录已提交的需求、决定和已登记的界面操作。演示场景中反复切换视图后，看板给出优化线索，重启后仍能查看历史。[审计看板 · PR #5](https://github.com/DikkooXie/souflow/pull/5) |
 | 同一 Codex 账号的多会话 | 在同一个本机登录下，两张核验工单并行，第三张等到两份报告就绪后才启动。调度面板显示各自的会话和共同的账号标记，重启后仍可核对原工单。[实测与截图](docs/acceptance/session-account.md) |
+| 局域网设备交接 | 两台实体 Mac 连接同一 Wi‑Fi。第二台接单后断线，工作台保留原工单和已回传的进度，重连后核验完成。[接入说明](docs/architecture.md#局域网接入设备) · [双机实测与截图](docs/acceptance/lan-device-handoff.md) |
 
 ![工作台重启后，验收成员查看恢复的批次并完成最终验收](docs/acceptance/b4/05-restored-final-acceptance.png)
 
