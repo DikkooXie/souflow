@@ -76,7 +76,11 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
         }
         draft = { ...p, items, status: "reviewing" };
         if (!save(draft)) throw Error("无法保存待复核工单。");
-        const evidence = await readSources(base, items.flatMap(item => [...item.files, ...(item.sourcePaths ?? [])]), abort.signal);
+        const sourcePaths = items.flatMap(item => [...item.files, ...(item.sourcePaths ?? [])]);
+        const evidence = await readSources(base, sourcePaths, abort.signal);
+        if (sourcePaths.some(path => !Object.hasOwn(evidence, path))) {
+          throw Error("工单校验未通过：部分源码无法装入复核资料，请缩小范围后重新选单。");
+        }
         const publishedPath = snapshot.project?.plan.path;
         if (publishedPath && snapshot.project?.plan.status === "read") evidence[publishedPath] = planText;
         const packet = qualityPacket(snapshot, base, p.id, items.map(item => ({

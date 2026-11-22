@@ -57,7 +57,7 @@ test("授权卡仅由发起者回答，固定计划并阻止双击重复派发",
   async () => readGitHubSelection(JSON.stringify({ issues: [up] }), [item], available, ["AC-1"], readable),
   passingQualityReview, async (_revision, paths) => {
     assert.deepEqual(paths, ["src/main.mts", route]);
-    return { [route]: "export const path = '/api/state';" };
+    return { [route]: "export const path = '/api/state';", "src/main.mts": "export const feature = true;" };
   });
   const initial = service();
   initial.begin(flow, "首版");
@@ -148,7 +148,7 @@ test("有验收编号但验证不对应时，不生成 GitHub 授权卡，也不
     ...qualityReviewOutput(packet),
     verification: { status: "block", summary: "首次确认没有验证重复确认的幂等行为 sk-abcdefghijklmnop",
       evidence: [{ ref: "test:1:AC-1", quote: "首次确认纪要" }] },
-  }), async () => ({}));
+  }), async () => ({ [route]: "只读参考", "src/main.mts": "可编辑源码" }));
   try {
     assert.equal(service.begin(flow, "首版"), true);
     await setImmediate();
@@ -164,6 +164,24 @@ test("有验收编号但验证不对应时，不生成 GitHub 授权卡，也不
     const id = store.keys().next().value;
     assert.ok(id);
     assert.equal(await service.answer(id, "member", { authorization: "授权执行并开草稿 PR" }, [flow]), 409);
+  } finally { await service.close(); }
+});
+
+test("源码引用超出复核预算时保留重试入口，不生成授权卡", async () => {
+  const flow = await readyQualityFlow();
+  flow.project = { repository: { revision: "a".repeat(40), commits: [] }, plan: { status: "read" }, github: { status: "read" } };
+  const issue = makeIssue(1);
+  const service = createConversationDelivery({
+    permits: () => true, suggest: async () => [issue], claimApproved: async () => assert.fail("不能认领"),
+  }, { load: () => [], save: () => true },
+  async () => readGitHubSelection(JSON.stringify({ issues: [up] }), [issue], available, ["AC-1"], readable),
+  async () => assert.fail("必须加载全部源码才进入复核"), async () => ({ "src/main.mts": "编辑源码" }));
+  try {
+    assert.equal(service.begin(flow, "首版"), true);
+    await setImmediate();
+    assert.match(service.statuses([flow], "member")[0]?.error ?? "", /源码无法装入复核资料/);
+    assert.deepEqual(service.cards([flow], "member"), []);
+    assert.equal(service.begin(flow, "首版", true), true);
   } finally { await service.close(); }
 });
 
