@@ -85,6 +85,15 @@ input.on("line", line => {
       send({ id: message.id, result: { thread: { id: threadId }, model: scenario === "question-model-mismatch" ? "fixture" : message.params.model ?? "fixture" } });
       return;
     case "turn/start": {
+      if (scenario === "long-code-result") {
+        const item = { type: "agentMessage", phase: "final_answer", text: JSON.stringify({
+          report: "代码替换", edits: [{ path: "src/demo.mts", before: "original", after: "x".repeat(18_000) }],
+        }) };
+        send({ id: message.id, result: { turn: { id: turnId } } },
+          { method: "item/completed", params: { threadId, turnId, item } },
+          { method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed" } } });
+        return;
+      }
       if (questionMode) {
         const request = structuredClone(scenario === "question-command" ? approval : question);
         if (scenario === "question-foreign-thread") request.params.threadId = "another-thread";

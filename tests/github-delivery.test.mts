@@ -94,7 +94,8 @@ test("交付失败留存可用诊断，仅在原授权内重试一次", async t 
     phase: "waiting", delivery: { ...spec, baseRevision }, approval: { flowId: "flow", planId: "plan", version: 1,
       issueRevision: issueRevision(issue), quality: { policy: 1, flowDigest: hash, batchDigest: hash } } };
 
-  for (const scenario of ["normal", "legacy", "scope", "reassigned", "changed", "linked", "published", "unconfigured"] as const) {
+  for (const scenario of ["normal", "legacy", "scope", "reassigned", "changed", "linked", "published", "unconfigured",
+    "old-format", "old-format-unconfigured", "new-format"] as const) {
     await t.test(scenario, async sub => {
       const directory = await mkdtemp(join(tmpdir(), "souflow-delivery-retry-"));
       sub.after(() => rm(directory, { recursive: true, force: true }));
@@ -102,6 +103,10 @@ test("交付失败留存可用诊断，仅在原授权内重试一次", async t 
       let stored = structuredClone(first);
       if (scenario !== "normal" && scenario !== "scope") stored.phase = "deliveryFailed";
       if (scenario === "published") stored.target = { branch: "feat/7-existing", head: baseRevision };
+      if (scenario.includes("format")) {
+        stored.retryCount = 1;
+        stored.failure = { stage: "patch", reason: "format", ...(scenario === "new-format" ? { patchIssue: { code: "edit-count" } } : {}) };
+      }
       const seed = openActivityStore(path);
       assert.ok(seed.checkpoint<Claim>("github-issues:a/b").save("7", stored));
       seed.close();
@@ -126,10 +131,14 @@ test("交付失败留存可用诊断，仅在原授权内重试一次", async t 
         const dispatch = createIssueDispatch(tracker, checkpoint, async () => assert.fail("不能改走另一类派发"),
           audit.record, 1, new Map([["member", tracker]]), {
             specs: new Map(), conversation: true, requireQuality: true, pollMs: 60_000,
-            ...(scenario !== "unconfigured" ? { recoverFailedIssue: 7 } : {}),
+            ...(!scenario.includes("unconfigured") ? { recoverFailedIssue: 7 } : {}),
             async prepare(input) {
               attempts.push(input.previousFailure);
               assert.deepEqual(input.spec, first.delivery);
+              if (scenario === "old-format") {
+                input.repairing?.({ code: "edit-count", count: 17 });
+                throw new IssueDeliveryFailed({ stage: "patch", reason: "format", patchIssue: { code: "edit-count", count: 17 } });
+              }
               if (scenario !== "legacy") throw new IssueDeliveryFailed({ stage: "patch", reason: scenario === "scope" ? "scope" : "match" });
               return { workspace: "fixture", branch: input.branch, base: baseRevision, head: "c".repeat(40) };
             },
@@ -151,9 +160,19 @@ test("交付失败留存可用诊断，仅在原授权内重试一次", async t 
       await run();
       await run();
       assert.deepEqual(attempts, scenario === "normal" ? [undefined, { stage: "patch", reason: "match" }]
-        : scenario === "legacy" ? [{ stage: "legacy", reason: "unavailable" }] : scenario === "scope" ? [undefined] : []);
+        : scenario === "legacy" ? [{ stage: "legacy", reason: "unavailable" }] : scenario === "scope" ? [undefined]
+        : scenario === "old-format" ? [{ stage: "patch", reason: "format" }] : []);
       assert.equal(published, scenario === "legacy" ? 1 : 0);
       if (scenario === "normal") assert.deepEqual(stored.failure, { stage: "patch", reason: "match" });
+      if (scenario === "old-format") {
+        assert.equal(stored.retryCount, 2);
+        const audit = openActivityStore(path);
+        try {
+          const recent = audit.report(1).recent.map(event => event.details as { action?: string; patchCheck?: unknown } | null);
+          assert.equal(recent.filter(details => details?.action === "patch-recovery-queued").length, 1);
+          assert.deepEqual(recent.find(details => details?.action === "patch-repair")?.patchCheck, { code: "edit-count", count: 17 });
+        } finally { audit.close(); }
+      }
       assert.equal(retries, ["normal", "legacy", "reassigned", "changed", "linked"].includes(scenario) ? 1 : 0);
     });
   }
