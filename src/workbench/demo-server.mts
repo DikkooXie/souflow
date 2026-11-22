@@ -1,6 +1,7 @@
 import { createGitHubSelector } from "../planning/github-selection.mts";
 import { createConversationDelivery, type IssueProposal } from "./conversation-delivery.mts";
 import { readFile } from "node:fs/promises";
+import { X509Certificate } from "node:crypto";
 import { createIssueDeveloper, parseDeliveryPlan } from "../execution/issue-delivery.mts";
 import { createGitHubIssues } from "../connections/github.mts";
 import type { IssueTracker } from "../connections/issue-tracker.mts";
@@ -9,12 +10,15 @@ import { createIssueDispatch, IssueActionError, type Claim, type IssueDeliveryOp
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
 import { hostname } from "node:os";
+import { isIPv4 } from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultAuditThresholds, openActivityStore, readActivity, scrubAuditText } from "../audit/activity-store.mts";
 import { defaultAnswerMaxLength, maxQuestionsPerDecision } from "../decisions/questions.mts";
 import { codeReviewOptions, createLocalDispatch, type Run } from "../execution/local-dispatch.mts";
 import { createDispatchMonitor } from "../execution/dispatch-monitor.mts";
+import { createRemoteHandoff, type RemoteDevice, type RemoteJob } from "../execution/remote-handoff.mts";
+import { createRemoteWorkerIngress, readRemoteFiles, type RemoteLanConfig } from "./remote-worker-ingress.mts";
 import { createCodexAccountDispatch, readCodexProfiles, type CodexAccountDispatch } from "../execution/codex-account-dispatch.mts";
 import { createConversationFlows, currentDevelopmentPlan, maxArtifactTextLength, phases, readPlanRevision, type StoredFlow } from "../planning/conversation-flow.mts";
 import { createProjectContextReader, type ProjectSettings } from "../planning/project-context.mts";
@@ -41,6 +45,8 @@ const files = [
   ["/audit.mjs", "audit.mjs", "text/javascript"],
   ["/dispatch-monitor.mjs", "dispatch-monitor.mjs", "text/javascript"],
   ["/account-assignment.mjs", "account-assignment.mjs", "text/javascript"],
+  ["/remote-workers.mjs", "remote-workers.mjs", "text/javascript"],
+  ["/souflow-worker.mjs", "souflow-worker.mjs", "text/javascript"],
   ["/dispatch-links.mjs", "dispatch-links.mjs", "text/javascript"],
   ["/dispatch-monitor.css", "dispatch-monitor.css", "text/css"],
 ] as const;
@@ -76,12 +82,13 @@ type WorkbenchOptions = {
   memberTrackers?: ReadonlyMap<string, IssueTracker>;
   hostName?: string;
   codexAccounts?: CodexAccountDispatch;
+  remoteLan?: RemoteLanConfig;
 };
 
 export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions, auditPath?: string, {
   limits = defaultLimits, inputLimits = defaultInputLimits, auditThresholds = defaultAuditThresholds,
   dispatchConcurrency = defaultDispatchConcurrency, dispatchAdapters, project, members, issueTracker, verifyIssue, issueDelivery,
-  memberTrackers, hostName = hostname(), codexAccounts,
+  memberTrackers, hostName = hostname(), codexAccounts, remoteLan,
 }: WorkbenchOptions = {}) {
   const memberFor = members && createMembers(members);
   if (memberFor && !live) throw Error("两位成员模式需要 Codex 工作台。");
@@ -106,6 +113,18 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
   const demo = createDecisionDemo(receiptDelay, audit.record, answerMaxLength);
   const monitor = live ? createDispatchMonitor(hostName) : undefined;
   const recovery = !!(live && database);
+  const remoteLink = (() => {
+    if (!remoteLan) return undefined;
+    try {
+      if (!recovery) throw Error("局域网设备接入需要持久化的 Codex 工作台。");
+      const handoff = createRemoteHandoff(audit.checkpoint<RemoteDevice>("remote-devices"),
+        audit.checkpoint<RemoteJob>("remote-jobs"), remoteLan.offlineMs);
+      return { handoff, ingress: createRemoteWorkerIngress(handoff, remoteLan), cert: new X509Certificate(remoteLan.cert).toString() };
+    } catch (error) {
+      closeStore();
+      throw error;
+    }
+  })();
   const { codex, inbox, flows, dispatch, acceptance, github, issuePlanning } = (() => {
     try {
       if (database) bindWorkbench(audit, live ? resolve(live[0]) : "", !!memberFor);
@@ -231,7 +250,9 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
               reviewing: job.artifact ? reviewing.has(job.artifact.id) : false, review: job.artifact?.review,
             }));
           });
-        return send(200, { ...monitor.snapshot(), jobs, waiting: jobs.filter(job => job.status === "queued") });
+        return send(200, { ...monitor.snapshot(), jobs, waiting: jobs.filter(job => job.status === "queued"), ...(remoteLink ? {
+          remote: { ...remoteLink.handoff.snapshot(), endpoint: remoteLink.ingress.endpoint(), canManage: !member || member.id === "implementer" },
+        } : {}) });
       }
       if (path === "/api/audit" || path.startsWith("/api/audit?")) {
         if (request.headers["sec-fetch-site"] === "cross-site") return send(403, { error: "请在本机工作台查看活动记录。" });
@@ -254,6 +275,33 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       // 页面操作仅接受当前本机地址发起的请求。
       if (request.headers.origin !== `http://${address}:${local.port}`) {
         return send(403, { error: "请求来源与工作台地址不一致。" });
+      }
+      const revokeDevice = /^\/api\/remote\/devices\/([a-f0-9-]{36})\/revoke$/.exec(path)?.[1];
+      if (remoteLink && (path === "/api/remote/devices" || path === "/api/remote/jobs" || revokeDevice)) {
+        if (!allowed("implementer", "remote.handoff")) return;
+        const actor = member?.login ?? member?.id ?? "personal";
+        if (revokeDevice) {
+          const status = remoteLink.handoff.revoke(revokeDevice, actor);
+          return send(status, status === 200 ? { revoked: true } : { error: "无法撤销设备接入。" });
+        }
+        const body = await readJson(request);
+        if ("status" in body) return send(body.status, { error: body.error });
+        if (path === "/api/remote/devices") {
+          const endpoint = remoteLink.ingress.endpoint();
+          if (!endpoint) return send(503, { error: "局域网设备接口尚未启动。" });
+          const result = remoteLink.handoff.addDevice((body.value as { name?: unknown } | null)?.name, actor);
+          if (result.status !== 201) return send(result.status, { error: "设备名称无效、已存在或暂时无法保存。" });
+          return send(201, { ...result.bundle, endpoint, certificate: remoteLink.cert });
+        }
+        const selection = body.value as { deviceId?: unknown; paths?: unknown } | null;
+        try {
+          if (!live) return send(503, { error: "局域网设备接口尚未启动。" });
+          const { revision, files } = await readRemoteFiles(live[0], selection?.paths);
+          const result = remoteLink.handoff.enqueue(selection?.deviceId, revision, files, actor);
+          return send(result.status, result.status === 201 ? { id: result.id } : { error: "请检查设备与当前未完成工单。" });
+        } catch {
+          return send(422, { error: "请选择已提交到 docs/ 的普通 Markdown 文件。" });
+        }
       }
       if (github && (path === "/api/github/issues/refresh" || path === "/api/github/issues/claim")) {
         const claim = path.endsWith("/claim");
@@ -434,7 +482,9 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
     }
     send(404, { error: "地址不存在。" });
   });
+  if (remoteLink) server.once("listening", remoteLink.ingress.start);
   server.on("close", () => {
+    remoteLink?.ingress.close();
     const attempts = inbox.close();
     // 结束尝试时仍会产生最终状态，先让编排写完这些事件再关闭存储。
     void Promise.allSettled([attempts, flows.settled(), dispatch?.close(), issuePlanning?.close(), github?.close()]).then(() => {
@@ -505,6 +555,19 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const advanced = process.env.SOULFLOW_CODEX_PLANNING_MODEL?.trim();
   const routine = process.env.SOULFLOW_CODEX_EXECUTION_MODEL?.trim();
   const hostName = process.env.SOULFLOW_HOST_NAME?.trim();
+  const lanHost = process.env.SOULFLOW_LAN_BIND?.trim();
+  const lanCert = process.env.SOULFLOW_LAN_CERT_FILE?.trim();
+  const lanKey = process.env.SOULFLOW_LAN_KEY_FILE?.trim();
+  const remoteLan = lanHost && lanCert && lanKey ? {
+    host: lanHost,
+    port: integerSetting("SOULFLOW_LAN_PORT", 4717, 0, 65_535),
+    offlineMs: integerSetting("SOULFLOW_LAN_OFFLINE_MS", 8000, 1500, 300_000),
+    cert: await readFile(lanCert, "utf8"), key: await readFile(lanKey, "utf8"),
+  } : undefined;
+  if ((lanHost || lanCert || lanKey) && (!remoteLan || !isIPv4(lanHost ?? "")
+    || !/^(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.|127\.0\.0\.1$)/.test(lanHost ?? ""))) {
+    throw Error("设备接入需配置本机私网地址、TLS 证书和私钥路径。");
+  }
   const implementer = process.env.SOULFLOW_MEMBER_IMPLEMENTER_KEY;
   const reviewer = process.env.SOULFLOW_MEMBER_REVIEWER_KEY;
   const extra = process.env.SOULFLOW_MEMBER_IMPLEMENTERS_JSON;
@@ -534,6 +597,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const server = createWorkbenchServer(undefined, live ? [process.cwd()] : undefined, auditPath, {
     limits, inputLimits, auditThresholds, dispatchConcurrency, ...(issueDelivery ? { issueDelivery } : {}),
     ...(codexAccounts ? { codexAccounts } : {}),
+    ...(remoteLan ? { remoteLan } : {}),
     ...(implementer !== undefined || reviewer !== undefined || extra ? { members: { implementer: implementer ?? "", reviewer: reviewer ?? "", additionalImplementers } } : {}),
     ...(claimEnabled && githubRepo ? {
       issueTracker: createGitHubIssues(process.cwd(), githubRepo, githubAccounts.implementer ?? githubAccounts.personal),

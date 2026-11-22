@@ -1,5 +1,6 @@
 import { createDispatchLinks } from "./dispatch-links.mjs";
 import { accountLabel, assignmentDetail } from "./account-assignment.mjs";
+import { createRemoteWorkers, remoteJobStatus, remoteProgress } from "./remote-workers.mjs";
 
 const labels = {
   connecting: "连接中", running: "执行中", waiting: "等人回答", queued: "排队中",
@@ -37,6 +38,7 @@ export function createMonitorView(node, selectFlow, onViewChange) {
   const active = document.querySelector("#monitor-active");
   const recent = document.querySelector("#monitor-recent");
   const links = createDispatchLinks(document.querySelector("#monitor-map"), document.querySelector("#monitor-connections"));
+  const remoteWorkers = createRemoteWorkers(node);
   let timer;
   let generation = 0;
   let rendered;
@@ -97,9 +99,22 @@ export function createMonitorView(node, selectFlow, onViewChange) {
     detail.showModal();
   }
 
+  function remoteRow(job) {
+    const row = node("li", "monitor-session");
+    row.dataset.state = job.status;
+    row.append(node("strong", "", `${job.deviceName} · ${remoteJobStatus(job)}`),
+      node("p", "monitor-meta", `提交 ${job.revision.slice(0, 8)} · ${remoteProgress(job)}`));
+    for (const [index, file] of job.files.entries()) {
+      const receipt = job.receipts[index];
+      const result = receipt ? `${receipt.sha256 === file.sha256 && receipt.bytes === file.bytes ? "摘要一致" : "摘要不一致"} · ${receipt.headings} 个标题` : "待回传";
+      row.append(node("p", "monitor-meta", `${file.path} · ${result}`));
+    }
+    return row;
+  }
+
   function renderDetail() {
     if (!selection || !snapshot) return;
-    const { rows, history, jobs, bySession } = snapshot;
+    const { rows, history, jobs, bySession, remoteJobs } = snapshot;
     const key = selection.id;
     const forHost = item => item.hostId === key;
     const forAgent = item => item.session.id === key;
@@ -112,17 +127,19 @@ export function createMonitorView(node, selectFlow, onViewChange) {
       : selection.kind === "Agent" ? jobs.get(jobKey((filtered[0] ?? finished[0])?.session ?? {})) : undefined;
     const additional = selection.kind === "调度器" ? [...jobs.values()].filter(job => !bySession.has(jobKey(job)))
       : selectedJob && !filtered.length && !finished.length ? [selectedJob] : [];
-    const state = JSON.stringify([selection, filtered, finished, additional, selectedJob,
+    const handoffs = remoteJobs.filter(job => selection.kind === "调度器"
+      || (selection.kind === "设备" && job.deviceId === key) || (selection.kind === "工单" && job.id === key));
+    const state = JSON.stringify([selection, filtered, finished, additional, selectedJob, handoffs,
       [...filtered, ...finished].map(item => jobs.get(jobKey(item.session)))]);
     if (state === renderedDetail) return;
     renderedDetail = state;
     detailTitle.textContent = selection.title;
     detailKind.textContent = selection.kind;
-    detailMeta.textContent = selectedJob?.title ?? (selection.kind === "设备" ? `${filtered.length} 条活动会话` : "");
+    detailMeta.textContent = selectedJob?.title ?? (selection.kind === "设备" && !handoffs.length ? `${filtered.length} 条活动会话` : "");
     detailMeta.hidden = !detailMeta.textContent;
     const primary = [...filtered, ...(selection.kind === "Agent" || selection.kind === "工单" ? finished : [])];
     active.replaceChildren(...primary.map(({ session, host }) => sessionRow(session, host, jobs.get(jobKey(session)))),
-      ...additional.map(job => sessionRow(job, undefined, job)));
+      ...additional.map(job => sessionRow(job, undefined, job)), ...handoffs.map(remoteRow));
     if (!active.children.length) active.append(node("li", "monitor-empty", "目前没有活动会话或待处理工单。"));
     recent.replaceChildren(...finished.map(({ session, host }) => sessionRow(session, host, jobs.get(jobKey(session)))));
     detailHistory.hidden = !finished.length || primary.includes(finished[0]);
@@ -140,18 +157,31 @@ export function createMonitorView(node, selectFlow, onViewChange) {
     text.append(node("strong", "", title), node("span", "monitor-node-subtitle", subtitle));
     if (description) text.append(node("span", "monitor-node-note", description));
     button.append(icon, text);
-    const name = { hub: "调度器", device: "设备", agent: "Agent" }[kind];
+    const name = { hub: "调度器", device: "设备", agent: "Agent", job: "工单" }[kind];
     button.dataset.nodeKey = `${kind}/${id}`;
     button.addEventListener("click", () => openDetail({ kind: name, id, title }));
     return button;
   }
 
   function render(data) {
-    const online = `${data.hosts.length} 台设备在线 · ${data.hosts.reduce((sum, host) => sum + host.active.length, 0)} 个活动 Agent`;
+    remoteWorkers(data.remote);
+    const deviceStates = new Map(data.remote?.devices.map(device => [device.id, device.status]));
+    const remoteJobs = (data.remote?.jobs ?? []).map(job => ({ ...job, deviceStatus: deviceStates.get(job.deviceId) }));
+    const remote = (data.remote?.devices ?? []).map(device => ({
+      id: device.id, name: device.name, kind: "remote", status: device.status,
+      active: remoteJobs.filter(job => job.deviceId === device.id && job.status === "running")
+        .map(job => ({ id: job.id, status: device.status === "online" ? "running" : "interrupted",
+          task: `文件核验 · ${job.receipts.length}/${job.files.length}`, label: remoteJobStatus(job) })),
+      recent: [],
+    }));
+    const hosts = [...data.hosts, ...remote];
+    const onlineHosts = hosts.filter(host => host.kind === "local" || host.status === "online");
+    const agentCount = data.hosts.reduce((sum, host) => sum + host.active.length, 0);
+    const online = `${onlineHosts.length} 台设备在线 · ${agentCount} 个活动 Agent`;
     if (connection.textContent !== online) connection.textContent = online;
     dialog.dataset.connection = "online";
     links.setOnline(true);
-    const key = JSON.stringify([data.hosts, data.jobs]);
+    const key = JSON.stringify([hosts, data.jobs, remoteJobs]);
     if (rendered === key) return;
     rendered = key;
     const entries = field => data.hosts.flatMap(host => host[field].map(session => ({ session, host: host.name, hostId: host.id ?? host.name })));
@@ -160,36 +190,53 @@ export function createMonitorView(node, selectFlow, onViewChange) {
     const jobs = new Map(data.jobs.map(job => [jobKey(job), job]));
     const bySession = new Map([...history.toReversed(), ...rows].filter(item => item.session.ticketId)
       .map(item => [jobKey(item.session), item.session]));
-    snapshot = { rows, history, jobs, bySession };
+    snapshot = { rows, history, jobs, bySession, remoteJobs };
     const selectedKey = topology.contains(document.activeElement) || work.contains(document.activeElement)
       ? document.activeElement.dataset.nodeKey : undefined;
     const hub = topologyNode("hub", "", "souflow", "任务调度", "", "idle");
     const machines = node("div", "monitor-machines");
     const routes = [];
-    for (const host of data.hosts) {
+    for (const host of hosts) {
       const group = node("div", "monitor-machine");
-      const device = topologyNode("device", host.id ?? host.name, host.name, "执行设备", host.kind === "local" ? "本机" : "", "idle");
+      const state = host.kind === "local" ? "本机" : host.status === "online" ? "局域网在线" : host.status === "pending" ? "待接入" : "局域网离线";
+      const device = topologyNode("device", host.id ?? host.name, host.name, "执行设备", state, "idle");
       const agents = node("div", "monitor-agents");
       const running = host.active.some(session => session.status === "running");
       routes.push({ from: hub, to: device, state: running ? "running" : "idle", trunk: true });
       for (const session of host.active) {
-        const title = session.threadId ? `Codex Agent · …${session.threadId.slice(-8)}` : "Codex Agent";
+        const title = host.kind === "remote" ? "远端工单"
+          : session.threadId ? `Codex Agent · …${session.threadId.slice(-8)}` : "Codex Agent";
         const stage = stageFor(jobs.get(jobKey(session)), session);
         const task = [session.ticketId, session.task].filter(Boolean).join(" · ");
-        const agent = topologyNode("agent", session.id, title, task, `${labels[stage]} · ${accountLabel(session)}`, session.status);
+        const agent = topologyNode(host.kind === "remote" ? "job" : "agent", session.id, title, task,
+          host.kind === "remote" ? session.label : `${labels[stage]} · ${accountLabel(session)}`, session.status);
         routes.push({ from: device, to: agent, state: session.status });
         agents.append(agent);
       }
-      if (!host.active.length) agents.append(node("p", "monitor-idle", "暂无活动 Agent"));
+      if (!host.active.length) agents.append(node("p", "monitor-idle", host.kind === "remote" ? "暂无执行中工单" : "暂无活动 Agent"));
       group.append(device, agents);
       machines.append(group);
     }
     topology.replaceChildren(hub, machines);
     links.setRoutes(routes);
-    const priority = { running: 0, queued: 1, blocked: 2, failed: 2, ready: 3 };
-    const items = [...jobs.values()].toReversed().sort((a, b) => priority[a.status] - priority[b.status]).slice(0, overviewJobLimit);
+    const priority = { running: 0, queued: 1, blocked: 2, failed: 2, ready: 3, revoked: 3 };
+    const items = [...jobs.values(), ...remoteJobs].toReversed()
+      .sort((a, b) => priority[a.status] - priority[b.status]).slice(0, overviewJobLimit);
     work.replaceChildren(...items.map(job => {
       const row = node("li");
+      if (job.deviceId) {
+        const title = `文件核验 · ${job.deviceName}`;
+        const button = node("button", "monitor-job");
+        button.type = "button";
+        button.dataset.state = job.status;
+        button.dataset.nodeKey = `job/${job.id}`;
+        button.setAttribute("aria-haspopup", "dialog");
+        button.append(node("strong", "", title), node("span", "monitor-badge", remoteJobStatus(job)),
+          node("span", "monitor-meta", remoteProgress(job)));
+        button.addEventListener("click", () => openDetail({ kind: "工单", id: job.id, title }));
+        row.append(button);
+        return row;
+      }
       const session = bySession.get(jobKey(job));
       const state = stageFor(job, session);
       const button = node("button", "monitor-job");

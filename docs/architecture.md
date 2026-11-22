@@ -160,7 +160,17 @@ souflow 通过 Codex App Server 运行规划，复用本机 Codex 登录。`SOUL
 
 在 `npm run dev:codex` 的工作台顶部打开「调度面板」，可查看调度器、执行设备和活动 Codex Agent 的连接。每条支路显示该 Agent 正在处理的需求步骤或工单。工单进展根据实际派发、等待前置或验收、执行结果和产物状态更新。点击任一节点或工单，右侧打开详情，按节点范围展示会话和时间线。App Server 回执到达后显示实际模型和会话 ID，调度器详情可浏览最近结束的 24 条会话。执行中的路径有流动动效，系统启用减少动态效果、页面在后台或服务连接中断时暂停。
 
-面板从本地调度和 App Server 的状态取数。前置依赖未满足的排队工单在真正启动后才获得会话 ID，Codex 会话结束后可到工单核对产物是否生成和验收。可用 `SOULFLOW_HOST_NAME` 指定显示名，默认使用操作系统主机名。当前显示此服务启动的本机 Codex 会话，跨机器登记、心跳和 Codex Desktop 已有对话需另接。参考机器在线状态和任务时间线的成熟设计。 [GitHub Actions Runner](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/monitor-and-troubleshoot) · [Temporal Web UI](https://docs.temporal.io/web-ui) · [Dagster 运行时间线](https://dagster.io/docs/guides/operate/webserver)
+面板从本地调度、App Server 和已接入设备的状态取数。前置依赖未满足的排队工单在真正启动后才获得会话 ID，Codex 会话结束后可到工单核对产物是否生成和验收。可用 `SOULFLOW_HOST_NAME` 指定显示名，默认使用操作系统主机名。面板中的 Codex 会话由本工作台启动。参考机器在线状态和任务时间线的成熟设计。 [GitHub Actions Runner](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/monitor-and-troubleshoot) · [Temporal Web UI](https://docs.temporal.io/web-ui) · [Dagster 运行时间线](https://dagster.io/docs/guides/operate/webserver)
+
+### 局域网接入设备
+
+1. 主机运行使用持久化数据库的 Codex 工作台。在本机 `.env` 配置 [设备接入项](../.env.example)。`SOULFLOW_LAN_BIND` 填主机在同一 Wi‑Fi 上的私网 IPv4。证书应是可直接信任的 PEM 证书，SAN 包含该 IPv4。将私钥保存在主机，将证书和私钥分别填到对应路径，再启动工作台。
+2. 在主机打开「调度面板 → 接入设备与远端工单」。填设备名称，点击「生成接入文件」，通过 AirDrop 等受信任的渠道把设备程序和接入文件传到新设备。配置包含这台设备的专用凭据。新设备用 Node.js 22.17.1 或更高版本运行页面显示的命令。
+3. 首次心跳将接入文件绑定到当前安装实例，设备从「待接入」变成「在线」。选设备并输入已提交的 `docs/*.md` 路径，发出核验工单。点击设备节点或「工单进展」中的工单查看回传明细。更换设备或重新安装时撤销旧接入并生成新文件。主机地址或证书变化后，按新地址和证书重新接入。
+
+主机浏览器界面继续监听回环地址。独立的 HTTPS 端口只服务已登记设备的轮询和回执，设备按接入文件中的证书校验主机。与让第二台机器远程打开工作台相比，这个入口能核对具体执行设备。与广播发现相比，它需要一次手动发文件，但无需开启自动发现，也无需把工作台登录或 Codex 登录交给设备。
+
+本轮工单固定一个 Git 提交，只发送经审计脱敏的 Markdown 快照。设备计算摘要、字节数和标题数后逐份回传。断线超时后页面显示离线，工作台保留原工单与已收到的结果。设备将核验进度保存在本地，恢复连接后用同一工单 ID 补报。工作台检查摘要并去重，保留领取、进度、完成和重连记录。远端 Codex 改代码和向其他设备转派中断中的工单另行验收。[双机实测与截图](acceptance/lan-device-handoff.md)
 
 ### 调度本地代码工单
 

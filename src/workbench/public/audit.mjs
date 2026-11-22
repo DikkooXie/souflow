@@ -21,6 +21,7 @@ const events = {
   "attempt.started": "启动 Codex 尝试", "attempt.finished": "Codex 尝试结束", "model.started": "Codex 模型配置",
   "dispatch.prepared": "工单已就绪", "dispatch.started": "确认本地派发", "dispatch.reviewed": "验收前置补丁", "dispatch.finished": "本地派发结束",
   "dispatch.account-assigned": "分配 Codex 账号",
+  "remote.device": "局域网设备接入", "remote.job": "远端工单交接",
   "member.denied": "成员越权被拒", "member.revised": "成员修订开发计划", "acceptance.decided": "成员批次验收",
 };
 
