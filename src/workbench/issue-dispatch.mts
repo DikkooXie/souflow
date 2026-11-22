@@ -3,10 +3,11 @@ import { isDeepStrictEqual } from "node:util";
 import type { BusinessEvent, Checkpoint } from "../audit/activity-store.mts";
 import { issueRevision, type DeliveryTracker, type IssueDetail, type IssuePull, type IssueSummary, type IssueTracker } from "../connections/issue-tracker.mts";
 import type { AccountAssignment } from "../execution/codex-account-dispatch.mts";
-import type { DeliverySpec, DeliveryTarget, PrepareIssue } from "../execution/issue-delivery.mts";
+import { IssueDeliverySourcesChanged, type DeliverySpec, type DeliveryTarget, type PrepareIssue } from "../execution/issue-delivery.mts";
 import { IssueVerificationUncertain, type VerifyIssue } from "../execution/issue-verification.mts";
+import { qualityBindingCurrent, type QualityBinding } from "../planning/dispatch-quality.mts";
 
-export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; prepare: PrepareIssue; pollMs: number; conversation?: boolean };
+export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; prepare: PrepareIssue; pollMs: number; conversation?: boolean; requireQuality?: boolean };
 
 function publisher(tracker: IssueTracker) {
   return (tracker as Partial<DeliveryTracker>).delivery;
@@ -17,7 +18,8 @@ export type Claim = Remote & {
   requestId: string; claimedBy: string; account: string; phase: keyof typeof phases;
   sessionId?: string; report?: string;
   accountAssignment?: AccountAssignment;
-  delivery?: DeliverySpec; approval?: { flowId: string; planId: string; version: number; issueRevision: string }; target?: DeliveryTarget; pull?: IssuePull;
+  delivery?: DeliverySpec; approval?: { flowId: string; planId: string; version: number; issueRevision: string; quality?: QualityBinding };
+  target?: DeliveryTarget; pull?: IssuePull;
 };
 const phases = { claiming: "正在认领", waiting: "等待上游 PR 合并", developing: "Codex 正在开发与测试", publishing: "正在推送并创建 PR", submitted: "已提交 PR", deliveryFailed: "开发或测试失败", running: "Codex 正在核验", done: "核验完成", conflict: "认领冲突", uncertain: "待核对", failed: "核验失败" };
 export class IssueActionError extends Error {
@@ -143,9 +145,10 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       save({ ...current(), pull, phase: "submitted" }, "published");
     } catch (error) {
       const last = current();
-      const uncertain = !!last.target || abort.signal.aborted || error instanceof IssueVerificationUncertain;
+      const stale = error instanceof IssueDeliverySourcesChanged;
+      const uncertain = stale || !!last.target || abort.signal.aborted || error instanceof IssueVerificationUncertain;
       const stopped: Claim = { ...last, phase: uncertain ? "uncertain" : "deliveryFailed" };
-      try { save(stopped, uncertain ? "reconcile" : "failed"); }
+      try { save(stopped, stale ? "quality-source-changed" : uncertain ? "reconcile" : "failed"); }
       catch { claims.set(c.number, { ...stopped, phase: "uncertain" }); }
     }
   }
@@ -155,6 +158,10 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       if (jobs.size >= maxActive) break;
       if (c.phase !== "waiting" || !c.delivery) continue;
       if (c.approval && !delivery.conversation) continue;
+      if (delivery.requireQuality && !qualityBindingCurrent(c.approval?.quality)) {
+        save({ ...c, phase: "uncertain" }, "quality-check-required");
+        continue;
+      }
       if (!c.approval && !isDeepStrictEqual(delivery.specs.get(c.number), c.delivery)) {
         save({ ...c, phase: "uncertain" }, "authorization-changed");
         continue;
@@ -218,6 +225,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     },
     async claimApproved(id: string, actor: string, specs: ReadonlyMap<number, DeliverySpec & { issueRevision: string }>, approval: Omit<NonNullable<Claim["approval"]>, "issueRevision">) {
       if (!delivery?.conversation || !permits(actor)) throw new IssueActionError(403, "当前成员未获交付权限。");
+      if (delivery.requireQuality && !qualityBindingCurrent(approval.quality)) throw new IssueActionError(409, "工单缺少当前质量校验。");
       if (pending) throw new IssueActionError(409, "已有成员正在认领，请重试。");
       const task = (async () => {
         const connection = memberTrackers.get(actor) ?? tracker;
@@ -230,9 +238,9 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
         for (const issue of issues) {
           const spec = specs.get(issue.number);
           if (spec) {
-            const { instructions, files, dependsOn, baseRevision } = spec;
+            const { instructions, files, dependsOn, baseRevision, basePlanPath } = spec;
             await acquire(id, actor, connection, account, issue, { instructions, files, dependsOn,
-              ...(baseRevision ? { baseRevision } : {}) }, { ...approval, issueRevision: spec.issueRevision });
+              ...(baseRevision ? { baseRevision } : {}), ...(basePlanPath ? { basePlanPath } : {}) }, { ...approval, issueRevision: spec.issueRevision });
           }
         }
       })().finally(() => { pending = undefined; });
