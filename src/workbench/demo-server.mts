@@ -1,7 +1,9 @@
+import { readFile } from "node:fs/promises";
+import { createIssueDeveloper, parseDeliveryPlan } from "../execution/issue-delivery.mts";
 import { createGitHubIssues } from "../connections/github.mts";
 import type { IssueTracker } from "../connections/issue-tracker.mts";
 import { createIssueVerifier, type VerifyIssue } from "../execution/issue-verification.mts";
-import { createIssueDispatch, IssueActionError, type Claim } from "./issue-dispatch.mts";
+import { createIssueDispatch, IssueActionError, type Claim, type IssueDeliveryOptions } from "./issue-dispatch.mts";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
 import { hostname } from "node:os";
@@ -66,13 +68,14 @@ type WorkbenchOptions = {
   members?: MemberKeys;
   issueTracker?: IssueTracker;
   verifyIssue?: VerifyIssue;
+  issueDelivery?: Omit<IssueDeliveryOptions, "prepare"> & { image: string; model?: string; timeoutMs: number };
   memberTrackers?: ReadonlyMap<string, IssueTracker>;
   hostName?: string;
 };
 
 export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions, auditPath?: string, {
   limits = defaultLimits, inputLimits = defaultInputLimits, auditThresholds = defaultAuditThresholds,
-  dispatchConcurrency = defaultDispatchConcurrency, dispatchAdapters, project, members, issueTracker, verifyIssue, memberTrackers, hostName = hostname(),
+  dispatchConcurrency = defaultDispatchConcurrency, dispatchAdapters, project, members, issueTracker, verifyIssue, issueDelivery, memberTrackers, hostName = hostname(),
 }: WorkbenchOptions = {}) {
   const memberFor = members && createMembers(members);
   if (memberFor && !live) throw Error("两位成员模式需要 Codex 工作台。");
@@ -116,7 +119,10 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       if (issueTracker && (!recovery || !monitor)) throw Error("GitHub 认领需要持久化的 Codex 工作台。");
       const github = issueTracker && monitor ? createIssueDispatch(issueTracker,
         audit.checkpoint<Claim>(`github-issues:${issueTracker.repo.toLowerCase()}`), verifyIssue ?? createIssueVerifier(monitor),
-        audit.record, dispatchConcurrency, memberTrackers) : undefined;
+        audit.record, dispatchConcurrency, memberTrackers, issueDelivery && {
+          specs: issueDelivery.specs, pollMs: issueDelivery.pollMs,
+          prepare: createIssueDeveloper(monitor, { ...issueDelivery, root: `${database}.artifacts/github` }),
+        }) : undefined;
       return { codex, inbox, flows, dispatch, acceptance, github };
     } catch (error) {
       closeStore();
@@ -457,11 +463,21 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   delete process.env.SOULFLOW_MEMBER_IMPLEMENTERS_JSON;
   const claimEnabled = live && process.env.SOULFLOW_GITHUB_CLAIMS === "1";
   if (claimEnabled && !githubRepo) throw Error("开启认领前请配置 SOULFLOW_PROJECT_GITHUB_REPO。");
+  const issuePlan = process.env.SOULFLOW_GITHUB_DELIVERY_PLAN?.trim();
+  const image = process.env.SOULFLOW_GITHUB_CHECK_IMAGE?.trim();
+  if (issuePlan && (!claimEnabled || !image || !Object.keys(githubAccounts).length)) {
+    throw Error("工单交付需要启用认领并绑定 GitHub 账号和已安装的检查镜像。");
+  }
+  const issueDelivery = issuePlan && image ? {
+    specs: parseDeliveryPlan(await readFile(issuePlan, "utf8")), image, ...(routine ? { model: routine } : {}),
+    pollMs: integerSetting("SOULFLOW_GITHUB_POLL_MS", 20_000, 5000, 3_600_000),
+    timeoutMs: integerSetting("SOULFLOW_GITHUB_DELIVERY_TIMEOUT_MS", 300_000, 1000, 3_600_000),
+  } : undefined;
   // 成员凭据只用于工作台登录，子进程沿用清理后的环境。
   delete process.env.SOULFLOW_MEMBER_IMPLEMENTER_KEY;
   delete process.env.SOULFLOW_MEMBER_REVIEWER_KEY;
   const server = createWorkbenchServer(undefined, live ? [process.cwd()] : undefined, auditPath, {
-    limits, inputLimits, auditThresholds, dispatchConcurrency,
+    limits, inputLimits, auditThresholds, dispatchConcurrency, ...(issueDelivery ? { issueDelivery } : {}),
     ...(implementer !== undefined || reviewer !== undefined || extra ? { members: { implementer: implementer ?? "", reviewer: reviewer ?? "", additionalImplementers } } : {}),
     ...(claimEnabled && githubRepo ? {
       issueTracker: createGitHubIssues(process.cwd(), githubRepo, githubAccounts.implementer ?? githubAccounts.personal),

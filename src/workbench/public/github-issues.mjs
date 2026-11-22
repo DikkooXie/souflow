@@ -1,3 +1,7 @@
+const issueStates = { OPEN: "开放", CLOSED: "已关闭" };
+const pullStates = { OPEN: "待合并", CLOSED: "已关闭", MERGED: "已合并" };
+const ciStates = { NONE: "暂无检查", PENDING: "等待检查", EXPECTED: "等待检查", SUCCESS: "通过", FAILURE: "失败", ERROR: "异常" };
+
 export function createGithubPanel(node, reportView) {
   const panel = document.querySelector("#github-dialog");
   const trigger = document.querySelector("#open-github");
@@ -7,6 +11,7 @@ export function createGithubPanel(node, reportView) {
   const error = document.querySelector("#github-error");
   const items = document.querySelector("#github-issues");
   const repo = document.querySelector("#github-repo");
+  const mode = document.querySelector("#github-mode");
   const requestKey = "souflow.github.claimRequestId";
   let requestId = sessionStorage.getItem(requestKey);
   let canClaim = false;
@@ -39,6 +44,8 @@ export function createGithubPanel(node, reportView) {
   function render(snapshot) {
     canClaim = snapshot.canClaim === true;
     repo.textContent = safeText(snapshot.repo);
+    mode.textContent = snapshot.deliveryEnabled ? "领取计划内的 Issue 后，本机 Codex 在独立工作区开发并开草稿 PR。CI 与合并状态自动同步。"
+      : "领取后将在本机启动 Codex 只读核验。GitHub 数据可手动同步。";
     const key = JSON.stringify(snapshot.items);
     if (key === lastRendered) {
       status.textContent = canClaim ? "可领取下一张工单。" : "当前成员没有领取权限。";
@@ -50,8 +57,12 @@ export function createGithubPanel(node, reportView) {
       const row = node("li", "github-issue");
       const title = node("h3");
       title.append(link(issue.url, `#${issue.number} · ${issue.title}`));
-      row.append(title, node("p", "github-meta", `状态：${safeText(issue.state)} · GitHub 负责人：${safeText(issue.assignees.join("、") || "未分配")}`));
-      row.append(node("p", "", `本机 Codex：${safeText(issue.progress)}`));
+      row.append(title, node("p", "github-meta", `状态：${safeText(issueStates[issue.state] ?? issue.state)} · GitHub 负责人：${safeText(issue.assignees.join("、") || "未分配")}`));
+      row.append(node("p", "", `${issue.mode === "delivery" ? "交付进度" : "本机 Codex"}：${safeText(issue.progress)}`));
+      if (issue.dependsOn?.length) row.append(node("p", "github-meta", `上游：${issue.dependsOn.map(number => `#${number}`).join("、")}`));
+      if (/^feat\/\d+-[a-f0-9]{12}$/.test(issue.target?.branch ?? "")) {
+        row.append(node("p", "github-meta", `分支：${issue.target.branch}`));
+      }
       if (issue.claimedBy) row.append(node("p", "github-meta", `本地实施成员：${safeText(issue.claimedBy)}`));
       if (Number.isFinite(issue.syncedAt) && Number.isFinite(new Date(issue.syncedAt).getTime())) {
         row.append(node("p", "github-meta", `GitHub 同步于：${new Date(issue.syncedAt).toLocaleString("zh-CN")}`));
@@ -64,7 +75,9 @@ export function createGithubPanel(node, reportView) {
       if (!issue.pulls.length) pulls.append(document.createTextNode(issue.claimedBy ? "暂无" : "认领后核对"));
       issue.pulls.forEach((pull, index) => {
         if (index) pulls.append(document.createTextNode(" · "));
-        pulls.append(link(pull.url, `#${pull.number}（${pull.state}）`));
+        const state = pull.draft && pull.state === "OPEN" ? "草稿" : pullStates[pull.state] ?? pull.state;
+        pulls.append(link(pull.url, `#${pull.number} · ${state}${pull.ci ? ` · CI ${ciStates[pull.ci] ?? pull.ci}` : ""}`));
+        if (pull.mergeCommit) pulls.append(document.createTextNode(` · 合并 ${safeText(pull.mergeCommit.slice(0, 7))}`));
       });
       row.append(pulls);
       if (issue.report) {

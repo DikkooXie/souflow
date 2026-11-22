@@ -75,6 +75,31 @@ SOULFLOW_TEST_NATIVE_CODEX=1 node --experimental-strip-types --test tests/codex-
 
 GitHub 允许同一张 Issue 有多位负责人。在同一持久化工作台内，先保存认领记录，再指派并回读唯一负责人，最后派发。成员同时领取时返回冲突，原成员用相同请求标识重试可以查看原结果。GitHub 网页或其他独立工作台也能改负责人，因此回读只能证明该时刻的归属。回执丢失、进程重启时遗留的认领和运行记录进入「待核对」，同步可查看远端现状。旧数据库首次启用此功能时使用新的检查点分区，关闭配置即可停止入口并保留记录。[GitHub 指派接口](https://docs.github.com/en/rest/issues/assignees#add-assignees-to-an-issue)
 
+### 从 Issue 开发并创建 PR
+
+配置 `SOULFLOW_GITHUB_DELIVERY_PLAN` 后，工作台只领取本机交付计划授权的 Issue。计划放在被 Git 忽略的目录，键是同一仓库的真实 Issue 编号。示例中的第二张工单依赖第一张工单的关联 PR 合并。
+
+```json
+{
+  "22": {
+    "instructions": "拒绝同一张工单中的重复前置 ID，并补回归用例。",
+    "files": ["src/planning/validate-ticket-plan.mts", "tests/ticket-plan.test.mts"],
+    "dependsOn": []
+  },
+  "23": {
+    "instructions": "在拆单入口补上拒绝重复前置 ID 的回归测试。",
+    "files": ["tests/local-dispatch.test.mts"],
+    "dependsOn": [22]
+  }
+}
+```
+
+将 `SOULFLOW_GITHUB_CHECK_IMAGE` 指向本机已安装且可信的 Node 镜像，使用仓库约定的 Node 版本。核对 GitHub 账号绑定后运行 Codex 工作台。研发成员可领取并观察交付进度。审核过的本机计划指定需求、可编辑的现有 `src/` 与 `tests/` 文件和上游工单。GitHub 正文和评论仅供人工查阅。
+
+工作台从远端默认分支创建独立 Git 工作区，使用本机登录的 Codex 生成精确文本替换。依赖安装使用远端默认分支的锁文件并禁用安装脚本。应用补丁后，工作台用无网络、只读挂载的容器运行 `npm run check`。成功后由工作台创建原子提交，推送新分支并开草稿 PR，使用关闭引用关联原工单。[GitHub PR 接口](https://docs.github.com/en/rest/pulls/pulls#create-a-pull-request)
+
+工作台轮询已关联 PR 的当前提交 CI、合并状态和合并 SHA。所有上游关联 PR 确认合并后，下游开始，并在运行前校验上游合并提交确实进入默认分支。独立维护者按贡献指南评审合并。重启后需要与当前本机授权计划一致。已撤销或发生变化的等待工单进入「待核对」。失败或回执丢失时，使用 SQLite 审计的提交和分支核对 GitHub，独立工作区和补丁留在数据库旁的 artifacts 目录。若仅发生推送、尚无 PR，维护者可根据分支及提交决定如何恢复。关闭交付配置后可继续使用只读认领核验，已保存的交付记录仍可查阅。
+
 ## 首次端到端验收
 
 两张工单并行运行，各在独立工作区提出一个问题。操作者从同一页以相反顺序答复；核对请求只回到正确会话。再覆盖重复点击、无权答复和执行器断线。另一位成员仅凭获准查看的工单历史，应能解释计划来源、谁作了哪项决定、交付了什么、测试结果以及最终接受或退回的原因。模拟适配器和真实供应商分别记录验证结果。
