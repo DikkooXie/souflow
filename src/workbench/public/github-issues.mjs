@@ -43,12 +43,15 @@ export function createGithubPanel(node, reportView) {
 
   function render(snapshot) {
     canClaim = snapshot.canClaim === true;
+    claim.hidden = snapshot.conversationEnabled === true;
+    const claimStatus = snapshot.conversationEnabled ? "从对话提交需求，在待决策授权工单。"
+      : canClaim ? "可领取下一张工单。" : "当前成员没有领取权限。";
     repo.textContent = safeText(snapshot.repo);
     mode.textContent = snapshot.deliveryEnabled ? "领取计划内的 Issue 后，本机 Codex 在独立工作区开发并开草稿 PR。CI 与合并状态自动同步。"
       : "领取后将在本机启动 Codex 只读核验。GitHub 数据可手动同步。";
     const key = JSON.stringify(snapshot.items);
     if (key === lastRendered) {
-      status.textContent = canClaim ? "可领取下一张工单。" : "当前成员没有领取权限。";
+      status.textContent = claimStatus;
       return;
     }
     lastRendered = key;
@@ -90,7 +93,7 @@ export function createGithubPanel(node, reportView) {
     items.replaceChildren(...rows);
     if (focusedLink) [...items.querySelectorAll("a")].find(anchor => anchor.href === focusedLink)?.focus();
     if (!rows.length) items.append(node("li", "github-meta", "暂无工单。"));
-    status.textContent = canClaim ? "可领取下一张工单。" : "当前成员没有领取权限。";
+    status.textContent = claimStatus;
   }
 
   async function load(action) {

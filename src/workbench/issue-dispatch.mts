@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { BusinessEvent, Checkpoint } from "../audit/activity-store.mts";
-import type { DeliveryTracker, IssueDetail, IssuePull, IssueSummary, IssueTracker } from "../connections/issue-tracker.mts";
+import { issueRevision, type DeliveryTracker, type IssueDetail, type IssuePull, type IssueSummary, type IssueTracker } from "../connections/issue-tracker.mts";
 import type { DeliverySpec, DeliveryTarget, PrepareIssue } from "../execution/issue-delivery.mts";
 import { IssueVerificationUncertain, type VerifyIssue } from "../execution/issue-verification.mts";
 
-export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; prepare: PrepareIssue; pollMs: number };
+export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; prepare: PrepareIssue; pollMs: number; conversation?: boolean };
 
 function publisher(tracker: IssueTracker) {
   return (tracker as Partial<DeliveryTracker>).delivery;
@@ -15,7 +15,7 @@ type Remote = IssueSummary & Pick<IssueDetail, "pulls"> & { syncedAt: number };
 export type Claim = Remote & {
   requestId: string; claimedBy: string; account: string; phase: keyof typeof phases;
   sessionId?: string; report?: string;
-  delivery?: DeliverySpec; target?: DeliveryTarget; pull?: IssuePull;
+  delivery?: DeliverySpec; approval?: { flowId: string; planId: string; version: number; issueRevision: string }; target?: DeliveryTarget; pull?: IssuePull;
 };
 const phases = { claiming: "正在认领", waiting: "等待上游 PR 合并", developing: "Codex 正在开发与测试", publishing: "正在推送并创建 PR", submitted: "已提交 PR", deliveryFailed: "开发或测试失败", running: "Codex 正在核验", done: "核验完成", conflict: "认领冲突", uncertain: "待核对", failed: "核验失败" };
 export class IssueActionError extends Error {
@@ -39,8 +39,9 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   const allowedIssues = delivery && new Set(delivery.specs.keys());
   const subject = (number: number) => `${tracker.repo}#${number}`;
   function save(c: Claim, event?: string) {
-    if (!store.save(String(c.number), c, event ? { kind: "github.issue", subject: subject(c.number), details: {
-      action: event, ...(c.target ? { branch: c.target.branch, head: c.target.head } : {}),
+    if (!store.save(String(c.number), c, event ? { kind: "github.issue", subject: subject(c.number),
+      ...(c.approval ? { flowId: c.approval.flowId } : {}), details: {
+      action: event, ...c.approval, ...(c.target ? { branch: c.target.branch, head: c.target.head } : {}),
       ...(c.pull ? { pull: c.pull.number, ci: c.pull.ci, merge: c.pull.mergeCommit, state: c.pull.state } : {}), actor: c.claimedBy, githubAccount: c.account, phase: c.phase, session: c.sessionId,
     } } : undefined)) throw new IssueActionError(503, "无法保存 GitHub 工单状态。");
     claims.set(c.number, c);
@@ -50,16 +51,17 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     else claims.set(c.number, c);
   }
   function snapshot(canClaim: boolean) {
-    return { repo: tracker.repo, canClaim, ...(delivery ? { deliveryEnabled: true } : {}), items: [
-      ...[...claims.values()].reverse().map(({ requestId: _id, account: _account, phase, delivery, pull, ...item }) => ({ ...item,
+    return { repo: tracker.repo, canClaim: canClaim && !delivery?.conversation, ...(delivery ? { deliveryEnabled: true, conversationEnabled: delivery.conversation === true } : {}), items: [
+      ...[...claims.values()].reverse().map(({ requestId: _id, account: _account, phase, delivery, pull, approval, ...item }) => ({ ...item,
         ...(delivery ? { dependsOn: delivery.dependsOn, mode: "delivery" } : {}),
+        ...(approval ? { flowId: approval.flowId } : {}),
         pulls: pull ? [...item.pulls.filter(other => other.number !== pull.number), pull] : item.pulls, progress: phases[phase] })),
       ...candidates.filter(c => !claims.has(c.number)).map(c => ({ ...c, progress: "待认领" })),
     ] };
   }
   async function refresh() {
     const entries = [...claims.values()];
-    const available = await tracker.candidates(new Set(claims.keys()), allowedIssues);
+    const available = delivery?.conversation ? [] : await tracker.candidates(new Set(claims.keys()), allowedIssues);
     for (const prev of entries) {
       const observed = remoteIssue(await tracker.read(prev.number));
       const current = claims.get(prev.number);
@@ -80,19 +82,14 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       catch { claims.set(c.number, { ...stopped, phase: "uncertain" }); }
     }
   }
-  async function acquire(id: string, actor: string) {
-    const connection = memberTrackers.get(actor) ?? tracker;
-    const account = await connection.account();
-    const rows = await connection.candidates(new Set(claims.keys()), allowedIssues);
-    const next = rows.find(row => !claims.has(row.number) && (!delivery || delivery.specs.has(row.number)));
-    if (!next) throw new IssueActionError(409, "当前没有可领取的无人负责 Issue。");
-    const issue = await connection.read(next.number);
+  async function acquire(id: string, actor: string, connection: IssueTracker, account: string,
+    issue: IssueDetail, spec?: DeliverySpec, approval?: Claim["approval"]) {
+    if (claims.has(issue.number)) throw new IssueActionError(409, "Issue 已在工作台处理。");
     if (issue.state !== "OPEN" || issue.assignees.length) throw new IssueActionError(409, "Issue 已关闭或已有人负责，请刷新。");
     abort.signal.throwIfAborted();
-    const spec = delivery?.specs.get(next.number);
     if (spec && !publisher(connection)) throw new IssueActionError(503, "连接不支持工单交付。");
     let c: Claim = { ...remoteIssue(issue), requestId: id, claimedBy: actor, account, phase: "claiming",
-      ...(spec ? { delivery: spec } : {}) };
+      ...(spec ? { delivery: spec } : {}), ...(approval ? { approval } : {}) };
     save(c, "reserved");
     try {
       await connection.assign(c.number, account);
@@ -119,7 +116,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     }
   }
   function stillAssignee(c: Claim, issue: IssueDetail) {
-    return issue.state === "OPEN" && issue.assignees.length === 1
+    return issue.state === "OPEN" && (!c.approval || c.approval.issueRevision === issueRevision(issue)) && issue.assignees.length === 1
       && issue.assignees[0]?.toLowerCase() === c.account.toLowerCase();
   }
   async function develop(c: Claim, spec: DeliverySpec, upstream: string[]) {
@@ -130,7 +127,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       if (!remote || !delivery || !permits(c.claimedBy) || (await connection.account()).toLowerCase() !== c.account.toLowerCase()
         || !stillAssignee(c, await connection.read(c.number))) throw Error("工单负责人已变更。");
       const branch = `feat/${c.number}-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
-      const prepared = await delivery.prepare({ number: c.number, spec, branch, publisher: remote, upstream },
+      const prepared = await delivery.prepare({ number: c.number, spec, branch, publisher: remote, upstream,
+        ...(c.approval ? { flowId: c.approval.flowId, planVersion: c.approval.version } : {}) },
         sessionId => save({ ...current(), sessionId }, "connected"), abort.signal);
       if (!stillAssignee(c, await connection.read(c.number))) throw Error("工单负责人已变更。");
       abort.signal.throwIfAborted();
@@ -151,7 +149,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     for (const c of claims.values()) {
       if (jobs.size >= maxActive) break;
       if (c.phase !== "waiting" || !c.delivery) continue;
-      if (!isDeepStrictEqual(delivery.specs.get(c.number), c.delivery)) {
+      if (c.approval && !delivery.conversation) continue;
+      if (!c.approval && !isDeepStrictEqual(delivery.specs.get(c.number), c.delivery)) {
         save({ ...c, phase: "uncertain" }, "authorization-changed");
         continue;
       }
@@ -206,11 +205,42 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   }
   return {
     snapshot, permits,
+    async suggest() {
+      if (!delivery?.conversation) return [];
+      const rows = await tracker.candidates(new Set(claims.keys()));
+      const issues = await Promise.all(rows.slice(0, 8).map(row => tracker.read(row.number)));
+      return issues.filter(issue => issue.state === "OPEN" && !issue.assignees.length && !issue.pulls.length && !claims.has(issue.number));
+    },
+    async claimApproved(id: string, actor: string, specs: ReadonlyMap<number, DeliverySpec & { issueRevision: string }>, approval: Omit<NonNullable<Claim["approval"]>, "issueRevision">) {
+      if (!delivery?.conversation || !permits(actor)) throw new IssueActionError(403, "当前成员未获交付权限。");
+      if (pending) throw new IssueActionError(409, "已有成员正在认领，请重试。");
+      const task = (async () => {
+        const connection = memberTrackers.get(actor) ?? tracker;
+        const account = await connection.account();
+        const issues = await Promise.all([...specs.keys()].map(number => connection.read(number)));
+        if (issues.some(item => claims.has(item.number) || item.state !== "OPEN" || item.assignees.length || item.pulls.length
+          || issueRevision(item) !== specs.get(item.number)?.issueRevision)) {
+          throw new IssueActionError(409, "工单状态或内容已变化，请重新规划。");
+        }
+        for (const issue of issues) {
+          const spec = specs.get(issue.number);
+          if (spec) {
+            const { instructions, files, dependsOn, baseRevision } = spec;
+            await acquire(id, actor, connection, account, issue, { instructions, files, dependsOn,
+              ...(baseRevision ? { baseRevision } : {}) }, { ...approval, issueRevision: spec.issueRevision });
+          }
+        }
+      })().finally(() => { pending = undefined; });
+      pending = { id, actor, task };
+      await task;
+      dispatchReady();
+    },
     refresh() {
       refreshing ??= (async () => { await refresh(); await syncDelivery(); })().finally(() => { refreshing = undefined; });
       return refreshing;
     },
     async claim(id: string, actor: string) {
+      if (delivery?.conversation) throw new IssueActionError(403, "请从对话的待决策授权本轮工单。");
       if (!permits(actor)) throw new IssueActionError(403, "这位成员还未连接 GitHub 执行账号。");
       function audit(action: string) {
         if (!log({ kind: "github.issue", details: { action, actor, requestId: id } })) throw new IssueActionError(503, "无法记录认领请求。");
@@ -229,7 +259,15 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
         throw new IssueActionError(409, pending ? "已有成员正在认领，请刷新工单。" : "执行中的 GitHub 工单达到并发上限。");
       }
       audit("request");
-      const task = acquire(id, actor).then(dispatchReady).finally(() => { pending = undefined; });
+      const task = (async () => {
+        const connection = memberTrackers.get(actor) ?? tracker;
+        const account = await connection.account();
+        const rows = await connection.candidates(new Set(claims.keys()), allowedIssues);
+        const next = rows.find(row => !claims.has(row.number) && (!delivery || delivery.specs.has(row.number)));
+        if (!next) throw new IssueActionError(409, "当前没有可领取的无人负责 Issue。");
+        await acquire(id, actor, connection, account, await connection.read(next.number), delivery?.specs.get(next.number));
+        dispatchReady();
+      })().finally(() => { pending = undefined; });
       pending = { id, actor, task };
       return task;
     },

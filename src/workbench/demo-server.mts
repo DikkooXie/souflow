@@ -1,3 +1,5 @@
+import { createGitHubSelector } from "../planning/github-selection.mts";
+import { createConversationDelivery, type IssueProposal } from "./conversation-delivery.mts";
 import { readFile } from "node:fs/promises";
 import { createIssueDeveloper, parseDeliveryPlan } from "../execution/issue-delivery.mts";
 import { createGitHubIssues } from "../connections/github.mts";
@@ -68,7 +70,7 @@ type WorkbenchOptions = {
   members?: MemberKeys;
   issueTracker?: IssueTracker;
   verifyIssue?: VerifyIssue;
-  issueDelivery?: Omit<IssueDeliveryOptions, "prepare"> & { image: string; model?: string; timeoutMs: number };
+  issueDelivery?: Omit<IssueDeliveryOptions, "prepare"> & { image: string; model?: string; planningModel?: string; timeoutMs: number };
   memberTrackers?: ReadonlyMap<string, IssueTracker>;
   hostName?: string;
 };
@@ -100,7 +102,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
   const demo = createDecisionDemo(receiptDelay, audit.record, answerMaxLength);
   const monitor = live ? createDispatchMonitor(hostName) : undefined;
   const recovery = !!(live && database);
-  const { codex, inbox, flows, dispatch, acceptance, github } = (() => {
+  const { codex, inbox, flows, dispatch, acceptance, github, issuePlanning } = (() => {
     try {
       if (database) bindWorkbench(audit, live ? resolve(live[0]) : "", !!memberFor);
       const codex = live ? createCodexInbox(live[0], {
@@ -109,8 +111,6 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         ...(recovery ? { store: audit.checkpoint<DecisionCard>("decisions") } : {}),
       }) : undefined;
       const inbox = codex ?? demo;
-      const flows = createConversationFlows(inbox.runPhase, codex ? limits.codex : limits.demo, audit.record, loadProject,
-        recovery ? audit.checkpoint<StoredFlow>("flows") : undefined);
       const dispatch = live ? createLocalDispatch(live[0], dispatchConcurrency, { ...dispatchAdapters, record: audit.record,
         ...(monitor ? { monitor } : {}),
         ...(recovery ? { store: audit.checkpoint<Run>("dispatch"), artifactRoot: `${database}.artifacts` } : {}),
@@ -120,10 +120,22 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       const github = issueTracker && monitor ? createIssueDispatch(issueTracker,
         audit.checkpoint<Claim>(`github-issues:${issueTracker.repo.toLowerCase()}`), verifyIssue ?? createIssueVerifier(monitor),
         audit.record, dispatchConcurrency, memberTrackers, issueDelivery && {
-          specs: issueDelivery.specs, pollMs: issueDelivery.pollMs,
+          specs: issueDelivery.specs, pollMs: issueDelivery.pollMs, ...(issueDelivery.conversation ? { conversation: true } : {}),
           prepare: createIssueDeveloper(monitor, { ...issueDelivery, root: `${database}.artifacts/github` }),
         }) : undefined;
-      return { codex, inbox, flows, dispatch, acceptance, github };
+      const issuePlanning = live && github && issueTracker && issueDelivery?.conversation
+        ? createConversationDelivery(github, audit.checkpoint<IssueProposal>(`github-proposals:${issueTracker.repo.toLowerCase()}`),
+          createGitHubSelector(live[0], { timeoutMs: issueDelivery.timeoutMs,
+            ...(issueDelivery.planningModel ? { model: issueDelivery.planningModel } : {}) })) : undefined;
+      const projectContext = loadProject && issuePlanning && github ? async () => {
+        const [context, issues] = await Promise.all([loadProject(), github.suggest().catch(() => undefined)]);
+        if (issues) context.evidence.issueCandidates = issues.map(({ number, title }) => ({ number, title }));
+        return context;
+      } : loadProject;
+      const flows = createConversationFlows(inbox.runPhase, codex ? limits.codex : limits.demo, audit.record, projectContext,
+        recovery ? audit.checkpoint<StoredFlow>("flows") : undefined, issuePlanning?.begin);
+      flows.reopenReady();
+      return { codex, inbox, flows, dispatch, acceptance, github, issuePlanning };
     } catch (error) {
       closeStore();
       throw error;
@@ -148,8 +160,11 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       timeline: [{ label: "前置补丁已就绪", at: new Date(job.finishedAt ?? 0).toISOString() }],
     })) ?? [];
     const state = inbox.snapshot();
+    const actor = member?.login ?? member?.id ?? "personal";
+    const issueCards = issuePlanning?.cards(conversations, actor) ?? [];
     return {
-      ...state, requests: [...state.requests, ...reviewCards], flows: conversations, phases: phases.map(phase => phase.title), inputLimits,
+      ...state, requests: [...state.requests, ...reviewCards, ...issueCards],
+      ...(issuePlanning ? { issuePlans: issuePlanning.statuses(conversations, actor) } : {}), flows: conversations, phases: phases.map(phase => phase.title), inputLimits,
       member, githubEnabled: !!github,
       acceptanceNoteMaxLength: maxAcceptanceNote,
       planMaxLength: maxArtifactTextLength, dispatches: dispatch?.list().map(run =>
@@ -267,7 +282,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           return send(422, { error: `请填写不超过 ${promptMaxLength} 字的需求。` });
         }
         if (path === "/api/workflows") {
-          const flow = !codex || codex.canBegin() ? flows.begin(prompt.trim()) : undefined;
+          const flow = !codex || codex.canBegin() ? flows.begin(prompt.trim(), issuePlanning ? githubActor : undefined) : undefined;
           if (flow === null) return send(503, { error: "暂时无法保存需求。" });
           return flow ? send(200, { ...state(), flowId: flow.id }) : send(409, {
             ...state(), error: "进行中的需求已达上限，请先处理待决策事项。",
@@ -295,17 +310,28 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           ...state(), error: status === 503 ? "暂时无法保存规划状态。" : "需求当前不可恢复，或进行中的会话已达上限。",
         });
       }
+      const retrySelection = /^\/api\/workflows\/([a-f0-9-]+)\/github-selection\/retry$/.exec(path)?.[1];
+      if (retrySelection && issuePlanning) {
+        if (!allowed("implementer", "github.selection.retry", retrySelection)) return;
+        const flow = flows.list().find(item => item.id === retrySelection && item.requestedBy === githubActor);
+        if (!flow) return send(404, { error: "需求对话不存在。" });
+        return flows.retryIssueSelection(flow) ? send(200, state()) : send(409, { error: "当前选单无法重试。" });
+      }
       const revisionFlow = /^\/api\/workflows\/([a-f0-9-]+)\/plan\/revise$/.exec(path)?.[1];
       if (revisionFlow) {
         if (!allowed("implementer", "plan.revise", revisionFlow)) return;
         const flow = flows.list().find(item => item.id === revisionFlow);
         if (!flow) return send(404, { error: "需求对话不存在。" });
+        if (issuePlanning && flow.requestedBy && flow.requestedBy !== githubActor) {
+          audit.record({ kind: "member.denied", subject: revisionFlow, details: { actor: githubActor, action: "plan.revise" } });
+          return send(403, { error: "请由对话发起者修订 GitHub 交付计划。" });
+        }
         const body = await readJson(request, jsonMetadataBudget + 6 * maxArtifactTextLength);
         if ("status" in body) return send(body.status, { error: body.error });
         const revision = readPlanRevision(body.value);
         if (!revision) return send(422, { error: `请填写有效计划版本和 1 到 ${maxArtifactTextLength} 字的计划内容。` });
         const decision = acceptance?.decision(flow, dispatch?.list() ?? []);
-        const status = dispatch?.isRunning(flow.id) || decision === "submitted" || decision === "accepted"
+        const status = issuePlanning?.locks(flow.id) || dispatch?.isRunning(flow.id) || decision === "submitted" || decision === "accepted"
           ? 409 : flows.revisePlan(flow, revision);
         if (status === 200 && member) audit.record({ kind: "member.revised", flowId: flow.id,
           details: { actor: member.login ?? member.id, plan: currentDevelopmentPlan(flow)?.version } });
@@ -364,6 +390,15 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           if (codex) return send(404, { error: "该操作用于本地演示。" });
           status = demo.disconnect(action[1]);
         } else {
+          if (issuePlanning?.has(action[1])) {
+            if (!allowed("implementer", "github.authorize", action[1])) return;
+            const body = await readJson(request, answerBodyBytes);
+            if ("status" in body) return send(body.status, { error: body.error });
+            const result = await issuePlanning.answer(action[1], githubActor, body.value, flows.list());
+            return send(result, result === 200 ? state() : { ...state(),
+              error: result === 422 ? "请选择有效授权选项。" : result === 503 ? "暂时无法保存授权。"
+                : "授权已失效或工单状态已变化，请核对 GitHub 状态。" });
+          }
           const regular = inbox.snapshot().requests.some(card => card.id === action[1]);
           if (!allowed(regular ? "implementer" : "reviewer", regular ? "decision.answer" : "dispatch.review", action[1])) return;
           const body = await readJson(request, answerBodyBytes);
@@ -395,7 +430,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
   server.on("close", () => {
     const attempts = inbox.close();
     // 结束尝试时仍会产生最终状态，先让编排写完这些事件再关闭存储。
-    void Promise.allSettled([attempts, flows.settled(), dispatch?.close(), github?.close()]).then(() => {
+    void Promise.allSettled([attempts, flows.settled(), dispatch?.close(), issuePlanning?.close(), github?.close()]).then(() => {
       closeStore();
       server.emit("workbenchClosed");
     });
@@ -465,11 +500,16 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (claimEnabled && !githubRepo) throw Error("开启认领前请配置 SOULFLOW_PROJECT_GITHUB_REPO。");
   const issuePlan = process.env.SOULFLOW_GITHUB_DELIVERY_PLAN?.trim();
   const image = process.env.SOULFLOW_GITHUB_CHECK_IMAGE?.trim();
-  if (issuePlan && (!claimEnabled || !image || !Object.keys(githubAccounts).length)) {
+  const conversationDelivery = process.env.SOULFLOW_GITHUB_CONVERSATION_DELIVERY === "1";
+  if (conversationDelivery && issuePlan) throw Error("请选择一种 GitHub 交付授权入口。");
+  if (conversationDelivery && !planPath) throw Error("对话选单需要配置项目开发计划。");
+  if ((issuePlan || conversationDelivery) && (!claimEnabled || !image || !Object.keys(githubAccounts).length)) {
     throw Error("工单交付需要启用认领并绑定 GitHub 账号和已安装的检查镜像。");
   }
-  const issueDelivery = issuePlan && image ? {
-    specs: parseDeliveryPlan(await readFile(issuePlan, "utf8")), image, ...(routine ? { model: routine } : {}),
+  const issueDelivery = (issuePlan || conversationDelivery) && image ? {
+    specs: issuePlan ? parseDeliveryPlan(await readFile(issuePlan, "utf8")) : new Map(),
+    image, ...(routine ? { model: routine } : {}), ...(advanced ? { planningModel: advanced } : {}),
+    conversation: conversationDelivery,
     pollMs: integerSetting("SOULFLOW_GITHUB_POLL_MS", 20_000, 5000, 3_600_000),
     timeoutMs: integerSetting("SOULFLOW_GITHUB_DELIVERY_TIMEOUT_MS", 300_000, 1000, 3_600_000),
   } : undefined;

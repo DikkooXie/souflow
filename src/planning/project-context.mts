@@ -15,6 +15,7 @@ type PullRequest = { number: number; state: "OPEN" | "CLOSED" | "MERGED"; title:
 export type ProjectEvidence = {
   repository?: { revision: string; commits: { revision: string; subject: string }[] };
   plan: { status: "unconfigured" | "unavailable" | "read"; path?: string };
+  issueCandidates?: { number: number; title: string }[];
   github: { status: "unconfigured" | "unavailable" | "read"; repo?: string; pullRequests?: PullRequest[] };
 };
 export type ProjectContext = { evidence: ProjectEvidence; planText?: string };
