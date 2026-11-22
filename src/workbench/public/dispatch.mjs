@@ -1,4 +1,5 @@
 import { accountLabel, assignmentDetail } from "./account-assignment.mjs";
+import { renderQualityDetails } from "./quality-details.mjs";
 
 const states = {
   queued: "排队中", running: "执行中", ready: "产物待验收", failed: "失败", blocked: "前置任务未完成",
@@ -17,6 +18,7 @@ export function createDispatchPanel(node, post, openDecisions) {
   const start = document.querySelector("#start-dispatch");
   const review = document.querySelector("#review-dispatch");
   const status = document.querySelector("#dispatch-status");
+  const quality = document.querySelector("#dispatch-quality");
   const list = document.querySelector("#dispatch-jobs");
   const delivery = document.querySelector("#delivery-review");
   const deliveryStatus = document.querySelector("#delivery-status");
@@ -136,6 +138,7 @@ export function createDispatchPanel(node, post, openDecisions) {
               : run.status === "running" ? "正在按依赖派发本机 Codex 会话…"
             : run.status === "finished" ? (run.kind === "code" ? "代码补丁已生成。" : "核验报告已生成。") : run.error ?? "部分工单未完成。";
     renderDelivery(run, locked, !!past);
+    renderQualityDetails(quality, node, run?.quality);
     const previouslyOpen = new Set([...list.querySelectorAll("details[open]")].map(item => item.dataset.job));
     list.replaceChildren(...(run?.jobs ?? []).map(job => {
       const row = node("li");

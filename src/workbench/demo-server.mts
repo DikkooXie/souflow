@@ -44,6 +44,7 @@ const files = [
   ["/app.mjs", "app.mjs", "text/javascript"],
   ["/archive.mjs", "archive.mjs", "text/javascript"],
   ["/dispatch.mjs", "dispatch.mjs", "text/javascript"],
+  ["/quality-details.mjs", "quality-details.mjs", "text/javascript"],
   ["/audit.mjs", "audit.mjs", "text/javascript"],
   ["/dispatch-monitor.mjs", "dispatch-monitor.mjs", "text/javascript"],
   ["/account-assignment.mjs", "account-assignment.mjs", "text/javascript"],

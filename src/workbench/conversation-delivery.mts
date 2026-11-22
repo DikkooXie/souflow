@@ -115,8 +115,8 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
     statuses(flows: Flow[], actor: string) {
       const latest = new Map([...proposals.values()].filter(p => p.actor === actor && valid(p, flows.find(flow => flow.id === p.flowId)))
         .map(p => [p.flowId, p]));
-      return [...latest.values()].map(({ flowId, status, items, approvedAt, error }) => ({
-        flowId, status, approved: approvedAt !== undefined, issues: items.map(item => item.number), error,
+      return [...latest.values()].map(({ flowId, status, items, approvedAt, error, quality }) => ({
+        flowId, status, approved: approvedAt !== undefined, issues: items.map(item => item.number), error, quality,
       }));
     },
     has(id: string) { return proposals.has(id); },

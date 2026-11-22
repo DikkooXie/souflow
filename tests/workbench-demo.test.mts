@@ -331,14 +331,19 @@ test("revises a plan without reusing the old dispatch confirmation or changing a
   assert.equal((await post(`${base}/prepare`, { kind: "invalid" })).status, 422);
   assert.equal((await post(`${base}/prepare`)).status, 200);
   const report = await waitFor(snapshot => snapshot.dispatches.find(run => run.kind === "report" && run.status === "ready"));
+  assert.equal(report.quality, undefined);
   assert.equal((await post(`${base}/prepare`, { kind: "code" })).status, 200);
   const blocked = await waitFor(snapshot => snapshot.dispatches.find(run => run.kind === "code" && run.status === "failed"));
   assert.match(blocked.error ?? "", /工单超出本次范围/);
+  assert.deepEqual(blocked.quality?.checks.scope.evidence, [{ ref: "request", quote: "更新使用指引" }]);
   assert.equal((await post(`${base}/start`, { id: blocked.id })).status, 409);
   assert.equal(executions, 0);
   rejected = false;
   assert.equal((await post(`${base}/prepare`, { kind: "code" })).status, 200);
   const code = await waitFor(snapshot => snapshot.dispatches.find(run => run.kind === "code" && run.status === "ready"));
+  assert.equal(code.quality?.checks.scope.status, "pass");
+  assert.deepEqual(code.quality?.documents.find(item => item.kind === original.kind),
+    { kind: original.kind, id: original.id, version: original.version });
   assert.equal(executions, 0);
   assert.deepEqual(code.jobs[0]?.editPaths, [file]);
   assert.equal((await post(`${base}/start`, { id: "stale" })).status, 409);
