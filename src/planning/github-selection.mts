@@ -23,7 +23,7 @@ const schema = {
 
 function declaredDependencies(issue: IssueDetail) {
   const root = issue.url.replace(/\d+$/, "");
-  const lines = issue.body.split("\n").filter(line => /^\s*(?:依赖|depends on)\s*[:：]?/i.test(line));
+  const lines = issue.body.split("\n").filter(line => /^\s*(?:[-*+]\s+)?(?:依赖|depends on)\s*[:：]?/i.test(line));
   return lines.flatMap(line => [
     ...[...line.matchAll(/#(\d+)/g)].map(match => Number(match[1])),
     ...line.split(root).slice(1).flatMap(reference => {
