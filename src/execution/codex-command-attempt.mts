@@ -46,6 +46,7 @@ type Options = {
   answerMaxLength?: number;
   disableWebSearch?: boolean;
   untrustedContext?: string;
+  localLoginOnly?: boolean;
 };
 
 // 同次工作台运行内可对照账号，日志和页面只接收短标记。
@@ -109,7 +110,12 @@ function startAttempt(options: Options, mode: "commands" | "questions" | "local-
     "codex", ...(mode !== "commands" ? ["--disable", "apps", "--disable", "plugins", "--disable", "hooks"] : []),
     "app-server", "--listen", "stdio://",
   ];
-  const child = spawn(executable, args, { cwd: workspace, stdio: ["pipe", "pipe", "ignore"] });
+  // GitHub 代码工单使用本机登录，模型进程不继承工作台、GitHub 或 API 的凭据变量。
+  const env = options.localLoginOnly ? Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => ["HOME", "PATH", "CODEX_HOME", "TMPDIR", "LANG", "LC_ALL",
+      "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "USERPROFILE", "SystemRoot"].includes(key)),
+  ) : process.env;
+  const child = spawn(executable, args, { cwd: workspace, env, stdio: ["pipe", "pipe", "ignore"] });
   const input = createInterface({ input: child.stdout });
   let threadId: string | undefined;
   let turnId: string | undefined;
