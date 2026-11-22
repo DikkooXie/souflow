@@ -9,6 +9,12 @@ const required = ["filtered", "ordered"];
 test("accepts an unordered but complete delivery plan", () => {
   assert.deepEqual(validateTicketPlan(required, [order, output]), []);
 });
+test("rejects repeated dependencies within a ticket and allows shared dependencies", () => {
+  const review = { id: "review", dependsOn: ["export"], criteria: ["filtered"] };
+  assert.deepEqual(validateTicketPlan(required, [order, review, output]), []);
+  assert.deepEqual(validateTicketPlan(required, [{ ...order, dependsOn: ["export", "export"] }, review, output]),
+    ["duplicate-dependency:sort:export"]);
+});
 test("detects a real cycle even when all references exist", () => {
   const errors = validateTicketPlan(required, [order, { ...output, dependsOn: ["sort"] }]);
   assert.ok(errors.some(error => error.startsWith("blocked-by-cycle:")));

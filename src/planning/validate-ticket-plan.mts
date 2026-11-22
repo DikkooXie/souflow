@@ -15,8 +15,11 @@ export function validateTicketPlan(required: readonly string[], tickets: readonl
   if (tickets.some(ticket => !ticket.id.trim()) || ids.size !== tickets.length) errors.push("invalid-ticket-ids");
 
   for (const ticket of tickets) {
+    const seenDependencies = new Set<string>();
     for (const dep of ticket.dependsOn) {
       if (!ids.has(dep)) errors.push(`unknown-dependency:${ticket.id}:${dep}`);
+      if (seenDependencies.has(dep)) errors.push(`duplicate-dependency:${ticket.id}:${dep}`);
+      seenDependencies.add(dep);
     }
     if (!ticket.criteria.length) errors.push(`missing-criteria:${ticket.id}`);
     for (const id of ticket.criteria) {
