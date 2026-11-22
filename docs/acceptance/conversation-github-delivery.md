@@ -24,4 +24,29 @@
 
 人工在已授权的测试文件内修正会话连接回调的断言，并补开 [PR #34](https://github.com/DikkooXie/souflow/pull/34)。回归测试验证旧快照保留读取时的连接状态，以及修改读取到的快照不会影响正在运行的会话。PR #34 合入 [`1702dce`](https://github.com/DikkooXie/souflow/commit/1702dce4cf45aa3ce144f180cede98efceb7e5f0)，[主干 CI](https://github.com/DikkooXie/souflow/actions/runs/45007007394) 通过，[Issue #28](https://github.com/DikkooXie/souflow/issues/28) 随合并关闭。
 
-本轮验证了对话选单、授权后的上游自动开 PR 和合并后自动唤醒。下游全自动开发和开 PR 在本轮仍待复验。基于本机交付计划完成下游自动开 PR 的另一轮实测见 [B5 交付验证](b5-delivery.md)。
+本轮验证了对话选单、授权后的上游自动开 PR 和合并后自动唤醒。下游未自动完成的情况保留作历史记录。基于本机交付计划完成下游自动开 PR 的另一轮实测见 [B5 交付验证](b5-delivery.md)。
+
+## 单句续推与自动接力复验
+
+2026-11-22，在 macOS 以主干 `5492dc8` 启动 souflow，启用对话选单，读取仓库首版计划。使用本机已登录的 Codex，Astra 规划，Sol 执行。检查容器使用 `node:22.17.1`。
+
+| 验收项 | 结果 |
+| --- | --- |
+| 单句发起与授权 | 浏览器中只输入「继续推进 souflow 首版开发」。自主选出 [#36 列表依赖识别](https://github.com/DikkooXie/souflow/issues/36)与 [#37 补依赖回归测试](https://github.com/DikkooXie/souflow/issues/37)。两张 Issue 在确认待决策前均无人负责。授权卡列明文件范围和 #37 对 #36 的依赖。 |
+| 上游自动交付 | 本机 Codex 仅修改获准的 `src/planning/github-selection.mts`。容器质量检查通过，工作台自动开 [PR #38](https://github.com/DikkooXie/souflow/pull/38)，[GitHub CI](https://github.com/DikkooXie/souflow/actions/runs/45009292026) 通过。#37 保持等待。 |
+| 合并唤醒 | 上游经评审合入 `492208f`。工作台读到合并回执后，只唤醒 #37 一次。下游工作区父提交为 `492208f`，使用新的本机 Codex 会话。 |
+| 下游自动交付 | 本机 Codex 只在 `tests/conversation-delivery.test.mts` 新增回归测试。容器质量检查通过后，工作台自动开 [PR #39](https://github.com/DikkooXie/souflow/pull/39)，[GitHub CI](https://github.com/DikkooXie/souflow/actions/runs/45009519724) 通过。 |
+| 审计与独立复验 | 同一流程只有一次需求提交和一次交付授权。审计顺序为上游合并回读、下游唤醒、连接、质量检查通过、发布。两张工单分别只创建一个工作区和一个 PR，未触发人工重排队、改代码或补开 PR。把自动生成的回归测试放到旧基线复跑时失败，在合并后的代码上通过。 |
+| 合并与工单关闭 | PR #38 和 #39 均通过各自最新提交的 CI 和 Codex 评审。上游合入 [`492208f`](https://github.com/DikkooXie/souflow/commit/492208f498b54675d82035a4ee5030665d6cea7c)，下游合入 [`0c40828`](https://github.com/DikkooXie/souflow/commit/0c40828518077eb89dcfb264d70013d1a19f9c94)，Issue #36 和 #37 均已关闭。 |
+
+![单句发起首版续推](conversation-delivery-retest/01-request.png)
+
+![待决策卡显示实际选单、文件范围和依赖](conversation-delivery-retest/02-authorization.png)
+
+![上游已自动开草稿 PR 且 CI 通过，下游等待](conversation-delivery-retest/03-upstream-pr-downstream-waits.png)
+
+![上游合并后，下游已自动进入开发和测试](conversation-delivery-retest/04-downstream-auto-wake.png)
+
+![工作台显示上游已合并，下游 PR 的 CI 已通过](conversation-delivery-retest/05-upstream-merged-downstream-pr.png)
+
+本轮覆盖单机、同一个 Codex 登录和一对真实依赖工单。B5 团队验收、跨 Codex 账号调度和双机试点分别记录。
