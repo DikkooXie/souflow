@@ -25,6 +25,14 @@ test("只选择真实候选及冻结路径，保留 Issue 声明的前置", () =
   ]) assert.throws(() => read(bad));
 });
 
+test("保留 Issue 正文中用井号声明的依赖，拒绝遗漏该依赖的选单", () => {
+  const issues = [makeIssue(1), makeIssue(2, "- 依赖 #1")];
+  const read = (value: unknown[]) => readGitHubSelection(JSON.stringify({ issues: value }), issues, available);
+
+  assert.deepEqual(read([up, down])[1]?.dependsOn, [1]);
+  assert.throws(() => read([up, { ...down, dependsOn: [] }]));
+});
+
 test("授权卡仅由发起者回答，固定计划并阻止双击重复派发", async () => {
   const flow: Flow = { id: "f", title: "首版", prompt: "继续推进", requestedBy: "member",
     source: { id: "request", kind: "request", version: 1, upstream: [] }, status: "ready",
