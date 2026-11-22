@@ -24,6 +24,12 @@ test("local dispatch requires criterion coverage, an acyclic graph and approved 
   const allowed = new Set([guide]);
   const read = (tickets: unknown) => readDispatchTickets(JSON.stringify({ tickets }), criteria, allowed);
   assert.deepEqual(read(draft), draft);
+  assert.throws(
+    () => read(draft.map(ticket => ticket.id === "T3"
+      ? { ...ticket, dependsOn: [...ticket.dependsOn, "T1"] }
+      : ticket)),
+    /duplicate-dependency:T3:T1/,
+  );
   assert.throws(() => readDispatchTickets(JSON.stringify({ tickets: draft }), criteria, allowed,
     "report", { routine: "fixture-sol", advanced: "fixture-astra" }), /任务难度或理由/);
   assert.throws(() => read(draft.slice(0, 2)), /uncovered:AC-3/);
