@@ -170,6 +170,7 @@ test("prepares without executing, rejects stale confirmation and reads only the 
     ...ticket, difficulty: ticket.id === "T2" ? "advanced" : "routine", routingReason: `核对 ${ticket.id} 的验收范围`,
   }));
   const monitor = createDispatchMonitor("测试机器");
+  let snapshotsChecked = 0;
   const dispatch = createLocalDispatch(repo, 2, {
     routing, monitor,
     split(options) {
@@ -184,7 +185,21 @@ test("prepares without executing, rejects stale confirmation and reads only the 
       assert.ok(input.evidence.every((entry: { text: string }) => entry.text === "frozen evidence"));
       assert.ok(options.model);
       options.onModel?.(options.model);
-      options.onThread?.(`thread-${actualWorkspaces.length}`);
+      const threadId = `thread-${actualWorkspaces.length}`;
+      // 在真实派发回调前后读取，确保测试观察的是同一个会话。
+      const before = monitor.snapshot().hosts[0]?.active.find(session => session.status === "connecting");
+      assert.ok(before);
+      const readSession = () => monitor.snapshot().hosts[0]?.active.find(session => session.id === before.id);
+      options.onThread?.(threadId);
+      const after = readSession();
+      assert.ok(after);
+      assert.equal(before.status, "connecting");
+      assert.equal(before.threadId, undefined);
+      assert.equal(after.status, "running");
+      assert.equal(after.threadId, threadId);
+      after.status = "connecting";
+      assert.equal(readSession()?.status, "running");
+      snapshotsChecked++;
       const names = [...input.evidence.map((item: { path: string }) => item.path), ...input.previousReports.map((item: { id: string }) => item.id)];
       return { ...terminal(), output: () => JSON.stringify({ report: `核验 ${names.join(" ")}` }) };
     },
@@ -228,6 +243,7 @@ test("prepares without executing, rejects stale confirmation and reads only the 
   const done = await wait();
   assert.equal(done.status, "finished");
   assert.equal(actualWorkspaces.length, 3);
+  assert.equal(snapshotsChecked, actualWorkspaces.length);
   assert.equal(new Set(actualWorkspaces).size, 3);
   assert.equal(new Set(done.jobs.map(job => job.threadId)).size, 3);
   assert.deepEqual(done.jobs.map(job => job.model), ["fixture-sol", "fixture-astra", "fixture-sol"]);
