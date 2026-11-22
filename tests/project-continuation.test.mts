@@ -6,7 +6,28 @@ import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { createConversationFlows, makePhasePrompt, phases } from "../src/planning/conversation-flow.mts";
-import { createProjectContextReader } from "../src/planning/project-context.mts";
+import { createProjectContextReader, snapshotIssueCandidates } from "../src/planning/project-context.mts";
+
+test("续推规划能读取冻结的 Issue 正文与截断信号，正文在传入前脱敏", async () => {
+  const issues = [{ number: 47, title: "设备直连", body: "范围：真实心跳与回执。\n密码: example-password\n" + "续".repeat(3100),
+    state: "OPEN" as const, url: "https://github.com/a/b/issues/47", assignees: [], pulls: [] }];
+  const candidates = snapshotIssueCandidates(issues);
+  const prompts: string[] = [];
+  const service = createConversationFlows(async (flow, phase, targets) => {
+    prompts.push(makePhasePrompt(flow, phase, targets));
+    return phase.fields.map(field => `示例 ${field}`);
+  }, 1, undefined, async () => ({ evidence: {
+    plan: { status: "read" }, github: { status: "read" }, issueCandidates: candidates,
+  } }));
+  service.begin("继续推进 souflow 首版开发");
+  await service.settled();
+  assert.equal(prompts.length, phases.length);
+  for (const prompt of prompts) {
+    assert.match(prompt, /真实心跳与回执/);
+    assert.match(prompt, /"truncated":true/);
+    assert.doesNotMatch(prompt, /example-password/);
+  }
+});
 
 const exec = promisify(execFile);
 

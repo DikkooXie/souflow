@@ -4,6 +4,7 @@ import { setImmediate } from "node:timers/promises";
 import { issueRevision, type DeliveryTracker, type IssueDetail } from "../src/connections/issue-tracker.mts";
 import { currentDevelopmentPlan } from "../src/planning/conversation-flow.mts";
 import { readGitHubSelection } from "../src/planning/github-selection.mts";
+import { snapshotIssueCandidates } from "../src/planning/project-context.mts";
 import { createConversationDelivery, type IssueProposal } from "../src/workbench/conversation-delivery.mts";
 import { type Claim, createIssueDispatch } from "../src/workbench/issue-dispatch.mts";
 import { passingQualityReview, qualityReviewOutput, readyQualityFlow, validation } from "./fixtures/planning-quality.mts";
@@ -156,6 +157,24 @@ test("有验收编号但验证不对应时，不生成 GitHub 授权卡，也不
     const id = store.keys().next().value;
     assert.ok(id);
     assert.equal(await service.answer(id, "member", { authorization: "授权执行并开草稿 PR" }, [flow]), 409);
+  } finally { await service.close(); }
+});
+
+test("Issue 正文在规划后变化时不进入选单或授权", async () => {
+  const flow = await readyQualityFlow();
+  const item = makeIssue(1);
+  flow.project = { repository: { revision: "a".repeat(40), commits: [] }, plan: { status: "read" },
+    github: { status: "read" }, issueCandidates: snapshotIssueCandidates([item]) };
+  const service = createConversationDelivery({
+    permits: () => true, suggest: async () => [{ ...item, body: "规划之后的不同范围。" }],
+    claimApproved: async () => assert.fail("不能认领已经变化的工单"),
+  }, { load: () => [], save: () => true }, async () => assert.fail("不能使用非本轮冻结候选"),
+  passingQualityReview, async () => ({}));
+  try {
+    assert.equal(service.begin(flow, "首版"), true);
+    await setImmediate();
+    assert.match(service.statuses([flow], "member")[0]?.error ?? "", /候选 Issue 已变化/);
+    assert.deepEqual(service.cards([flow], "member"), []);
   } finally { await service.close(); }
 });
 
