@@ -21,6 +21,7 @@
       </div>
       <div class="topbar-actions">
         <span id="member-label" class="member-label" hidden></span>
+        <button type="button" id="open-github" class="audit-nav" data-track="open-github" aria-haspopup="dialog" aria-controls="github-dialog" hidden>GitHub 工单</button>
         <button type="button" id="open-monitor" class="audit-nav" data-track="open-monitor" aria-haspopup="dialog" aria-controls="monitor-dialog" hidden>调度面板</button>
         <button type="button" id="open-decisions" class="inbox-button" data-track="open-decisions" aria-haspopup="dialog" aria-controls="decision-dialog">待决策 <span id="count" aria-live="polite">0</span></button>
         <button type="button" id="open-audit" class="audit-nav" data-track="open-audit" aria-pressed="false">数据看板</button>
@@ -127,6 +128,22 @@
     </main>
     </div>
 
+    <dialog id="github-dialog" class="archive-dialog" aria-labelledby="github-title">
+      <header class="archive-header">
+        <div><h2 id="github-title">GitHub 工单</h2><p id="github-repo"></p></div>
+        <button type="button" id="close-github" class="icon-button" data-track="close-github" aria-label="关闭 GitHub 工单" autofocus>×</button>
+      </header>
+      <section class="github-body" aria-label="GitHub 工单和本机进度">
+        <div class="github-actions">
+          <button type="button" id="claim-github" class="button button-primary" data-track="claim-github" disabled>领取下一张</button>
+          <button type="button" id="refresh-github" class="button" data-track="refresh-github">同步 GitHub</button>
+        </div>
+        <p class="github-meta">领取后将在本机启动 Codex 只读核验并生成报告。进度自动更新，GitHub 数据可手动同步。</p>
+        <p id="github-status" role="status" aria-live="polite"></p>
+        <p id="github-error" class="github-error" role="alert" hidden></p>
+        <ul id="github-issues" class="github-issues"></ul>
+      </section>
+    </dialog>
     <dialog id="archive-dialog" class="archive-dialog" aria-labelledby="archive-title">
       <header class="archive-header">
         <div>

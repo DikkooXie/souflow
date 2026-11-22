@@ -65,7 +65,15 @@ SOULFLOW_TEST_NATIVE_CODEX=1 node --experimental-strip-types --test tests/codex-
 
 「最近记录」默认折叠，每类最多显示 60 条，展开后在区块内滚动。点击与视图切换的排行也在各自区块内滚动。业务记录来自服务端。浏览器操作用于分析界面使用情况。
 
-本地 CLI 默认将演示与 Codex 的记录分别保存在 `.souflow/demo-audit.sqlite` 和 `.souflow/codex-audit.sqlite`。`SOULFLOW_AUDIT_DB` 可以指定其他路径。数据库只在本机使用，工作目录忽略 `.souflow/`。Codex 模式另在同一个数据库保存业务状态，详见[本机任务和决策恢复](#本机任务和决策恢复)。GitHub 同步待独立接入。
+本地 CLI 默认将演示与 Codex 的记录分别保存在 `.souflow/demo-audit.sqlite` 和 `.souflow/codex-audit.sqlite`。`SOULFLOW_AUDIT_DB` 可以指定其他路径。数据库只在本机使用，工作目录忽略 `.souflow/`。Codex 模式另在同一个数据库保存业务状态，详见[本机任务和决策恢复](#本机任务和决策恢复)。
+
+### 在工作台认领 GitHub 工单
+
+在本机用 `gh` 登录有权指派工单的账号，在 `.env` 中设置 `SOULFLOW_GITHUB_CLAIMS=1` 和与 `origin` 相符的 `SOULFLOW_PROJECT_GITHUB_REPO=owner/repository`，再运行 `npm run dev:codex`。个人模式默认使用当前 gh 账号。多人使用时，按[环境示例](../.env.example)配置独立的实施成员凭据，并用 `SOULFLOW_GITHUB_ACCOUNTS` 绑定各自的 GitHub 登录名。映射生效后，只有已绑定的实施成员可以领取。工作台按请求选取本机 gh 凭据，成员之间无需切换全局活动账号。
+
+打开「GitHub 工单」，点击同步可查看待领取列表。点击领取后，souflow 选择最早创建且仍然开放、无人负责、本工作台未处理过的 Issue。连接层负责列举、指派和回读 GitHub，派发模块负责验权、记录认领和启动本机 Codex 核验。验收成员可以查看进度、展开清单、打开关联 PR。同步会从 GitHub 读取负责人，以及该仓库中使用关闭引用关联的 PR。
+
+GitHub 允许同一张 Issue 有多位负责人。在同一持久化工作台内，先保存认领记录，再指派并回读唯一负责人，最后派发。成员同时领取时返回冲突，原成员用相同请求标识重试可以查看原结果。GitHub 网页或其他独立工作台也能改负责人，因此回读只能证明该时刻的归属。回执丢失、进程重启时遗留的认领和运行记录进入「待核对」，同步可查看远端现状。旧数据库首次启用此功能时使用新的检查点分区，关闭配置即可停止入口并保留记录。[GitHub 指派接口](https://docs.github.com/en/rest/issues/assignees#add-assignees-to-an-issue)
 
 ## 首次端到端验收
 

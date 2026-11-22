@@ -1,3 +1,4 @@
+import { matchesGitHubOrigin, validateGitHubRepo } from "../connections/github.mts";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { scrubAuditText } from "../audit/activity-store.mts";
@@ -5,7 +6,7 @@ import { scrubAuditText } from "../audit/activity-store.mts";
 const exec = promisify(execFile);
 const sha = /^[a-f0-9]{40,64}$/;
 const planFile = /^docs\/(?:[a-z\d_-]+\/)*[a-z\d_-]+\.md$/i;
-const repoName = /^[a-z\d][a-z\d-]*\/[a-z\d_.-]+$/i;
+
 const budget = { gitMs: 3000, githubMs: 6000, bytes: 64 * 1024, planChars: 16000 };
 const historyLimit = 8;
 
@@ -34,7 +35,7 @@ function parsePullRequests(text: string, repo: string): PullRequest[] {
 
 export function createProjectContextReader(workspace: string, { planPath, githubRepo }: ProjectSettings) {
   if (planPath && !planFile.test(planPath)) throw Error("SOULFLOW_PROJECT_PLAN 必须是 docs/ 下的相对 Markdown 路径。");
-  if (githubRepo && !repoName.test(githubRepo)) throw Error("SOULFLOW_PROJECT_GITHUB_REPO 必须是 GitHub 的 owner/repository。");
+  if (githubRepo) validateGitHubRepo(githubRepo);
 
   async function git(...args: string[]) {
     return (await exec("git", ["-C", workspace, ...args], { timeout: budget.gitMs, maxBuffer: budget.bytes })).stdout;
@@ -52,10 +53,7 @@ export function createProjectContextReader(workspace: string, { planPath, github
 
   async function readGitHub() {
     if (!githubRepo) return;
-    const remote = (await git("remote", "get-url", "origin")).trim();
-    const originRepo = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/]+\/[^/]+)$/i.exec(remote)?.[1]
-      ?.replace(/\.git$/i, "");
-    if (originRepo?.toLowerCase() !== githubRepo.toLowerCase()) return;
+    if (!await matchesGitHubOrigin(workspace, githubRepo)) return;
     const { stdout } = await exec("gh", ["pr", "list", "--repo", `github.com/${githubRepo}`, "--state", "all",
       "--limit", String(historyLimit), "--json", "number,state,title"], {
       cwd: workspace, timeout: budget.githubMs, maxBuffer: budget.bytes,
