@@ -1,13 +1,19 @@
 # B5 GitHub 工单认领验收
 
-本轮使用 macOS、Node.js 22.17.1、本机 Codex App Server 和公开仓库 `DikkooXie/souflow`。功能提交为 `4959196`。验收对象是[工单 #19](https://github.com/DikkooXie/souflow/issues/19)，交付记录见[PR #20](https://github.com/DikkooXie/souflow/pull/20)。
+2026-11-22 在 macOS、Node.js 22.17.1、本机 Codex App Server 和版本 `d46ad68` 的工作台上，用两个有写权限的 GitHub 账号同时领取真实仓库的 [Issue #19](https://github.com/DikkooXie/souflow/issues/19)。两个实施成员分别登录独立的 Chromium 环境，共用同一持久化工作台。
 
-| 验收项 | 证据与状态 |
+| 操作 | 实测结果 |
 | --- | --- |
-| 读取真实无人负责的 Issue | 两个已连接的 GitHub 账号分别回读同一张开放工单。工作台同步后显示 #19 的负责人为「未分配」。见下图。 |
-| 关联交付 PR | 草稿 PR #20 使用关闭引用关联 #19。通过产品连接层回读到 PR 编号 20、状态 OPEN 和正确链接。认领后的工作台展示待实测。 |
-| 重复派发、并发与恢复 | 本机运行 `SOULFLOW_TEST_NATIVE_CODEX=1 npm run check`，63 项测试通过。使用模拟工单源测试了两个实施成员竞争、同一请求重试、负责人冲突、回执丢失和重启。 |
-| Codex 核验输入与输出 | 本机原生 App Server 接入回环模型，验证工具列表为空、外部正文作为工单资料传入、结构化清单能够回读。 |
-| 两个 GitHub 写账号争抢同一张真实 Issue | 待验收。还需核对唯一负责人、一次本机模型执行、报告、工作台的关联 PR 和重启后的派发次数。 |
+| 同步待领取工单 | #19 开放、无人负责。 |
+| 同时点击「领取下一张」 | 绑定 `huangqj73-test` 的成员收到 HTTP 200，绑定 `2692341798` 的成员收到 HTTP 409。两个账号分别回读 GitHub，均看到唯一负责人 `huangqj73-test`。 |
+| 执行只读核验 | 本机 GPT-6.2 Sol 返回核验清单，工作台显示「核验完成」、会话尾号 `ac2a8b61`、负责人和来自 GitHub 的关联 [PR #20](https://github.com/DikkooXie/souflow/pull/20)。 |
+| 重试并重启工作台 | 获胜成员用原请求重试，重启后再次重试，均返回 200。另一成员以新请求领取时返回 409。原会话与报告恢复一致。审计记录共有两次重放、一次派发、一次连接和一次完成。 |
+| 全量回归 | `SOULFLOW_TEST_NATIVE_CODEX=1 npm run check` 通过，64 项测试通过，0 项跳过。 |
 
-![两个独立登录环境之一在真实工作台看到无人负责的 Issue 19](b5/01-unassigned.png)
+![工单在两个成员领取前处于未分配状态](b5/01-unassigned.png)
+
+![竞争中的另一位实施成员收到已有人正在认领的提示](b5/02-contention.png)
+
+![工作台显示 GitHub 唯一负责人、核验完成、会话及关联 PR](b5/03-completed.png)
+
+本轮覆盖同一工作台内的并发控制。外部人员可以直接在 GitHub 修改负责人，工作台回读发现冲突就停止派发。此次执行产物是核验清单。自动修改 Issue 对应的代码、开关联 PR 和上游合并后唤醒下游，另行验收。
