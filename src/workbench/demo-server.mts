@@ -23,7 +23,7 @@ import { createRemoteHandoff, type RemoteDevice, type RemoteJob } from "../execu
 import { createRemoteWorkerIngress, readRemoteFiles, type RemoteLanConfig } from "./remote-worker-ingress.mts";
 import { createCodexAccountDispatch, readCodexProfiles, type CodexAccountDispatch } from "../execution/codex-account-dispatch.mts";
 import { createConversationFlows, currentDevelopmentPlan, maxArtifactTextLength, phases, readPlanRevision, type StoredFlow } from "../planning/conversation-flow.mts";
-import { createProjectContextReader, type ProjectSettings } from "../planning/project-context.mts";
+import { createProjectContextReader, snapshotIssueCandidates, type ProjectSettings } from "../planning/project-context.mts";
 import { createCodexInbox } from "./codex-inbox.mts";
 import { createDecisionDemo, type DecisionCard } from "./demo-state.mts";
 import { createAcceptance, maxAcceptanceNote, type AcceptanceAction, type StoredAcceptance } from "./acceptance.mts";
@@ -164,7 +164,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           (revision, paths, signal) => qualitySources(live[0], revision, paths, signal)) : undefined;
       const projectContext = loadProject && issuePlanning && github ? async () => {
         const [context, issues] = await Promise.all([loadProject(), github.suggest().catch(() => undefined)]);
-        if (issues) context.evidence.issueCandidates = issues.map(({ number, title }) => ({ number, title }));
+        context.evidence.issueCandidates = snapshotIssueCandidates(issues ?? []);
         return context;
       } : loadProject;
       const flows = createConversationFlows(inbox.runPhase, codex ? limits.codex : limits.demo, audit.record, projectContext,

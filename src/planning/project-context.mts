@@ -2,6 +2,7 @@ import { matchesGitHubOrigin, validateGitHubRepo } from "../connections/github.m
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { scrubAuditText } from "../audit/activity-store.mts";
+import { issueRevision, type IssueDetail } from "../connections/issue-tracker.mts";
 
 const exec = promisify(execFile);
 const sha = /^[a-f0-9]{40,64}$/;
@@ -9,19 +10,28 @@ const planFile = /^docs\/(?:[a-z\d_-]+\/)*[a-z\d_-]+\.md$/i;
 
 const budget = { gitMs: 3000, githubMs: 6000, bytes: 64 * 1024, planChars: 16000 };
 const historyLimit = 8;
+const issueBodyLimit = 3000;
 
 export type ProjectSettings = { planPath?: string; githubRepo?: string };
 type PullRequest = { number: number; state: "OPEN" | "CLOSED" | "MERGED"; title: string; url: string };
 export type ProjectEvidence = {
   repository?: { revision: string; commits: { revision: string; subject: string }[] };
   plan: { status: "unconfigured" | "unavailable" | "read"; path?: string };
-  issueCandidates?: { number: number; title: string }[];
+  issueCandidates?: { number: number; title: string; body?: string; truncated?: boolean; revision?: string }[];
   github: { status: "unconfigured" | "unavailable" | "read"; repo?: string; pullRequests?: PullRequest[] };
 };
 export type ProjectContext = { evidence: ProjectEvidence; planText?: string };
 
 function concise(text: string) {
   return scrubAuditText(text).replace(/[\r\n]+/g, " ").slice(0, 200);
+}
+
+export function snapshotIssueCandidates(issues: readonly IssueDetail[]): NonNullable<ProjectEvidence["issueCandidates"]> {
+  return issues.slice(0, historyLimit).map(issue => {
+    const body = scrubAuditText(issue.body);
+    return { number: issue.number, title: concise(issue.title), body: body.slice(0, issueBodyLimit),
+      truncated: body.length > issueBodyLimit, revision: issueRevision(issue) };
+  });
 }
 
 function parsePullRequests(text: string, repo: string): PullRequest[] {

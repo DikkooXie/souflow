@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Checkpoint } from "../audit/activity-store.mts";
+import { issueRevision } from "../connections/issue-tracker.mts";
 import type { DeliverySpec } from "../execution/issue-delivery.mts";
 import { currentDevelopmentPlan, type Flow } from "../planning/conversation-flow.mts";
 import { planningDigest, qualityBlock, qualityCurrent, qualityPacket, reviewQuality,
@@ -60,7 +61,13 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
       let draft = p;
       try {
         if (!planningDigest(snapshot)) throw Error("工单校验未通过：规划产物或上游版本不完整。");
-        const issues = await github.suggest();
+        const eligible = await github.suggest();
+        const candidates = snapshot.project?.issueCandidates;
+        const frozen = candidates?.every(item => item.revision) ? new Map(candidates.map(item => [item.number, item.revision])) : undefined;
+        const issues = frozen ? eligible.filter(issue => frozen.get(issue.number) === issueRevision(issue)) : eligible;
+        if (frozen && !issues.length && eligible.length) {
+          throw Error("工单校验未通过：候选 Issue 已变化，请按最新资料开启新一轮规划。");
+        }
         const items = issues.length ? await select(snapshot, planText, issues, abort.signal) : [];
         abort.signal.throwIfAborted();
         if (!items.length) {
