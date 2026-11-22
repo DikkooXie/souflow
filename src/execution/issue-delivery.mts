@@ -147,7 +147,7 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
       const checked = await withCodexAccount(codexAccounts, signal, account => {
         assigned?.(account);
         session.assignAccount(account);
-      }, accountOptions => prepareCodeProposal(editable, async diagnostic => {
+      }, accountOptions => prepareCodeProposal(target, editable, async diagnostic => {
         signal.throwIfAborted();
         stage = "codex";
         let overflowBytes: number | undefined;
