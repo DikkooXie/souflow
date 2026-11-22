@@ -7,7 +7,8 @@ import { promisify } from "node:util";
 
 const exec = promisify(execFile);
 const maxEdits = 16;
-const maxSourceBytes = 36_000;
+export const maxSourceBytes = 36_000;
+export const deliveryPath = /^(src|tests)\/(?:[a-z\d_-]+\/)*[a-z\d_.-]+\.(?:mjs|mts|ts|js|css|html)$/i;
 const maxPatchBytes = 160_000;
 
 const digest = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");

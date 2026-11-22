@@ -33,6 +33,8 @@ souflow 首版要让负责人输入「继续推进 souflow 开发」，在一个
 
 本地和 GitHub 的候选工单复用[结构校验](../src/planning/validate-ticket-plan.mts)。服务端核对上游版本、验收覆盖和依赖，每项工单验收都要列出可执行步骤与预期结果。独立的只读 Codex 会话使用本轮产物和固定 Git 提交核对范围、依据和验证。范围明确的小工单集中看验收，新模块与权限、持久化和跨模块接口优先核对易返工的假设及失败路径。服务端核对复核引用确实出现在本轮材料。
 
+GitHub 选单可引用同一提交中直接相关的只读源码，例如承接调用的服务端路由。校验和执行使用该版本的材料，编辑权限仍由授权卡列出的文件决定。上游合并改变引用的源码时，派发暂停并重新核对。
+
 采用 Spec Kit 的只读跨文档核对方式，借鉴 OpenSpec 将结构错误作为阻塞条件。用可重复的规则评估版本和结构，用内容复核判断语义，用人来作实质产品决定。在现有规划和审计中接入这些检查，避免引入第二套文档目录或执行流程。[Spec Kit](https://github.com/github/spec-kit/blob/main/templates/commands/analyze.md) · [OpenSpec](https://github.com/Fission-AI/OpenSpec/blob/main/docs/cli.md#validation-commands) · [Anthropic](https://www.anthropic.com/research/demystifying-evals-for-ai-agents) · [OpenAI](https://developers.openai.com/api/docs/guides/evaluation-best-practices)
 
 | 检查对象 | 派发前应能回答 | 需要拦截的示例 |

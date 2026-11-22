@@ -238,9 +238,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
         for (const issue of issues) {
           const spec = specs.get(issue.number);
           if (spec) {
-            const { instructions, files, dependsOn, baseRevision, basePlanPath } = spec;
-            await acquire(id, actor, connection, account, issue, { instructions, files, dependsOn,
-              ...(baseRevision ? { baseRevision } : {}), ...(basePlanPath ? { basePlanPath } : {}) }, { ...approval, issueRevision: spec.issueRevision });
+            const { issueRevision, ...deliverySpec } = spec;
+            await acquire(id, actor, connection, account, issue, deliverySpec, { ...approval, issueRevision });
           }
         }
       })().finally(() => { pending = undefined; });

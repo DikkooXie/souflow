@@ -3,11 +3,12 @@ import { promisify } from "node:util";
 import { scrubAuditText } from "../audit/activity-store.mts";
 import { qualityReviewSchema, type QualityReviewer } from "../planning/dispatch-quality.mts";
 import { startCodexReadOnlyTask } from "./codex-command-attempt.mts";
-import { deliveryPath } from "./issue-delivery.mts";
+import { deliveryPath } from "./local-code-changes.mts";
 
 const exec = promisify(execFile);
 const sourceLimit = 12;
-const snippetLimit = 3000;
+export const qualitySourceFileBytes = 65_536;
+const sourceBudgetBytes = 128 * 1024;
 const regularPath = /^(?:docs|src|tests)\/[a-zA-Z0-9._/-]+\.(?:md|mts|mjs|html|css)$/;
 
 export async function qualitySources(workspace: string, revision: string, paths: readonly string[], signal: AbortSignal) {
@@ -21,11 +22,21 @@ export async function qualitySources(workspace: string, revision: string, paths:
     // 内容只取指定 Git 对象，跳过符号链接和过大的文件。
     const { stdout } = await git(["ls-tree", "-l", revision, "--", path]);
     const blob = /^100(?:644|755) blob ([a-f0-9]+) +(\d+)\t(.+)$/.exec(stdout.trimEnd());
-    if (!blob?.[1] || blob[3] !== path || Number(blob[2]) > 65_536) return;
+    if (!blob?.[1] || blob[3] !== path || Number(blob[2]) > qualitySourceFileBytes) return;
     const raw = await git(["cat-file", "blob", blob[1]]);
-    return [path, scrubAuditText(raw.stdout).slice(0, snippetLimit)] as const;
+    return [path, scrubAuditText(raw.stdout)] as const;
   }));
-  return Object.fromEntries(inputs.filter(entry => entry !== undefined));
+  let remaining = sourceBudgetBytes;
+  const selected: Record<string, string> = {};
+  for (const entry of inputs) {
+    if (!entry) continue;
+    const [path, source] = entry;
+    const bytes = Buffer.byteLength(source);
+    if (bytes > remaining) continue;
+    selected[path] = source;
+    remaining -= bytes;
+  }
+  return selected;
 }
 
 export function createCodexQualityReviewer(workspace: string, model?: string, timeoutMs = 120_000): QualityReviewer {

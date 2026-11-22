@@ -13,25 +13,29 @@ const makeIssue = (number: number, body = "实施并验证。"): IssueDetail => 
   number, title: `工单 ${number}`, body, url: `https://github.com/a/b/issues/${number}`, assignees: [], pulls: [], state: "OPEN",
 });
 const available = new Set(["src/main.mts", "tests/main.test.mts"]);
+const route = "src/route.mts";
+const readable = new Set([...available, route]);
 const up = { number: 1, reason: "首版校验", instructions: "修复校验。", files: ["src/main.mts"], dependsOn: [],
-  criteria: ["AC-1"], validation };
+  criteria: ["AC-1"], validation, sourcePaths: [route] };
 const down = { ...up, number: 2, files: ["tests/main.test.mts"], dependsOn: [1] };
 
 test("只选择真实候选及冻结路径，保留 Issue 声明的前置", () => {
   const issues = [makeIssue(1), makeIssue(2, "依赖 https://github.com/a/b/issues/1 合并。")];
-  const read = (value: unknown[]) => readGitHubSelection(JSON.stringify({ issues: value }), issues, available, ["AC-1"]);
+  const read = (value: unknown[]) => readGitHubSelection(JSON.stringify({ issues: value }), issues, available, ["AC-1"], readable);
   assert.deepEqual(read([up, down]).map(item => item.dependsOn), [[], [1]]);
+  assert.deepEqual(read([up])[0]?.sourcePaths, [route]);
   for (const bad of [
     [{ ...up, number: 999 }], [{ ...up, files: ["src/not-at-this-version.mts"] }],
     [up, { ...down, files: up.files }], [up, { ...down, dependsOn: [] }],
     [{ ...up, validation: [] }],
+    [{ ...up, files: [route] }], [{ ...up, sourcePaths: ["../.env"] }], [{ ...up, sourcePaths: [route, route] }],
     [{ ...up, dependsOn: [2] }, down],
   ]) assert.throws(() => read(bad));
 });
 
 test("保留 Issue 正文中用井号声明的依赖，拒绝遗漏该依赖的选单", () => {
   const issues = [makeIssue(1), makeIssue(2, "- 依赖 #1")];
-  const read = (value: unknown[]) => readGitHubSelection(JSON.stringify({ issues: value }), issues, available, ["AC-1"]);
+  const read = (value: unknown[]) => readGitHubSelection(JSON.stringify({ issues: value }), issues, available, ["AC-1"], readable);
 
   assert.deepEqual(read([up, down])[1]?.dependsOn, [1]);
   assert.throws(() => read([up, { ...down, dependsOn: [] }]));
@@ -50,8 +54,11 @@ test("授权卡仅由发起者回答，固定计划并阻止双击重复派发",
       if (fail) throw Error("批量认领中断。");
     },
   }, { load: () => [...saved.values()], save(id, p) { saved.set(id, structuredClone(p)); return true; } },
-  async () => readGitHubSelection(JSON.stringify({ issues: [up] }), [item], available, ["AC-1"]),
-  passingQualityReview, async () => ({}));
+  async () => readGitHubSelection(JSON.stringify({ issues: [up] }), [item], available, ["AC-1"], readable),
+  passingQualityReview, async (_revision, paths) => {
+    assert.deepEqual(paths, ["src/main.mts", route]);
+    return { [route]: "export const path = '/api/state';" };
+  });
   const initial = service();
   initial.begin(flow, "首版");
   await setImmediate();
@@ -100,7 +107,7 @@ test("授权卡仅由发起者回答，固定计划并阻止双击重复派发",
   assert.deepEqual(approvals, [{ actor: "member", approval: { flowId: flow.id, planId: plan.id, version: 1,
     quality: { policy, flowDigest, batchDigest } },
     specs: new Map([[1, { instructions: `${up.instructions}\nAC-1：按确认指引操作后检查产物 → 产物符合验收要求`,
-      files: up.files, dependsOn: [], baseRevision: "f".repeat(40), issueRevision: issueRevision(item) }]]) }]);
+      files: up.files, sourcePaths: [route], dependsOn: [], baseRevision: "f".repeat(40), issueRevision: issueRevision(item) }]]) }]);
   assert.ok(resumed.locks(flow.id));
   await resumed.close();
 });
@@ -136,7 +143,7 @@ test("有验收编号但验证不对应时，不生成 GitHub 授权卡，也不
     permits: () => true, suggest: async () => [item],
     claimApproved: async () => assert.fail("未经复核不能认领"),
   }, { load: () => [...store.values()], save(id, value) { store.set(id, structuredClone(value)); return true; } },
-  async () => readGitHubSelection(JSON.stringify({ issues: [{ ...up, validation: checks }] }), [item], available, ["AC-1"]),
+  async () => readGitHubSelection(JSON.stringify({ issues: [{ ...up, validation: checks }] }), [item], available, ["AC-1"], readable),
   async packet => JSON.stringify({
     ...qualityReviewOutput(packet),
     verification: { status: "block", summary: "首次确认没有验证重复确认的幂等行为 sk-abcdefghijklmnop",
