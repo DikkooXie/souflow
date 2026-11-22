@@ -71,6 +71,10 @@ test("原生 Codex 通过本地模型回环暴露的工具和不可信工单上�
   t.after(async () => { provider.closeAllConnections(); await new Promise<void>(resolve => provider.close(() => resolve())); });
   const address = provider.address();
   assert.ok(address && typeof address === "object");
+  const longIssue = { ...issue, body: [
+    "开头的传输哨兵", "含 emoji 📄 和多字节中文的验收资料。".repeat(300),
+    "中间的验收编号 AC-23", "每项验收要核对现场截图和回执。".repeat(300), "末尾的传输哨兵",
+  ].join("\n") };
   const verify = createIssueVerifier(createDispatchMonitor("fixture"), { startAttempt(options) {
     return startCodexReadOnlyTask({ ...options, model: "gpt-6.1-sol", command: ["codex",
       "-c", 'model="gpt-6.1-sol"', "-c", 'model_provider="souflow_fixture"',
@@ -90,4 +94,10 @@ test("原生 Codex 通过本地模型回环暴露的工具和不可信工单上�
   assert.ok(Array.isArray(received.input));
   assert.ok(received.input.some((item: { type?: string; name?: string; output?: string }) =>
     item.type === "function_call_output" && item.name === "github_issue" && item.output?.includes("核验工单的验收步骤")));
+  assert.equal(await verify(longIssue, () => {}, new AbortController().signal), "模拟核验完成");
+  const parts = received.input.filter((item: { type?: string; name?: string; output?: string }) =>
+    item.type === "function_call_output" && item.name?.startsWith("github_issue_"));
+  assert.ok(parts.length > 1);
+  assert.deepEqual(parts.map(part => part.name), [...parts].map(part => part.name).sort());
+  assert.equal(parts.map(part => part.output).join(""), JSON.stringify({ title: longIssue.title, description: longIssue.body }));
 });
