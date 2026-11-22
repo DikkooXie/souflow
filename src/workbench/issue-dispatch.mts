@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { BusinessEvent, Checkpoint } from "../audit/activity-store.mts";
 import { issueRevision, type DeliveryTracker, type IssueDetail, type IssuePull, type IssueSummary, type IssueTracker } from "../connections/issue-tracker.mts";
+import type { AccountAssignment } from "../execution/codex-account-dispatch.mts";
 import type { DeliverySpec, DeliveryTarget, PrepareIssue } from "../execution/issue-delivery.mts";
 import { IssueVerificationUncertain, type VerifyIssue } from "../execution/issue-verification.mts";
 
@@ -15,6 +16,7 @@ type Remote = IssueSummary & Pick<IssueDetail, "pulls"> & { syncedAt: number };
 export type Claim = Remote & {
   requestId: string; claimedBy: string; account: string; phase: keyof typeof phases;
   sessionId?: string; report?: string;
+  accountAssignment?: AccountAssignment;
   delivery?: DeliverySpec; approval?: { flowId: string; planId: string; version: number; issueRevision: string }; target?: DeliveryTarget; pull?: IssuePull;
 };
 const phases = { claiming: "正在认领", waiting: "等待上游 PR 合并", developing: "Codex 正在开发与测试", publishing: "正在推送并创建 PR", submitted: "已提交 PR", deliveryFailed: "开发或测试失败", running: "Codex 正在核验", done: "核验完成", conflict: "认领冲突", uncertain: "待核对", failed: "核验失败" };
@@ -42,6 +44,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     if (!store.save(String(c.number), c, event ? { kind: "github.issue", subject: subject(c.number),
       ...(c.approval ? { flowId: c.approval.flowId } : {}), details: {
       action: event, ...c.approval, ...(c.target ? { branch: c.target.branch, head: c.target.head } : {}),
+      ...(event === "account-assigned" ? { codexAccount: c.accountAssignment } : {}),
       ...(c.pull ? { pull: c.pull.number, ci: c.pull.ci, merge: c.pull.mergeCommit, state: c.pull.state } : {}), actor: c.claimedBy, githubAccount: c.account, phase: c.phase, session: c.sessionId,
     } } : undefined)) throw new IssueActionError(503, "无法保存 GitHub 工单状态。");
     claims.set(c.number, c);
@@ -73,7 +76,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     const current = () => claims.get(c.number) ?? c;
     let report: string | undefined;
     try {
-      report = await verify(item, id => save({ ...current(), sessionId: id }, "connected"), abort.signal);
+      report = await verify(item, id => save({ ...current(), sessionId: id }, "connected"), abort.signal,
+        accountAssignment => save({ ...current(), accountAssignment }, "account-assigned"));
       save({ ...current(), phase: "done", report }, "completed");
     } catch (error) {
       const uncertain = abort.signal.aborted || error instanceof IssueVerificationUncertain || report !== undefined;
@@ -129,7 +133,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       const branch = `feat/${c.number}-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
       const prepared = await delivery.prepare({ number: c.number, spec, branch, publisher: remote, upstream,
         ...(c.approval ? { flowId: c.approval.flowId, planVersion: c.approval.version } : {}) },
-        sessionId => save({ ...current(), sessionId }, "connected"), abort.signal);
+        sessionId => save({ ...current(), sessionId }, "connected"), abort.signal,
+        accountAssignment => save({ ...current(), accountAssignment }, "account-assigned"));
       if (!stillAssignee(c, await connection.read(c.number))) throw Error("工单负责人已变更。");
       abort.signal.throwIfAborted();
       const target = { branch, head: prepared.head };

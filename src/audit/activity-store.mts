@@ -15,7 +15,7 @@ const controls = [
 export type BusinessEvent = {
   kind: "request.submitted" | "phase.started" | "phase.completed" | "flow.finished" | "decision.opened"
     | "decision.answered" | "decision.updated" | "demo.reset" | "attempt.started" | "attempt.finished" | "model.started"
-    | "dispatch.prepared" | "dispatch.started" | "dispatch.reviewed" | "dispatch.finished" | "plan.revised"
+    | "dispatch.prepared" | "dispatch.started" | "dispatch.reviewed" | "dispatch.finished" | "dispatch.account-assigned" | "plan.revised"
     | "github.issue" | "github.selection" | "member.denied" | "member.revised" | "acceptance.decided" | "flow.resumed";
   flowId?: string | undefined;
   attemptId?: string | undefined;

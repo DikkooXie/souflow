@@ -63,8 +63,9 @@ test("开 PR 回执丢失后只做回读，指定 PR 关闭重开并合并后才
   const store = { load: () => [...records.values()], save(id: string, row: Claim) { records.set(id, structuredClone(row)); return true; } };
   const open = (activeSpecs = specs) => createIssueDispatch(tracker, store, async () => assert.fail("交付计划不能进入核验分支。"), () => true, 2,
     new Map([["member", tracker]]), {
-      specs: activeSpecs, pollMs: 60_000, async prepare({ number, branch, upstream }, connected) {
+      specs: activeSpecs, pollMs: 60_000, async prepare({ number, branch, upstream }, connected, _signal, assigned) {
         steps.push({ number, upstream });
+        assigned?.({ label: number === 1 ? "primary" : "secondary", active: 0, capacity: 1, reason: "测试账号" });
         connected(`session-${number}`);
         return { workspace: "fixture", branch, base: "main", head: "a".repeat(40) };
       },
@@ -75,6 +76,7 @@ test("开 PR 回执丢失后只做回读，指定 PR 关闭重开并合并后才
     await first.claim("b", "member");
     await setImmediate();
     assert.equal(records.get("1")?.phase, "uncertain");
+    assert.equal(records.get("1")?.accountAssignment?.label, "primary");
     assert.equal(records.get("2")?.phase, "waiting");
     await assert.rejects(first.claim("c", "member"), /没有可领取/);
   } finally { await first.close(); }
@@ -116,6 +118,13 @@ test("开 PR 回执丢失后只做回读，指定 PR 关闭重开并合并后才
     await setImmediate();
     await first.refresh();
     assert.equal(records.get("2")?.phase, "submitted");
+    const items = new Map(first.snapshot(false).items.map(item => [item.number, item]));
+    const firstItem = items.get(1);
+    const nextItem = items.get(2);
+    assert.ok(firstItem && "accountAssignment" in firstItem && firstItem.accountAssignment);
+    assert.ok(nextItem && "accountAssignment" in nextItem && nextItem.accountAssignment);
+    assert.partialDeepStrictEqual(firstItem.accountAssignment, { label: "primary" });
+    assert.partialDeepStrictEqual(nextItem.accountAssignment, { label: "secondary" });
     assert.deepEqual(steps, [{ number: 1, upstream: [] }, { number: 2, upstream: [mergeCommit] }]);
     assert.equal(pushes, 2);
   } finally { await first.close(); }
