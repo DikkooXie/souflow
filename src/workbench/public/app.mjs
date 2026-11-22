@@ -47,6 +47,7 @@ const drafts = new Map();
 let requests = [];
 let flows = [];
 let dispatches = [];
+let issuePlans = [];
 let answerMaxLength;
 let planMaxLength;
 let selectedFlow;
@@ -226,7 +227,7 @@ function render() {
   renderRecent();
   const flow = flows.find(entry => entry.id === selectedFlow);
   renderConversation(flow, pending);
-  const canEdit = member?.id !== "reviewer" && !dispatches.some(run => run.flowId === flow?.id
+  const canEdit = member?.id !== "reviewer" && !issuePlans.some(plan => plan.flowId === flow?.id && plan.approved) && !dispatches.some(run => run.flowId === flow?.id
     && ["submitted", "accepted"].includes(run.acceptance?.at(-1)?.decision));
   archive.update(flow, planMaxLength, canEdit);
   dispatch.update(flow, dispatches, live, pending.some(item => item.kind === "code-review" && item.flowId === flow?.id),
@@ -249,12 +250,23 @@ function renderConversation(flow, pending) {
   conversation.hidden = !flow;
   promptBox.placeholder = flow ? "发起另一项需求…" : "描述你的需求…";
   if (!flow) return;
-  resumeWorkflow.hidden = !live || member?.id === "reviewer" || flow.status !== "interrupted";
+  const proposal = issuePlans.find(item => item.flowId === flow.id);
+  const retrySelection = proposal?.status === "uncertain" && !proposal.approved;
+  resumeWorkflow.hidden = !live || member?.id === "reviewer" || (flow.status !== "interrupted" && !retrySelection);
+  resumeWorkflow.textContent = retrySelection ? "重试 GitHub 选单" : "继续规划";
   resumeWorkflow.dataset.subject = flow.id;
   renderInterruptedDecisions(flow);
   if (conversationMessage.textContent !== flow.prompt) conversationMessage.textContent = flow.prompt;
   const waiting = pending.some(request => request.flowId === flow.id);
-  const note = flow.status === "ready" ? "项目文档已就绪。"
+  const deliveryStatus = { selecting: "正在从 GitHub 选择适合本轮计划的工单…",
+    pending: "已选好 GitHub 工单。请在「待决策」确认授权范围。",
+    authorizing: "授权已记录，正在认领 GitHub 工单…",
+    submitted: "已派发到 GitHub 工单，可查看会话、依赖和 PR 进度。",
+    declined: "本轮 GitHub 工单未授权执行。",
+    empty: "这轮计划暂无符合条件的未认领 GitHub 工单。",
+    uncertain: "GitHub 工单状态待核对。请查看工单列表。",
+  };
+  const note = flow.status === "ready" ? deliveryStatus[proposal?.status] ?? "项目文档已就绪。"
     : flow.status === "interrupted" ? "规划已中断，已完成的项目文档已保留。"
       : flow.status === "failed" ? "这项需求暂未完成。"
         : waiting ? "有一个问题需要你决定。" : "正在推进你的需求…";
@@ -320,7 +332,7 @@ function renderDetail(current) {
   const draft = drafts.get(current.id) ?? new Map();
   drafts.set(current.id, draft);
   const readers = current.questions.map(question => addQuestion(questions, question, draft));
-  const send = actionButton(current.kind === "code-review" ? "提交验收" : "发送回答", "button-primary");
+  const send = actionButton(current.kind === "code-review" ? "提交验收" : current.kind === "github-authorization" ? "确认交付决定" : "发送回答", "button-primary");
   send.dataset.track = "send-answer";
   send.dataset.subject = current.id;
   actions.append(send);
@@ -407,6 +419,7 @@ function addQuestion(container, question, draft) {
 function later() {
   clearTimeout(poll);
   if (active > 0 || flows.some(flow => flow.status === "running") || requests.some(request => request.status === "submitted")
+    || issuePlans.some(item => ["selecting", "authorizing"].includes(item.status))
     || dispatches.some(run => ["preparing", "running", "waiting"].includes(run.status))) {
     poll = setTimeout(() => void refresh(), 400);
   } else if (member) {
@@ -422,6 +435,7 @@ function applySnapshot(snapshot) {
     requests = snapshot.requests;
     flows = snapshot.flows ?? [];
     dispatches = snapshot.dispatches ?? [];
+    issuePlans = snapshot.issuePlans ?? [];
     if (snapshot.flowId) selectedFlow = snapshot.flowId;
     if (selectedFlow && !flows.some(flow => flow.id === selectedFlow)) selectedFlow = undefined;
     live = snapshot.mode === "codex";
@@ -524,7 +538,9 @@ dialog.addEventListener("close", () => {
   if (auditOpen) void audit.refresh();
 });
 resumeWorkflow.addEventListener("click", () => {
-  if (selectedFlow) void post(`/api/workflows/${selectedFlow}/resume`);
+  const proposal = issuePlans.find(item => item.flowId === selectedFlow);
+  const action = proposal?.status === "uncertain" && !proposal.approved ? "github-selection/retry" : "resume";
+  if (selectedFlow) void post(`/api/workflows/${selectedFlow}/${action}`);
 });
 openArchive.addEventListener("click", () => archive.show(flows.find(entry => entry.id === selectedFlow)));
 promptBox.addEventListener("keydown", event => {

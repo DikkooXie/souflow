@@ -11,11 +11,12 @@ import { IssueVerificationUncertain } from "./issue-verification.mts";
 import { applyLocalCodeChanges, codeResultSchema, readEditableFile } from "./local-code-changes.mts";
 
 const exec = promisify(execFile);
-export type DeliverySpec = { instructions: string; files: string[]; dependsOn: number[] };
+export type DeliverySpec = { instructions: string; files: string[]; dependsOn: number[]; baseRevision?: string };
+export const deliveryPath = /^(src|tests)\/(?:[a-z\d_-]+\/)*[a-z\d_.-]+\.(?:mjs|mts|ts|js|css|html)$/i;
 export type DeliveryTarget = { branch: string; head: string };
 export type PreparedDelivery = DeliveryTarget & { workspace: string; base: string };
 export type PrepareIssue = (input: {
-  number: number; spec: DeliverySpec; branch: string; upstream: string[]; publisher: IssuePublisher;
+  number: number; flowId?: string; planVersion?: number; spec: DeliverySpec; branch: string; upstream: string[]; publisher: IssuePublisher;
 }, connected: (id: string) => void, signal: AbortSignal) => Promise<PreparedDelivery>;
 
 export function parseDeliveryPlan(raw: string): ReadonlyMap<number, DeliverySpec> {
@@ -29,7 +30,7 @@ export function parseDeliveryPlan(raw: string): ReadonlyMap<number, DeliverySpec
       || !spec.instructions.trim() || spec.instructions.length > 8000 || !Array.isArray(spec.files) || spec.files.length < 1
       || spec.files.length > 16 || new Set(spec.files).size !== spec.files.length
       || !spec.files.every((path: unknown) => typeof path === "string"
-        && /^(src|tests)\/(?:[a-z\d_-]+\/)*[a-z\d_.-]+\.(?:mjs|mts|ts|js|css|html)$/i.test(path))
+        && deliveryPath.test(path))
       || !Array.isArray(spec.dependsOn) || !spec.dependsOn.every(Number.isSafeInteger)
       || new Set(spec.dependsOn).size !== spec.dependsOn.length) throw invalid();
     specs.set(number, { instructions: spec.instructions, files: spec.files, dependsOn: spec.dependsOn });
@@ -63,8 +64,8 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
     } catch { throw Error(install ? "隔离环境依赖安装失败。" : "隔离环境质量检查失败。"); }
     finally { await exec("docker", ["rm", "-f", name], { timeout: 10_000 }).catch(() => undefined); }
   }
-  return async ({ number, spec, branch, upstream, publisher }, connected, signal) => {
-    const session = monitor.begin({ title: `GitHub #${number}`, task: "开发与测试", ticketId: `#${number}` });
+  return async ({ number, flowId, planVersion, spec, branch, upstream, publisher }, connected, signal) => {
+    const session = monitor.begin({ title: `GitHub #${number}`, task: "开发与测试", ticketId: `#${number}`, flowId, ...(planVersion ? { planVersion } : {}) });
     try {
       await mkdir(root, { recursive: true, mode: 0o700 });
       const target = await mkdtemp(join(root, `issue-${number}-`));
@@ -72,7 +73,7 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
       const { base, author, email } = await publisher.checkout(workspace, signal);
       const git = async (args: string[]) => (await exec("git", ["-C", workspace, "-c", "core.hooksPath=/dev/null", ...args],
         { timeout: timeoutMs, signal })).stdout.trim();
-      for (const sha of upstream) {
+      for (const sha of [...(spec.baseRevision ? [spec.baseRevision] : []), ...upstream]) {
         if (!/^[a-f0-9]{40}$/.test(sha)) throw Error("上游合并提交无效。");
         await git(["merge-base", "--is-ancestor", sha, "HEAD"]);
       }

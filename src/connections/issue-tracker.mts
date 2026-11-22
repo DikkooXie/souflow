@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 // 连接层只公开工单事实与可用操作，供应商请求、凭据和模型输入分别留在各自边界。
 export type IssueSummary = { number: number; title: string; url: string; state: string; assignees: string[] };
 export type IssuePull = {
@@ -23,3 +25,7 @@ export type IssuePublisher = {
 };
 
 export type DeliveryTracker = IssueTracker & { delivery: IssuePublisher };
+
+export function issueRevision(issue: IssueDetail) {
+  return createHash("sha256").update(JSON.stringify([issue.title, issue.body])).digest("hex");
+}
