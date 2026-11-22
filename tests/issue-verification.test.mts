@@ -17,10 +17,12 @@ test("核验器校验结构化报告并区分未确认结果", async () => {
       assert.equal(options.untrustedContext, JSON.stringify({ title: issue.title, description: issue.body }));
       assert.doesNotMatch(options.prompt, /验收步骤/);
       assert.deepEqual(options.outputSchema?.required, ["report"]);
+      options.onAccount?.("0123456789ab");
       return { finished: Promise.resolve(outcome), output: () => output, close() {} };
     } });
   const signal = new AbortController().signal;
   assert.equal(await make("completed", '{"report":"已核对清单"}')(issue, () => {}, signal), "已核对清单");
+  assert.equal(monitor.snapshot().hosts[0]?.recent[0]?.accountRef, "0123456789ab");
   for (const invalid of [undefined, "报告", '{"report":""}', '{"report":"内容","extra":1}']) {
     await assert.rejects(make("completed", invalid)(issue, () => {}, signal), /报告格式无效/);
   }
