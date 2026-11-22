@@ -154,6 +154,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         verifyIssue ?? createIssueVerifier(monitor, codexAccounts ? { codexAccounts } : {}),
         audit.record, dispatchConcurrency, memberTrackers, issueDelivery && {
           specs: issueDelivery.specs, pollMs: issueDelivery.pollMs, conversation: true, requireQuality: true,
+          ...(issueDelivery.recoverFailedIssue ? { recoverFailedIssue: issueDelivery.recoverFailedIssue } : {}),
           prepare: createIssueDeveloper(monitor, { ...issueDelivery, root: `${database}.artifacts/github`,
             ...(codexAccounts ? { codexAccounts } : {}) }),
         }) : undefined;
@@ -595,6 +596,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const issuePlan = process.env.SOULFLOW_GITHUB_DELIVERY_PLAN?.trim();
   const image = process.env.SOULFLOW_GITHUB_CHECK_IMAGE?.trim();
   const conversationDelivery = process.env.SOULFLOW_GITHUB_CONVERSATION_DELIVERY === "1";
+  const recoverFailedIssue = process.env.SOULFLOW_GITHUB_RECOVER_FAILED_ISSUE === undefined ? undefined
+    : integerSetting("SOULFLOW_GITHUB_RECOVER_FAILED_ISSUE", 0, 1, Number.MAX_SAFE_INTEGER);
+  if (recoverFailedIssue !== undefined && !conversationDelivery) throw Error("恢复旧工单前请启用对话工单交付。");
   if (issuePlan) throw Error("静态 GitHub 计划缺少规划产物与校验记录，请改用对话工单交付。");
   if (conversationDelivery && !planPath) throw Error("对话选单需要配置项目开发计划。");
   if (conversationDelivery && (!claimEnabled || !image || !Object.keys(githubAccounts).length)) {
@@ -604,6 +608,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     specs: new Map(),
     image, ...(routine ? { model: routine } : {}), ...(advanced ? { planningModel: advanced } : {}),
     conversation: conversationDelivery,
+    ...(recoverFailedIssue === undefined ? {} : { recoverFailedIssue }),
     pollMs: integerSetting("SOULFLOW_GITHUB_POLL_MS", 20_000, 5000, 3_600_000),
     timeoutMs: integerSetting("SOULFLOW_GITHUB_DELIVERY_TIMEOUT_MS", 300_000, 1000, 3_600_000),
   } : undefined;

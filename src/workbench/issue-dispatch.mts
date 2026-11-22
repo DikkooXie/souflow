@@ -3,11 +3,12 @@ import { isDeepStrictEqual } from "node:util";
 import type { BusinessEvent, Checkpoint } from "../audit/activity-store.mts";
 import { issueRevision, type DeliveryTracker, type IssueDetail, type IssuePull, type IssueSummary, type IssueTracker } from "../connections/issue-tracker.mts";
 import type { AccountAssignment } from "../execution/codex-account-dispatch.mts";
-import { IssueDeliverySourcesChanged, type DeliverySpec, type DeliveryTarget, type PrepareIssue } from "../execution/issue-delivery.mts";
+import { IssueDeliveryFailed, IssueDeliverySourcesChanged, type DeliveryFailure, type DeliverySpec, type DeliveryTarget, type PrepareIssue } from "../execution/issue-delivery.mts";
 import { IssueVerificationUncertain, type VerifyIssue } from "../execution/issue-verification.mts";
 import { qualityBindingCurrent, type QualityBinding } from "../planning/dispatch-quality.mts";
 
-export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; prepare: PrepareIssue; pollMs: number; conversation?: boolean; requireQuality?: boolean };
+export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; prepare: PrepareIssue; pollMs: number; conversation?: boolean;
+  requireQuality?: boolean; recoverFailedIssue?: number };
 
 function publisher(tracker: IssueTracker) {
   return (tracker as Partial<DeliveryTracker>).delivery;
@@ -20,8 +21,18 @@ export type Claim = Remote & {
   accountAssignment?: AccountAssignment;
   delivery?: DeliverySpec; approval?: { flowId: string; planId: string; version: number; issueRevision: string; quality?: QualityBinding };
   target?: DeliveryTarget; pull?: IssuePull;
+  failure?: DeliveryFailure; retryCount?: number;
 };
 const phases = { claiming: "正在认领", waiting: "等待上游 PR 合并", developing: "Codex 正在开发与测试", publishing: "正在推送并创建 PR", submitted: "已提交 PR", deliveryFailed: "开发或测试失败", running: "Codex 正在核验", done: "核验完成", conflict: "认领冲突", uncertain: "待核对", failed: "核验失败" };
+const stageNames = { preflight: "工单状态核对", checkout: "工作区准备", codex: "Codex 运行", dependencies: "依赖安装",
+  patch: "补丁校验与应用", tests: "隔离检查", commit: "生成本地提交", publish: "远端发布", legacy: "旧版执行" };
+const reasonNames = { unavailable: "暂无更细的失败记录", format: "替换格式无效", scope: "涉及未授权文件", redacted: "涉及已脱敏字段",
+  match: "替换原文无法唯一定位", size: "文件大小超出边界", empty: "没有实际代码差异", "check-failed": "质量命令退出失败" };
+
+function retryable(failure: DeliveryFailure | undefined) {
+  return failure?.stage === "tests" && failure.reason === "check-failed"
+    || failure?.stage === "patch" && ["format", "match", "size", "empty"].includes(failure.reason);
+}
 export class IssueActionError extends Error {
   status: number;
   constructor(status: number, message: string) { super(message); this.status = status; }
@@ -46,21 +57,35 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     if (!store.save(String(c.number), c, event ? { kind: "github.issue", subject: subject(c.number),
       ...(c.approval ? { flowId: c.approval.flowId } : {}), details: {
       action: event, ...c.approval, ...(c.target ? { branch: c.target.branch, head: c.target.head } : {}),
+      ...(c.failure ? { failure: c.failure } : {}), ...(c.retryCount ? { retryCount: c.retryCount } : {}),
       ...(event === "account-assigned" ? { codexAccount: c.accountAssignment } : {}),
       ...(c.pull ? { pull: c.pull.number, ci: c.pull.ci, merge: c.pull.mergeCommit, state: c.pull.state } : {}), actor: c.claimedBy, githubAccount: c.account, phase: c.phase, session: c.sessionId,
     } } : undefined)) throw new IssueActionError(503, "无法保存 GitHub 工单状态。");
     claims.set(c.number, c);
   }
+  function queueRetry(c: Claim) {
+    // 进入远端发布后的尝试只能核对回执。重试沿用原工单的持久化授权和源码版本。
+    if (!delivery?.conversation || c.phase !== "deliveryFailed" || c.retryCount || c.target || c.pull || c.pulls.length
+      || !c.delivery?.baseRevision || !qualityBindingCurrent(c.approval?.quality)) return;
+    const legacy = !c.failure && delivery.recoverFailedIssue === c.number;
+    if (!legacy && !retryable(c.failure)) return;
+    save({ ...c, phase: "waiting", retryCount: 1, failure: c.failure ?? { stage: "legacy", reason: "unavailable" } }, "retry-queued");
+  }
   for (const c of store.load()) {
     if (["claiming", "running", "developing", "publishing"].includes(c.phase)) save({ ...c, phase: "uncertain" }, "restart");
-    else claims.set(c.number, c);
+    else {
+      claims.set(c.number, c);
+      queueRetry(c);
+    }
   }
   function snapshot(canClaim: boolean) {
     return { repo: tracker.repo, canClaim: canClaim && !delivery?.conversation, ...(delivery ? { deliveryEnabled: true, conversationEnabled: delivery.conversation === true } : {}), items: [
       ...[...claims.values()].reverse().map(({ requestId: _id, account: _account, phase, delivery, pull, approval, ...item }) => ({ ...item,
         ...(delivery ? { dependsOn: delivery.dependsOn, mode: "delivery" } : {}),
         ...(approval ? { flowId: approval.flowId } : {}),
-        pulls: pull ? [...item.pulls.filter(other => other.number !== pull.number), pull] : item.pulls, progress: phases[phase] })),
+        ...(item.failure ? { failureMessage: `${stageNames[item.failure.stage]} · ${reasonNames[item.failure.reason]}` } : {}),
+        pulls: pull ? [...item.pulls.filter(other => other.number !== pull.number), pull] : item.pulls,
+        progress: phase === "waiting" && item.retryCount ? "等待自动重试" : phases[phase] })),
       ...candidates.filter(c => !claims.has(c.number)).map(c => ({ ...c, progress: "待认领" })),
     ] };
   }
@@ -130,14 +155,19 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     const remote = publisher(connection);
     const current = () => claims.get(c.number) ?? c;
     try {
-      if (!remote || !delivery || !permits(c.claimedBy) || (await connection.account()).toLowerCase() !== c.account.toLowerCase()
-        || !stillAssignee(c, await connection.read(c.number))) throw Error("工单负责人已变更。");
+      if (!remote || !delivery || !permits(c.claimedBy) || (await connection.account()).toLowerCase() !== c.account.toLowerCase()) {
+        throw Error("工单账号无法确认。");
+      }
+      const issue = await connection.read(c.number);
+      if (!stillAssignee(c, issue) || issue.pulls.length) throw Error("工单状态已变化。");
       const branch = `feat/${c.number}-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
       const prepared = await delivery.prepare({ number: c.number, spec, branch, publisher: remote, upstream,
+        ...(c.retryCount && c.failure ? { previousFailure: c.failure } : {}),
         ...(c.approval ? { flowId: c.approval.flowId, planVersion: c.approval.version } : {}) },
         sessionId => save({ ...current(), sessionId }, "connected"), abort.signal,
         accountAssignment => save({ ...current(), accountAssignment }, "account-assigned"));
-      if (!stillAssignee(c, await connection.read(c.number))) throw Error("工单负责人已变更。");
+      const checkedIssue = await connection.read(c.number);
+      if (!stillAssignee(c, checkedIssue) || checkedIssue.pulls.length) throw Error("工单状态已变化。");
       abort.signal.throwIfAborted();
       const target = { branch, head: prepared.head };
       save({ ...current(), target, phase: "publishing" }, "checked");
@@ -147,8 +177,13 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       const last = current();
       const stale = error instanceof IssueDeliverySourcesChanged;
       const uncertain = stale || !!last.target || abort.signal.aborted || error instanceof IssueVerificationUncertain;
-      const stopped: Claim = { ...last, phase: uncertain ? "uncertain" : "deliveryFailed" };
-      try { save(stopped, stale ? "quality-source-changed" : uncertain ? "reconcile" : "failed"); }
+      const failure = error instanceof IssueDeliveryFailed ? error.failure
+        : { stage: last.target ? "publish" as const : "preflight" as const, reason: "unavailable" as const };
+      const stopped: Claim = { ...last, phase: uncertain ? "uncertain" : "deliveryFailed", failure };
+      try {
+        save(stopped, stale ? "quality-source-changed" : uncertain ? "reconcile" : "failed");
+        queueRetry(stopped);
+      }
       catch { claims.set(c.number, { ...stopped, phase: "uncertain" }); }
     }
   }

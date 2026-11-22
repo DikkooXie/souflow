@@ -16,6 +16,15 @@ const digest = (bytes: string | Buffer) => createHash("sha256").update(bytes).di
 const gitFileMode = (mode: number) => (mode & 0o100) ? 0o100755 : 0o100644;
 type PatchFile = { path: string; before: string; after: string; mode: number };
 export type LocalCodePatch = { patchSha256: string; changes: PatchFile[] };
+type PatchRejectionReason = "format" | "scope" | "redacted" | "match" | "size" | "empty";
+
+export class PatchRejection extends Error {
+  readonly reason: PatchRejectionReason;
+  constructor(reason: PatchRejectionReason, message: string) {
+    super(message);
+    this.reason = reason;
+  }
+}
 
 export const codeResultSchema = {
   type: "object", additionalProperties: false, required: ["report", "edits"], properties: {
@@ -42,25 +51,26 @@ export async function readEditableFile(workspace: string, path: string) {
 }
 
 export async function applyLocalCodeChanges(target: string, workspace: string, sources: ReadonlyMap<string, Awaited<ReturnType<typeof readEditableFile>>>, edits: unknown) {
-  if (!Array.isArray(edits) || !edits.length || edits.length > maxEdits) throw Error("未收到有效的代码改动。");
+  if (!Array.isArray(edits) || !edits.length || edits.length > maxEdits) throw new PatchRejection("format", "未收到有效的代码改动。");
   const proposed = new Map<string, string>();
   for (const edit of edits) {
     const { path, before, after } = edit ?? {};
     const source = typeof path === "string" && sources.get(path);
-    if (!source || typeof before !== "string" || !before || typeof after !== "string" || after.includes("\0") || before === after) {
-      throw Error("改动包含未获批准的文件或无效替换。");
+    if (!source) throw new PatchRejection("scope", "改动包含未获批准的文件。");
+    if (typeof before !== "string" || !before || typeof after !== "string" || after.includes("\0") || before === after) {
+      throw new PatchRejection("format", "改动包含无效替换。");
     }
-    if (/\[已隐藏(?:凭据|私钥)\]/.test(before + after)) throw Error("改动涉及已脱敏内容，请缩小编辑范围。");
+    if (/\[已隐藏(?:凭据|私钥)\]/.test(before + after)) throw new PatchRejection("redacted", "改动涉及已脱敏内容，请缩小编辑范围。");
     const previous = proposed.get(path) ?? source.content;
     const start = previous.indexOf(before);
-    if (start < 0 || previous.indexOf(before, start + 1) >= 0) throw Error("改动的原文无法唯一匹配，未应用替换。");
+    if (start < 0 || previous.indexOf(before, start + 1) >= 0) throw new PatchRejection("match", "改动的原文无法唯一匹配，未应用替换。");
     const next = previous.slice(0, start) + after + previous.slice(start + before.length);
-    if (!next.trim() || Buffer.byteLength(next) > maxSourceBytes) throw Error("改动后的文件为空或过长。");
+    if (!next.trim() || Buffer.byteLength(next) > maxSourceBytes) throw new PatchRejection("size", "改动后的文件为空或过长。");
     proposed.set(path, next);
   }
 
   const files = [...proposed].filter(([path, content]) => content !== sources.get(path)?.content).map(([path]) => path).sort();
-  if (!files.length) throw Error("未收到实际代码差异。");
+  if (!files.length) throw new PatchRejection("empty", "未收到实际代码差异。");
   const changes: PatchFile[] = [];
   // 先验证所有替换，再在脱离原仓库的目录生成可复核的补丁。
   for (const path of files) {

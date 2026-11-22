@@ -5,10 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
+import type { BusinessEvent } from "../src/audit/activity-store.mts";
 import { githubPull } from "../src/connections/github-delivery.mts";
-import type { DeliveryTracker, IssueDetail, IssuePull } from "../src/connections/issue-tracker.mts";
+import { type DeliveryTracker, issueRevision, type IssueDetail, type IssuePull } from "../src/connections/issue-tracker.mts";
 import { qualitySources } from "../src/execution/codex-quality-review.mts";
-import { checkoutReviewedIssueBase, IssueDeliverySourcesChanged, parseDeliveryPlan } from "../src/execution/issue-delivery.mts";
+import { checkoutReviewedIssueBase, type DeliveryFailure, IssueDeliveryFailed, IssueDeliverySourcesChanged, parseDeliveryPlan } from "../src/execution/issue-delivery.mts";
 import { type Claim, createIssueDispatch } from "../src/workbench/issue-dispatch.mts";
 
 const spec = { files: ["src/main.mts"], instructions: "修改校验逻辑。", dependsOn: [] };
@@ -76,6 +77,67 @@ test("只展示 PR 当前提交的 CI，合并 SHA 独立记录", () => {
   commit.oid = "current";
   assert.equal(githubPull("a/b", pull).ci, "SUCCESS");
   assert.equal(githubPull("a/b", pull).mergeCommit, "merged");
+});
+
+test("交付失败留存可用诊断，仅在原授权内重试一次", async t => {
+  const hash = "a".repeat(64);
+  const baseRevision = "b".repeat(40);
+  const issue: IssueDetail = { number: 7, title: "修复回执", body: "保留批准范围。", url: "https://github.com/a/b/issues/7",
+    state: "OPEN", assignees: ["member"], pulls: [] };
+  const first: Claim = { ...issue, syncedAt: 0, requestId: "approval", claimedBy: "member", account: "member",
+    phase: "waiting", delivery: { ...spec, baseRevision }, approval: { flowId: "flow", planId: "plan", version: 1,
+      issueRevision: issueRevision(issue), quality: { policy: 1, flowDigest: hash, batchDigest: hash } } };
+
+  for (const scenario of ["normal", "legacy", "scope", "reassigned", "linked", "published"] as const) {
+    await t.test(scenario, async () => {
+      let stored = structuredClone(first);
+      if (scenario !== "normal" && scenario !== "scope") stored.phase = "deliveryFailed";
+      if (scenario === "published") stored.target = { branch: "feat/7-existing", head: baseRevision };
+      const observed = structuredClone(issue);
+      if (scenario === "reassigned") observed.assignees = ["another"];
+      if (scenario === "linked") observed.pulls = [{ number: 8, state: "OPEN", url: "https://github.com/a/b/pull/8" }];
+      const events: BusinessEvent[] = [];
+      const attempts: (DeliveryFailure | undefined)[] = [];
+      let published = 0;
+      const tracker: DeliveryTracker = {
+        repo: "a/b", candidates: async () => [], read: async () => structuredClone(observed), account: async () => "member",
+        assign: async () => assert.fail("不能再次改动 GitHub 负责人"),
+        delivery: {
+          checkout: async () => assert.fail("调度测试不需要真实工作区"), find: async () => undefined,
+          publish: async () => { published++; return { number: 9, state: "OPEN", url: "https://github.com/a/b/pull/9" }; },
+        },
+      };
+      const open = () => createIssueDispatch(tracker, {
+        load: () => [structuredClone(stored)],
+        save(_id, value, event) { stored = structuredClone(value); if (event) events.push(event); return true; },
+      }, async () => assert.fail("不能改走另一类派发"), () => true, 1, new Map([["member", tracker]]), {
+        specs: new Map(), conversation: true, requireQuality: true, pollMs: 60_000, recoverFailedIssue: 7,
+        async prepare(input) {
+          attempts.push(input.previousFailure);
+          assert.deepEqual(input.spec, first.delivery);
+          if (scenario !== "legacy") throw new IssueDeliveryFailed({ stage: "patch", reason: scenario === "scope" ? "scope" : "match" });
+          return { workspace: "fixture", branch: input.branch, base: baseRevision, head: "c".repeat(40) };
+        },
+      });
+      const run = async () => {
+        const dispatch = open();
+        try {
+          for (let i = 0; i < 3; i++) {
+            await dispatch.refresh();
+            await setImmediate();
+          }
+        } finally { await dispatch.close(); }
+      };
+      await run();
+      await run();
+      assert.deepEqual(attempts, scenario === "normal" ? [undefined, { stage: "patch", reason: "match" }]
+        : scenario === "legacy" ? [{ stage: "legacy", reason: "unavailable" }] : scenario === "scope" ? [undefined] : []);
+      assert.equal(published, scenario === "legacy" ? 1 : 0);
+      if (scenario === "normal") assert.deepEqual(stored.failure, { stage: "patch", reason: "match" });
+      const retries = events.filter(event => (event.details as { action?: string }).action === "retry-queued");
+      assert.equal(retries.length, ["normal", "legacy", "reassigned", "linked"].includes(scenario) ? 1 : 0);
+    });
+  }
 });
 
 test("开 PR 回执丢失后只做回读，指定 PR 关闭重开并合并后才唤醒一次", async () => {
