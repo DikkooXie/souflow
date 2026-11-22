@@ -9,7 +9,7 @@ import { openActivityStore } from "../src/audit/activity-store.mts";
 import { githubPull } from "../src/connections/github-delivery.mts";
 import { type DeliveryTracker, issueRevision, type IssueDetail, type IssuePull } from "../src/connections/issue-tracker.mts";
 import { qualitySources } from "../src/execution/codex-quality-review.mts";
-import { checkoutReviewedIssueBase, type DeliveryFailure, IssueDeliveryFailed, IssueDeliverySourcesChanged, parseDeliveryPlan } from "../src/execution/issue-delivery.mts";
+import { checkoutReviewedIssueBase, type DeliveryFailure, isolatedCheckFailed, IssueDeliveryFailed, IssueDeliverySourcesChanged, parseDeliveryPlan } from "../src/execution/issue-delivery.mts";
 import { type Claim, createIssueDispatch } from "../src/workbench/issue-dispatch.mts";
 
 const spec = { files: ["src/main.mts"], instructions: "修改校验逻辑。", dependsOn: [] };
@@ -77,6 +77,12 @@ test("只展示 PR 当前提交的 CI，合并 SHA 独立记录", () => {
   commit.oid = "current";
   assert.equal(githubPull("a/b", pull).ci, "SUCCESS");
   assert.equal(githubPull("a/b", pull).mergeCommit, "merged");
+});
+
+test("类型检查失败允许重试，Docker 启动失败或退出信号不视为检查结论", () => {
+  assert.ok(isolatedCheckFailed(1));
+  assert.ok(isolatedCheckFailed(2));
+  for (const code of [0, 125, 126, 127, 137, null, "ETIMEDOUT"]) assert.equal(isolatedCheckFailed(code), false);
 });
 
 test("交付失败留存可用诊断，仅在原授权内重试一次", async t => {

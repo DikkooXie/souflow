@@ -33,6 +33,11 @@ export class IssueDeliveryFailed extends Error {
   }
 }
 
+export function isolatedCheckFailed(code: unknown) {
+  // 125–127 表示 Docker 或命令启动失败，信号终止也没有得到检查结论。
+  return typeof code === "number" && Number.isInteger(code) && code > 0 && code < 125;
+}
+
 const retryInstruction = {
   format: "返回结构化 edits，每项只包含 path、before、after。",
   match: "上一次替换原文无法唯一定位。逐字复制短而唯一的锚点，避免相互覆盖或重复使用已被替换的原文。",
@@ -109,7 +114,7 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
         ...(!install ? ["--network=none"] : []), image, "npm",
         ...(install ? ["ci", "--ignore-scripts"] : ["run", "check"])], { timeout: timeoutMs, maxBuffer: 2 * 1024 * 1024, signal });
     } catch (error) {
-      if (!install && error && typeof error === "object" && "code" in error && error.code === 1) {
+      if (!install && error && typeof error === "object" && "code" in error && isolatedCheckFailed(error.code)) {
         throw new IssueDeliveryFailed({ stage: "tests", reason: "check-failed" });
       }
       throw Error(install ? "隔离环境依赖安装失败。" : "隔离环境质量检查失败。");
