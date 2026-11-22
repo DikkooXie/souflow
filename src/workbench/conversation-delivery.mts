@@ -36,7 +36,7 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
     if (!store.save(p.id, p, { kind: "github.selection", flowId: p.flowId, subject: p.id, details: {
       actor, status: p.status, approvedAt: p.approvedAt, planId: p.planId, version: p.version, base: p.base,
       quality: p.quality, reason: p.error,
-      issues: p.items.map(({ number, files, dependsOn }) => ({ number, files, dependsOn })),
+      issues: p.items.map(({ number, files, dependsOn, sourcePaths }) => ({ number, files, dependsOn, sourcePaths })),
     } })) return false;
     proposals.set(p.id, p);
     return true;
@@ -76,11 +76,16 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
         }
         draft = { ...p, items, status: "reviewing" };
         if (!save(draft)) throw Error("无法保存待复核工单。");
-        const evidence = await readSources(base, items.flatMap(item => item.files), abort.signal);
+        const sourcePaths = items.flatMap(item => [...item.files, ...(item.sourcePaths ?? [])]);
+        const evidence = await readSources(base, sourcePaths, abort.signal);
+        if (sourcePaths.some(path => !Object.hasOwn(evidence, path))) {
+          throw Error("工单校验未通过：部分源码无法装入复核资料，请缩小范围后重新选单。");
+        }
         const publishedPath = snapshot.project?.plan.path;
         if (publishedPath && snapshot.project?.plan.status === "read") evidence[publishedPath] = planText;
         const packet = qualityPacket(snapshot, base, p.id, items.map(item => ({
           id: String(item.number), title: item.title, instructions: item.instructions, criteria: item.criteria,
+          ...(item.sourcePaths ? { sources: item.sourcePaths } : {}),
           dependsOn: item.dependsOn.map(String), paths: item.files, validation: item.validation,
           issue: { revision: item.revision, text: item.issueText },
         })), evidence);
@@ -141,9 +146,10 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
       const authorized = { ...p, status: "authorizing" as const, approvedAt: Date.now() };
       if (!save(authorized, actor)) return 503;
       const basePlanPath = flow?.project?.plan.status === "read" ? flow.project.plan.path : undefined;
-      const specs = new Map(p.items.map(({ number, instructions, files, dependsOn, revision, validation }): [number, DeliverySpec & { issueRevision: string }] =>
+      const specs = new Map(p.items.map(({ number, instructions, files, dependsOn, revision, validation, sourcePaths }): [number, DeliverySpec & { issueRevision: string }] =>
         [number, { instructions: [instructions, ...validation.map(item => `${item.criterion}：${item.procedure} → ${item.expected}`)].join("\n"),
-          files, dependsOn, baseRevision: p.base, ...(basePlanPath ? { basePlanPath } : {}), issueRevision: revision }]));
+          files, dependsOn, baseRevision: p.base, ...(basePlanPath ? { basePlanPath } : {}),
+          ...(sourcePaths?.length ? { sourcePaths } : {}), issueRevision: revision }]));
       try {
         await github.claimApproved(id, actor, specs, { flowId: p.flowId, planId: p.planId, version: p.version,
           quality: { policy: quality.policy, flowDigest: quality.flowDigest, batchDigest: quality.batchDigest } });

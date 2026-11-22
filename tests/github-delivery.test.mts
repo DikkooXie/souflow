@@ -18,16 +18,17 @@ test("GitHub 允许编辑的 TS 和 JS 文件使用固定提交的内容复核",
   t.after(() => rm(repo, { recursive: true, force: true }));
   const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
   const paths = ["src/feature.ts", "tests/feature.js"];
+  const code = `// ${"注释".repeat(1800)}\nexport const approved = true;\n`;
   git("init", "-q");
   await Promise.all(paths.map(async path => {
     await mkdir(join(repo, path.split("/")[0] ?? ""), { recursive: true });
-    await writeFile(join(repo, path), "export const approved = true;\n");
+    await writeFile(join(repo, path), code);
   }));
   git("add", "--", ...paths);
   git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--no-gpg-sign", "-qm", "fixture");
   await writeFile(join(repo, "src/feature.ts"), "未提交");
   assert.deepEqual(await qualitySources(repo, git("rev-parse", "HEAD"), paths, new AbortController().signal),
-    Object.fromEntries(paths.map(path => [path, "export const approved = true;\n"])));
+    Object.fromEntries(paths.map(path => [path, code])));
 });
 
 test("派发只使用已校验基线或声明的前置合并，拒绝其间变更的已审查文件", async t => {
@@ -52,6 +53,8 @@ test("派发只使用已校验基线或声明的前置合并，拒绝其间变�
   git(["switch", "--detach", pushedAfter]);
   await checkoutReviewedIssueBase(runGit, delivery, [prerequisite]);
   assert.equal(git(["rev-parse", "HEAD"]), prerequisite);
+  await assert.rejects(checkoutReviewedIssueBase(runGit, { ...delivery, sourcePaths: ["src/upstream.mts"] },
+    [prerequisite]), IssueDeliverySourcesChanged);
   git(["switch", "--detach", pushedAfter]);
   await assert.rejects(checkoutReviewedIssueBase(runGit, delivery, [pushedAfter]), IssueDeliverySourcesChanged);
 });
