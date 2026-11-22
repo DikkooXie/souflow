@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
-import type { BusinessEvent } from "../src/audit/activity-store.mts";
+import { openActivityStore } from "../src/audit/activity-store.mts";
 import { githubPull } from "../src/connections/github-delivery.mts";
 import { type DeliveryTracker, issueRevision, type IssueDetail, type IssuePull } from "../src/connections/issue-tracker.mts";
 import { qualitySources } from "../src/execution/codex-quality-review.mts";
@@ -88,15 +88,22 @@ test("交付失败留存可用诊断，仅在原授权内重试一次", async t 
     phase: "waiting", delivery: { ...spec, baseRevision }, approval: { flowId: "flow", planId: "plan", version: 1,
       issueRevision: issueRevision(issue), quality: { policy: 1, flowDigest: hash, batchDigest: hash } } };
 
-  for (const scenario of ["normal", "legacy", "scope", "reassigned", "linked", "published"] as const) {
-    await t.test(scenario, async () => {
+  for (const scenario of ["normal", "legacy", "scope", "reassigned", "changed", "linked", "published", "unconfigured"] as const) {
+    await t.test(scenario, async sub => {
+      const directory = await mkdtemp(join(tmpdir(), "souflow-delivery-retry-"));
+      sub.after(() => rm(directory, { recursive: true, force: true }));
+      const path = join(directory, "audit.sqlite");
       let stored = structuredClone(first);
       if (scenario !== "normal" && scenario !== "scope") stored.phase = "deliveryFailed";
       if (scenario === "published") stored.target = { branch: "feat/7-existing", head: baseRevision };
+      const seed = openActivityStore(path);
+      assert.ok(seed.checkpoint<Claim>("github-issues:a/b").save("7", stored));
+      seed.close();
       const observed = structuredClone(issue);
       if (scenario === "reassigned") observed.assignees = ["another"];
+      if (scenario === "changed") observed.body = "工单被重新编辑。";
       if (scenario === "linked") observed.pulls = [{ number: 8, state: "OPEN", url: "https://github.com/a/b/pull/8" }];
-      const events: BusinessEvent[] = [];
+      let retries = 0;
       const attempts: (DeliveryFailure | undefined)[] = [];
       let published = 0;
       const tracker: DeliveryTracker = {
@@ -107,26 +114,33 @@ test("交付失败留存可用诊断，仅在原授权内重试一次", async t 
           publish: async () => { published++; return { number: 9, state: "OPEN", url: "https://github.com/a/b/pull/9" }; },
         },
       };
-      const open = () => createIssueDispatch(tracker, {
-        load: () => [structuredClone(stored)],
-        save(_id, value, event) { stored = structuredClone(value); if (event) events.push(event); return true; },
-      }, async () => assert.fail("不能改走另一类派发"), () => true, 1, new Map([["member", tracker]]), {
-        specs: new Map(), conversation: true, requireQuality: true, pollMs: 60_000, recoverFailedIssue: 7,
-        async prepare(input) {
-          attempts.push(input.previousFailure);
-          assert.deepEqual(input.spec, first.delivery);
-          if (scenario !== "legacy") throw new IssueDeliveryFailed({ stage: "patch", reason: scenario === "scope" ? "scope" : "match" });
-          return { workspace: "fixture", branch: input.branch, base: baseRevision, head: "c".repeat(40) };
-        },
-      });
       const run = async () => {
-        const dispatch = open();
+        const audit = openActivityStore(path);
+        const checkpoint = audit.checkpoint<Claim>("github-issues:a/b");
+        const dispatch = createIssueDispatch(tracker, checkpoint, async () => assert.fail("不能改走另一类派发"),
+          audit.record, 1, new Map([["member", tracker]]), {
+            specs: new Map(), conversation: true, requireQuality: true, pollMs: 60_000,
+            ...(scenario !== "unconfigured" ? { recoverFailedIssue: 7 } : {}),
+            async prepare(input) {
+              attempts.push(input.previousFailure);
+              assert.deepEqual(input.spec, first.delivery);
+              if (scenario !== "legacy") throw new IssueDeliveryFailed({ stage: "patch", reason: scenario === "scope" ? "scope" : "match" });
+              return { workspace: "fixture", branch: input.branch, base: baseRevision, head: "c".repeat(40) };
+            },
+          });
         try {
           for (let i = 0; i < 3; i++) {
             await dispatch.refresh();
             await setImmediate();
           }
-        } finally { await dispatch.close(); }
+        } finally {
+          await dispatch.close();
+          const [current] = checkpoint.load();
+          assert.ok(current);
+          stored = current;
+          retries = audit.report(1).recent.filter(event => (event.details as { action?: string } | null)?.action === "retry-queued").length;
+          audit.close();
+        }
       };
       await run();
       await run();
@@ -134,8 +148,7 @@ test("交付失败留存可用诊断，仅在原授权内重试一次", async t 
         : scenario === "legacy" ? [{ stage: "legacy", reason: "unavailable" }] : scenario === "scope" ? [undefined] : []);
       assert.equal(published, scenario === "legacy" ? 1 : 0);
       if (scenario === "normal") assert.deepEqual(stored.failure, { stage: "patch", reason: "match" });
-      const retries = events.filter(event => (event.details as { action?: string }).action === "retry-queued");
-      assert.equal(retries.length, ["normal", "legacy", "reassigned", "linked"].includes(scenario) ? 1 : 0);
+      assert.equal(retries, ["normal", "legacy", "reassigned", "changed", "linked"].includes(scenario) ? 1 : 0);
     });
   }
 });
