@@ -65,6 +65,9 @@ class DeliveryTest(unittest.TestCase):
             git("commit", "-m", "squashed")
             merge = git("rev-parse", "HEAD")
             self.assertEqual(clean_branch(root, {**pr, "headRefOid": HEAD}, merge)["state"], "pending")
+            git("remote", "set-url", "--push", "origin", str(Path(directory) / "other"))
+            self.assertIn("推送目标", clean_branch(root, pr, merge)["reason"])
+            git("config", "--unset-all", "remote.origin.pushurl")
             self.assertEqual(clean_branch(root, pr, merge), {"state": "cleaned", "local": True, "remote": True})
             self.assertEqual(clean_branch(root, pr, merge)["state"], "absent")
 

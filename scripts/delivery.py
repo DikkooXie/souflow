@@ -24,13 +24,18 @@ def command(*args, cwd=None, allow_failure=False):
     raise DeliveryError(f"{args[0]} 操作失败（{result.returncode}）")
 
 
+def github_repo(url):
+    match = re.fullmatch(r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([\w.-]+/[\w.-]+?)(?:\.git)?", url)
+    return match[1] if match else None
+
+
 def checkout():
     root = Path(command("git", "rev-parse", "--show-toplevel").decode().strip())
     url = command("git", "remote", "get-url", "origin", cwd=root).decode().strip()
-    match = re.fullmatch(r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([\w.-]+/[\w.-]+?)(?:\.git)?", url)
-    if not match:
+    repo = github_repo(url)
+    if repo is None:
         raise DeliveryError("origin 必须指向 GitHub 仓库")
-    return root, match[1]
+    return root, repo
 
 
 def gh(*args):
@@ -108,9 +113,16 @@ def clean_branch(root, pr, merge):
     if expected is None or expected.strip() != merged_tree:
         return {"state": "pending", "reason": "合并树无法与任务分支核对"}
     if remote:
-        # HTTPS 推送使用当前 gh 账号，删除条件仍绑定已合并的远端 SHA。
+        fetch_url = git("remote", "get-url", "origin").decode().strip()
+        push_urls = git("remote", "get-url", "--push", "--all", "origin").decode().splitlines()
+        repo = github_repo(fetch_url)
+        allowed_urls = [url for url in push_urls if url == fetch_url or
+                        repo and (github_repo(url) or "").lower() == repo.lower()]
+        if len(push_urls) != 1 or allowed_urls != push_urls:
+            return {"state": "pending", "reason": "origin 的推送目标与已核对仓库不一致"}
+        # 使用核对后的单一目标，删除条件同时绑定已合并的远端 SHA。
         git("-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
-            "push", f"--force-with-lease={ref}:{head}", "origin", f":{ref}")
+            "push", f"--force-with-lease={ref}:{head}", push_urls[0], f":{ref}")
     if local:
         # 再核对工作区，保留其他成员在飞行中的任务分支。
         if f"branch {ref}" in git("worktree", "list", "--porcelain").decode().splitlines():
