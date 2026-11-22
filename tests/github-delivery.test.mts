@@ -27,7 +27,7 @@ test("只展示 PR 当前提交的 CI，合并 SHA 独立记录", () => {
   assert.equal(githubPull("a/b", pull).mergeCommit, "merged");
 });
 
-test("开 PR 回执丢失后只做回读，重启保留下游，确认指定 PR 合并才唤醒一次", async () => {
+test("开 PR 回执丢失后只做回读，指定 PR 关闭重开并合并后才唤醒一次", async () => {
   const specs = parseDeliveryPlan(JSON.stringify({ 1: spec, 2: { ...spec, dependsOn: [1] } }));
   const rows: IssueDetail[] = [1, 2, 3].map(number => ({
     number, title: `Issue ${number}`, url: `https://github.com/a/b/issues/${number}`, state: "OPEN",
@@ -103,6 +103,13 @@ test("开 PR 回执丢失后只做回读，重启保留下游，确认指定 PR 
     assert.ok(target);
     const pull = pulls.get(target.branch);
     assert.ok(pull);
+    for (const state of ["CLOSED", "OPEN"]) {
+      pull.state = state;
+      await first.refresh();
+      assert.equal(records.get("1")?.pull?.state, state);
+      assert.equal(records.get("2")?.phase, "waiting");
+      assert.equal(steps.length, 1);
+    }
     const mergeCommit = "c".repeat(40);
     Object.assign(pull, { state: "MERGED", mergeCommit });
     await Promise.all([first.refresh(), first.refresh()]);

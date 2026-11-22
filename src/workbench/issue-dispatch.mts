@@ -169,8 +169,9 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     let unavailable = false;
     for (const prior of [...claims.values()]) {
       if (!prior.target || (prior.phase !== "uncertain" && prior.phase !== "submitted")) continue;
-      if (prior.pull?.state === "CLOSED" || (prior.pull?.state === "MERGED" && prior.state === "CLOSED"
-        && ["SUCCESS", "FAILURE", "ERROR"].includes(prior.pull.ci ?? ""))) continue;
+      // 关闭但未合并的 PR 仍可能重开。只停止轮询已合并且已收齐关闭与 CI 回执的工单。
+      if (prior.pull?.state === "MERGED" && prior.state === "CLOSED"
+        && ["SUCCESS", "FAILURE", "ERROR"].includes(prior.pull.ci ?? "")) continue;
       const connection = memberTrackers.get(prior.claimedBy) ?? tracker;
       const remote = publisher(connection);
       if (!remote) continue;
