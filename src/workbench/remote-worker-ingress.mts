@@ -1,12 +1,33 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:https";
+import { isIPv4 } from "node:net";
 import { promisify } from "node:util";
 import { scrubAuditText } from "../audit/activity-store.mts";
 import { remoteMaxFileBytes, remoteMaxFiles, remotePath, type RemoteHandoff } from "../execution/remote-handoff.mts";
 
 export type RemoteLanConfig = { host: string; port: number; cert: string; key: string; offlineMs: number };
 const exec = promisify(execFile);
+
+const lanIPv4 = /^(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.|127\.0\.0\.1$)/;
+const sharedIPv4 = /^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./;
+
+async function readTailscaleIPv4(): Promise<string> {
+  const { stdout } = await exec("tailscale", ["ip", "-4"], { encoding: "utf8", timeout: 3000, maxBuffer: 1024 });
+  return stdout.trim();
+}
+
+export async function remoteWorkerNetwork(host: string, ownTailscaleIPv4 = readTailscaleIPv4) {
+  if (!isIPv4(host)) return;
+  if (lanIPv4.test(host)) return "lan" as const;
+  if (!sharedIPv4.test(host)) return;
+  // 运营商和其他 VPN 也使用共享地址段，必须核对本机 Tailscale 的地址。
+  try {
+    if (host === await ownTailscaleIPv4()) return "tailscale" as const;
+  } catch {
+    // CLI 缺失或不可用时，共享地址不能作为已确认的设备入口。
+  }
+}
 
 export function createRemoteWorkerIngress(handoff: RemoteHandoff, config: RemoteLanConfig) {
   const server = createServer({ cert: config.cert, key: config.key, requestTimeout: 10_000, headersTimeout: 5_000 }, async (request, response) => {
