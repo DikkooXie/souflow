@@ -40,6 +40,32 @@ test("local dispatch requires criterion coverage, an acyclic graph and approved 
   assert.throws(() => readDispatchTickets(JSON.stringify({ tickets: [{ ...code[0], dependsOn: ["T2"] }] }), criteria, allowed, "code"), /unknown-dependency:T1:T2/);
 });
 
+test("a ten-ticket plan preserves dependencies while executing in waves of two", async () => {
+  const tickets = Array.from({ length: 10 }, (_, index) => ({
+    ...draft[0],
+    id: `T${index + 1}`,
+    dependsOn: index === 9 ? ["T1", "T9"] : [],
+  }));
+  const parsed = readDispatchTickets(JSON.stringify({ tickets }), ["AC-1"], new Set([guide]));
+  assert.deepEqual(parsed, tickets);
+  const jobs: Parameters<typeof runLocalJobs>[0] = parsed.map(ticket => ({ ...ticket, status: "queued" }));
+  let active = 0;
+  let peak = 0;
+  let lastInputs: string[] = [];
+  await runLocalJobs(jobs, 2, async (job, inputs) => {
+    active++;
+    peak = Math.max(peak, active);
+    if (job.id === "T10") lastInputs = inputs.map(input => input.id);
+    await setImmediate();
+    active--;
+  });
+  assert.equal(peak, 2);
+  assert.deepEqual(lastInputs, ["T1", "T9"]);
+  assert.ok(jobs.every(job => job.status === "ready"));
+  assert.throws(() => readDispatchTickets(" ".repeat(128 * 1024) + JSON.stringify({ tickets }),
+    ["AC-1"], new Set([guide])), /传输字节上限/);
+});
+
 test("code edits validate every path and anchor before changing a snapshot and emit an applicable patch", async t => {
   const target = await mkdtemp(join(tmpdir(), "souflow-code-edits-"));
   t.after(() => rm(target, { recursive: true, force: true }));
