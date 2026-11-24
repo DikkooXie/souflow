@@ -37,7 +37,7 @@ GitHub 选单可引用同一提交中直接相关的只读源码，例如承接�
 
 补丁接收使用独立的容量上限，先核对 JSON、编辑数、原文锚点和文件范围，再安装依赖。格式或锚点等可修正问题交给同一 Codex 账号纠正一次。工作台审计保存固定错误码、编辑序号和必要的数量，原始回复不入库。隔离检查失败可沿同一授权另重试一次。重试使用新工作区并复核原负责账号、Issue 内容和批准的源码。越权、脱敏字段以及发布回执待核对时暂停。维护者可用 `SOULFLOW_GITHUB_RECOVER_FAILED_ISSUE` 显式恢复一张未进入发布、仅有旧版失败诊断的工单。恢复次数写入原记录，重启不会再次触发。
 
-维护者可用 `SOULFLOW_GITHUB_REVIEW_FIX` 续修一张已经提交的原工单。参数绑定 Issue、PR、当前提交和原批准文件的子集，并给出本次评审要求。souflow 从该提交创建独立工作区，用原账号开发和隔离检查，通过后只快进原 PR 的分支。相同提交只启动一次，发布结果不确定时只回读已有 PR。
+维护者可用 `SOULFLOW_GITHUB_REVIEW_FIX` 续修一张已经提交的原工单。参数绑定 Issue、PR、当前提交、原目标分支和原批准文件的子集，并给出本次评审要求。souflow 从该提交创建独立工作区，用原授权开发和隔离检查，通过后只用原 GitHub 账号快进原 PR 的分支。相同提交只启动一次，发布结果不确定时只回读已有 PR。
 
 采用 Spec Kit 的只读跨文档核对方式，借鉴 OpenSpec 将结构错误作为阻塞条件。用可重复的规则评估版本和结构，用内容复核判断语义，用人来作实质产品决定。在现有规划和审计中接入这些检查，避免引入第二套文档目录或执行流程。[Spec Kit](https://github.com/github/spec-kit/blob/main/templates/commands/analyze.md) · [OpenSpec](https://github.com/Fission-AI/OpenSpec/blob/main/docs/cli.md#validation-commands) · [Anthropic](https://www.anthropic.com/research/demystifying-evals-for-ai-agents) · [OpenAI](https://developers.openai.com/api/docs/guides/evaluation-best-practices)
 

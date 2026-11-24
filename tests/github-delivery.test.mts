@@ -87,7 +87,7 @@ test("续修沿用批准范围和现有 PR，推送响应丢失时只回读", as
   const initialPull: IssuePull = { number: 53, url: "https://github.com/a/b/pull/53", state: "OPEN", head, baseName: "main" };
   const issue: IssueDetail = { number: 47, title: "核对重连", body: "保存重连状态", url: "https://github.com/a/b/issues/47",
     state: "OPEN", assignees: ["member"], pulls: [initialPull] };
-  for (const scenario of ["success", "changed-head", "scope", "interrupted-publish", "changed-base"] as const) {
+  for (const scenario of ["success", "changed-head", "scope", "interrupted-publish", "changed-base", "retargeted-before"] as const) {
     await t.test(scenario, async () => {
       let remotePull = { ...initialPull };
       let stored: Claim = { ...issue, pull: initialPull, target: { branch, head }, requestId: "authorized",
@@ -96,6 +96,7 @@ test("续修沿用批准范围和现有 PR，推送响应丢失时只回读", as
         approval: { flowId: "flow", planId: "plan", version: 1, issueRevision: issueRevision(issue),
           quality: { policy: 1, flowDigest: hash, batchDigest: hash } } };
       if (scenario === "changed-head") remotePull.head = next;
+      if (scenario === "retargeted-before") remotePull.baseName = "other";
       let prepares = 0;
       let pushes = 0;
       const events: string[] = [];
@@ -130,10 +131,11 @@ test("续修沿用批准范围和现有 PR，推送响应丢失时只回读", as
         },
       }, async () => assert.fail(), () => true, 1, new Map(), {
         specs: new Map(), conversation: true, requireQuality: true, pollMs: 60_000,
-        reviewFix: { issue: 47, pull: 53, head, instructions: "仅修评审", files: scenario === "scope" ? ["src/other.mts"] : [...spec.files] },
+        reviewFix: { issue: 47, pull: 53, head, base: "main", instructions: "仅修评审",
+          files: scenario === "scope" ? ["src/other.mts"] : [...spec.files] },
         async prepare(input) {
           prepares++;
-          assert.deepEqual(input.reviewTarget, { branch, head });
+          assert.deepEqual(input.reviewTarget, { branch, head, base: "main" });
           assert.equal(input.flowId, "flow");
           assert.deepEqual(input.spec.files, spec.files);
           return { workspace: "fixture", base: "main", branch, head: next };

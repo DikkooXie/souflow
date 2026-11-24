@@ -166,7 +166,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     const state = c.reviewFix;
     if (state?.state !== "publishing" || !state.pendingHead || pull.head !== state.pendingHead
       || !state.base || pull.baseName !== state.base || pull.number !== c.pull?.number) return;
-    save({ ...c, target: { ...target, head: pull.head }, pull, reviewFix: { ...state, state: "complete" } }, "review-fix-published");
+    save({ ...c, target: { ...target, head: pull.head, base: state.base }, pull, reviewFix: { ...state, state: "complete" } }, "review-fix-published");
   }
   function dispatchReviewFix() {
     const fix = delivery?.reviewFix;
@@ -175,6 +175,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     const target = c?.target;
     const approved = c?.delivery;
     if (c?.phase !== "submitted" || !target || target.head !== fix.head || c.pull?.number !== fix.pull
+      || (target.base && target.base !== fix.base)
       || c.reviewFix?.from === fix.head || !approved?.baseRevision || !qualityBindingCurrent(c.approval?.quality)
       || !fix.files.every(path => approved.files.includes(path)) || !permits(c.claimedBy)) return;
     const connection = memberTrackers.get(c.claimedBy) ?? tracker;
@@ -190,7 +191,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       ]);
       if (account.toLowerCase() !== c.account.toLowerCase() || !stillAssignee(c, issue)
         || !issue.pulls.some(item => item.number === fix.pull) || pull?.state !== "OPEN"
-        || pull.head !== fix.head || !pull.baseName || (c.pull?.baseName && pull.baseName !== c.pull.baseName)) {
+        || pull.head !== fix.head || pull.baseName !== fix.base) {
         throw Error("PR 或原工单授权已变化。");
       }
       return pull.baseName;
@@ -200,7 +201,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
         const base = await verify();
         const prepared = await delivery.prepare({
           number: c.number, spec: { ...approved, files: fix.files, instructions: `只处理本轮评审要求。\n${fix.instructions}` },
-          branch: target.branch, upstream: [], publisher: remote, reviewTarget: target,
+          branch: target.branch, upstream: [], publisher: remote, reviewTarget: { ...target, base: fix.base },
           ...(c.approval ? { flowId: c.approval.flowId, planVersion: c.approval.version } : {}),
           repairing: diagnostic => save(current(), "patch-repair", diagnostic),
         }, sessionId => save({ ...current(), sessionId }, "review-fix-connected"), abort.signal,
@@ -243,7 +244,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       const checkedIssue = await connection.read(c.number);
       if (!stillAssignee(c, checkedIssue) || checkedIssue.pulls.length) throw Error("工单状态已变化。");
       abort.signal.throwIfAborted();
-      const target = { branch, head: prepared.head };
+      const target = { branch, head: prepared.head, base: prepared.base };
       save({ ...current(), target, phase: "publishing" }, "checked");
       const pull = await remote.publish({ ...prepared, branch, issue: c.number, title: `feat(issue): deliver #${c.number}` }, abort.signal);
       save({ ...current(), pull, phase: "submitted" }, "published");

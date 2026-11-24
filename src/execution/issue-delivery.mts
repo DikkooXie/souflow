@@ -15,7 +15,7 @@ import { applyCheckedCodeChanges, codeResultSchema, deliveryPath, maxCodeProposa
 
 const exec = promisify(execFile);
 export type DeliverySpec = { instructions: string; files: string[]; dependsOn: number[]; baseRevision?: string; basePlanPath?: string; sourcePaths?: string[] };
-export type DeliveryTarget = { branch: string; head: string };
+export type DeliveryTarget = { branch: string; head: string; base?: string };
 export type PreparedDelivery = DeliveryTarget & { workspace: string; base: string };
 export type DeliveryFailure = {
   stage: "preflight" | "checkout" | "codex" | "dependencies" | "patch" | "tests" | "commit" | "publish" | "legacy";
@@ -25,7 +25,7 @@ export type DeliveryFailure = {
 export type PrepareIssue = (input: {
   number: number; flowId?: string; planVersion?: number; spec: DeliverySpec; branch: string; upstream: string[]; publisher: IssuePublisher;
   previousFailure?: DeliveryFailure;
-  reviewTarget?: DeliveryTarget;
+  reviewTarget?: DeliveryTarget & { base: string };
   repairing?: (issue: PatchIssue) => void;
 }, connected: (id: string) => void, signal: AbortSignal, assigned?: (account: AccountAssignment) => void) => Promise<PreparedDelivery>;
 
@@ -203,7 +203,7 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
         "commit", "-m", reviewTarget ? `fix(issue): address review feedback for #${number}` : `feat(issue): deliver GitHub issue #${number}`]);
       const head = await git(["rev-parse", "HEAD"]);
       session.finish("completed");
-      return { workspace, base, branch, head };
+      return { workspace, base: reviewTarget?.base ?? base, branch, head };
     } catch (error) {
       session.finish(signal.aborted || error instanceof IssueVerificationUncertain ? "interrupted" : "failed");
       if (signal.aborted || error instanceof IssueVerificationUncertain || error instanceof IssueDeliverySourcesChanged || error instanceof IssueDeliveryFailed) throw error;
