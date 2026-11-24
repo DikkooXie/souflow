@@ -1,8 +1,19 @@
 const deviceStatus = { pending: "待接入", online: "在线", offline: "离线" };
 const statuses = { queued: "等待领取", running: "正在核验", ready: "核验通过", failed: "核验未通过", revoked: "设备已撤销" };
-export const remoteJobStatus = job => job.status === "running" && job.deviceStatus === "offline" ? "等待设备重连" : statuses[job.status];
+export const remoteJobStatus = job => job.status === "running" && job.deviceStatus === "offline" ? "等待重连" : statuses[job.status];
 
 export const remoteProgress = job => `已回传 ${job.receipts.length}/${job.files.length}`;
+
+export function remoteTopologyJobs(jobs, deviceId, animateLink) {
+  return jobs.filter(job => job.deviceId === deviceId && (job.status === "queued" || job.status === "running")).map(job => {
+    const status = job.status === "running" && job.deviceStatus !== "online" ? "interrupted" : job.status;
+    const linkState = status === "queued" || (status === "running" && !animateLink) ? "idle" : status;
+    return {
+      id: job.id, status, linkState, label: remoteJobStatus(job),
+      task: `文件核验 · ${job.receipts.length}/${job.files.length}`,
+    };
+  });
+}
 
 export function createRemoteWorkers(node) {
   const section = document.querySelector("#remote-workers");

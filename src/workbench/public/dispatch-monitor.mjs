@@ -1,6 +1,6 @@
 import { createDispatchLinks } from "./dispatch-links.mjs";
 import { accountLabel, assignmentDetail } from "./account-assignment.mjs";
-import { createRemoteWorkers, remoteJobStatus, remoteProgress } from "./remote-workers.mjs";
+import { createRemoteWorkers, remoteJobStatus, remoteProgress, remoteTopologyJobs } from "./remote-workers.mjs";
 
 const labels = {
   connecting: "连接中", running: "执行中", waiting: "等人回答", queued: "排队中",
@@ -107,6 +107,7 @@ export function createMonitorView(node, selectFlow, onViewChange) {
     const row = node("li", "monitor-session");
     row.dataset.state = job.status;
     row.append(node("strong", "", `${job.deviceName} · ${remoteJobStatus(job)}`),
+      node("p", "monitor-meta", `工单 ${job.id}`),
       node("p", "monitor-meta", `提交 ${job.revision.slice(0, 8)} · ${remoteProgress(job)}`));
     for (const [index, file] of job.files.entries()) {
       const receipt = job.receipts[index];
@@ -180,12 +181,10 @@ export function createMonitorView(node, selectFlow, onViewChange) {
       const expiresAt = (device.lastSeen ?? -Infinity) + remoteActivityMs;
       const communicating = device.status === "online" && expiresAt > at;
       if (communicating) nextExpiry = Math.min(nextExpiry, expiresAt);
+      const animateLink = communicating && foreground && !reducedMotion.matches;
       return {
-        id: device.id, name: device.name, kind: "remote", status: device.status, communicating,
-        animateLink: communicating && foreground && !reducedMotion.matches,
-        active: remoteJobs.filter(job => job.deviceId === device.id && job.status === "running")
-          .map(job => ({ id: job.id, status: device.status === "online" ? "running" : "interrupted",
-            task: `文件核验 · ${job.receipts.length}/${job.files.length}`, label: remoteJobStatus(job) })),
+        id: device.id, name: device.name, kind: "remote", status: device.status, communicating, animateLink,
+        active: remoteTopologyJobs(remoteJobs, device.id, animateLink),
         recent: [],
       };
     });
@@ -228,7 +227,7 @@ export function createMonitorView(node, selectFlow, onViewChange) {
         const task = [session.ticketId, session.task].filter(Boolean).join(" · ");
         const agent = topologyNode(host.kind === "remote" ? "job" : "agent", session.id, title, task,
           host.kind === "remote" ? session.label : `${labels[stage]} · ${accountLabel(session)}`, session.status);
-        const routeState = host.kind === "remote" && session.status === "running" && !running ? "idle" : session.status;
+        const routeState = host.kind === "remote" ? session.linkState : session.status;
         routes.push({ from: device, to: agent, state: routeState });
         agents.append(agent);
       }
