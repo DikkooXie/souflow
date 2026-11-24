@@ -41,3 +41,42 @@ test("修改快照内的活动和历史记录不会改写监视器状态", () =>
   recent.status = "failed";
   assert.equal(monitor.snapshot().hosts[0]?.recent[0]?.status, "completed");
 });
+
+test("远端核验工单按目标设备展示，同一工单保留回执进度并在完成后进入近期概览", async () => {
+  const { remoteJobStatus, remoteTopologyJobs } = await import(
+    new URL("../src/workbench/public/remote-workers.mjs", import.meta.url).href
+  );
+  const target = { id: "device-a", name: "设备 A" };
+  const other = { id: "device-b", name: "设备 B", status: "online" };
+  const files = ["a", "b", "c"].map(name => ({ path: `docs/${name}.md`, sha256: name.repeat(64), bytes: 12 }));
+  const receipts = files.map(({ sha256, bytes }) => ({ sha256, bytes, headings: 1 }));
+  const job = { id: "remote-job", deviceId: target.id, deviceName: target.name, revision: "0".repeat(40), files, queuedAt: 1 };
+  const queued = { ...job, status: "queued" as const, receipts: [] };
+  const claimed = { ...job, status: "running" as const, receipts: [] };
+  const partial = { ...claimed, receipts: receipts.slice(0, 1) };
+  const finished = { ...job, status: "ready" as const, receipts, finishedAt: 2 };
+
+  const waiting = { id: job.id, status: "queued", linkState: "idle", label: "等待领取", task: "文件核验 · 0/3" };
+  const checking = { ...waiting, status: "running", linkState: "running", label: "正在核验" };
+  const received = { ...checking, task: "文件核验 · 1/3" };
+  const reconnecting = { ...received, status: "interrupted", linkState: "interrupted", label: "等待重连" };
+  const pending = { deviceStatus: "pending", current: queued, expected: [waiting] };
+  const offline = { deviceStatus: "offline", current: queued, expected: [waiting] };
+  const progressing = { deviceStatus: "online", current: partial, expected: [received] };
+  const disconnected = { deviceStatus: "offline", current: partial, expected: [reconnecting] };
+  const snapshots = [pending, pending, offline, offline,
+    { deviceStatus: "online", current: claimed, expected: [checking] },
+    progressing, progressing, disconnected, disconnected, progressing,
+    { deviceStatus: "online", current: finished, expected: [] },
+  ];
+
+  for (const [index, { deviceStatus, current, expected }] of snapshots.entries()) {
+    const devices = [{ ...target, status: deviceStatus }, other];
+    const jobs = [{ ...current, deviceStatus }];
+    const topology = devices.map(device => remoteTopologyJobs(jobs, device.id, device.status === "online"));
+    assert.deepEqual(topology, [expected, []], `第 ${index + 1} 份快照的设备 A 和设备 B`);
+  }
+
+  const overview = dispatchOverview([], [finished]);
+  assert.deepEqual(overview.map(item => [item.id, remoteJobStatus(item)]), [[job.id, "核验通过"]]);
+});
