@@ -12,6 +12,11 @@ const clock = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-dig
 const pollMs = 1500;
 // 最近通信覆盖两个调度状态轮询周期，避免一次刷新间隔就让连线停下。
 const remoteActivityMs = 2 * pollMs;
+const codeStages = {
+  offered: "已派发", accepted: "设备已接收", started: "Codex 已开工", tested: "设备测试通过",
+  declined: "设备拒绝", failed: "设备执行失败", interrupted: "已中断，待核对",
+};
+const codeActive = new Set(["offered", "accepted", "started"]);
 const jobKey = item => item.ticketId ? `${item.batchId}/${item.ticketId}` : undefined;
 
 function stageFor(job, session) {
@@ -119,7 +124,7 @@ export function createMonitorView(node, selectFlow, onViewChange) {
 
   function renderDetail() {
     if (!selection || !snapshot) return;
-    const { rows, history, jobs, bySession, remoteJobs } = snapshot;
+    const { rows, history, jobs, bySession, remoteJobs, codeAttempts } = snapshot;
     const key = selection.id;
     const forHost = item => item.hostId === key;
     const forAgent = item => item.session.id === key;
@@ -134,7 +139,9 @@ export function createMonitorView(node, selectFlow, onViewChange) {
       : selectedJob && !filtered.length && !finished.length ? [selectedJob] : [];
     const handoffs = remoteJobs.filter(job => selection.kind === "调度器"
       || (selection.kind === "设备" && job.deviceId === key) || (selection.kind === "工单" && job.id === key));
-    const state = JSON.stringify([selection, filtered, finished, additional, selectedJob, handoffs,
+    const deliveries = codeAttempts.filter(item => selection.kind === "调度器"
+      || (selection.kind === "设备" && item.device === key) || (selection.kind === "工单" && item.id === key));
+    const state = JSON.stringify([selection, filtered, finished, additional, selectedJob, handoffs, deliveries,
       [...filtered, ...finished].map(item => jobs.get(jobKey(item.session)))]);
     if (state === renderedDetail) return;
     renderedDetail = state;
@@ -144,7 +151,16 @@ export function createMonitorView(node, selectFlow, onViewChange) {
     detailMeta.hidden = !detailMeta.textContent;
     const primary = [...filtered, ...(selection.kind === "Agent" || selection.kind === "工单" ? finished : [])];
     active.replaceChildren(...primary.map(({ session, host }) => sessionRow(session, host, jobs.get(jobKey(session)))),
-      ...additional.map(job => sessionRow(job, undefined, job)), ...handoffs.map(remoteRow));
+      ...additional.map(job => sessionRow(job, undefined, job)), ...handoffs.map(remoteRow),
+      ...deliveries.map(item => {
+        const row = node("li", "monitor-session");
+        row.dataset.state = codeActive.has(item.state) ? "running" : item.state === "tested" ? "completed" : "failed";
+        row.append(node("strong", "", `GitHub #${item.issue} · ${codeStages[item.state]}`),
+          node("p", "monitor-meta", `${item.name} · 分配时 ${item.slots} 个执行位，已有 ${item.assignedLoad} 个修改文件的工作量`),
+          node("p", "monitor-meta", `计划 v${item.plan.version} · 提交 ${item.revision.slice(0, 8)} · 上下文 ${item.digest.slice(0, 8)}`));
+        if (item.receipt?.thread) row.append(node("p", "monitor-meta", `Codex 会话 …${item.receipt.thread.slice(-8)}`));
+        return row;
+      }));
     if (!active.children.length) active.append(node("li", "monitor-empty", "目前没有活动会话或待处理工单。"));
     recent.replaceChildren(...finished.map(({ session, host }) => sessionRow(session, host, jobs.get(jobKey(session)))));
     detailHistory.hidden = !finished.length || primary.includes(finished[0]);
@@ -177,35 +193,52 @@ export function createMonitorView(node, selectFlow, onViewChange) {
     remoteWorkers(data.remote);
     const deviceStates = new Map(data.remote?.devices.map(device => [device.id, device.status]));
     const remoteJobs = (data.remote?.jobs ?? []).map(job => ({ ...job, deviceStatus: deviceStates.get(job.deviceId) }));
+    const codeDevices = new Map((data.codeWorkers?.devices ?? []).map(device => [device.id, device]));
+    const primaryDevice = [...codeDevices.values()].find(device => device.local);
+    const primaryHost = primaryDevice && data.hosts.find(host => host.kind === "local");
+    const codeAttempts = data.codeWorkers?.attempts ?? [];
     const remote = (data.remote?.devices ?? []).map(device => {
-      const expiresAt = (device.lastSeen ?? -Infinity) + remoteActivityMs;
-      const communicating = device.status === "online" && expiresAt > at;
+      const code = codeDevices.get(device.id);
+      const status = code ? (code.online ? "online" : "offline") : device.status;
+      const assigned = codeAttempts.filter(item => item.device === device.id);
+      const lastMessage = Math.max(device.lastSeen ?? -Infinity, ...assigned.map(item => item.updatedAt));
+      const expiresAt = lastMessage + remoteActivityMs;
+      const communicating = status === "online" && expiresAt > at;
       if (communicating) nextExpiry = Math.min(nextExpiry, expiresAt);
       const animateLink = communicating && foreground && !reducedMotion.matches;
+      const codeJobs = assigned.filter(item => codeActive.has(item.state)).map(item => ({
+        id: item.id, ticketId: `#${item.issue}`, task: "开发与测试", label: codeStages[item.state],
+        status: status === "online" ? "running" : "waiting",
+        linkState: animateLink && item.updatedAt + remoteActivityMs > at ? "running" : "idle",
+      }));
+      const onHost = primaryDevice?.id === device.id ? primaryHost : undefined;
       return {
-        id: device.id, name: device.name, kind: "remote", status: device.status, communicating, animateLink,
-        active: remoteTopologyJobs(remoteJobs, device.id, animateLink),
+        id: device.id, name: device.name, kind: "remote", status, communicating, animateLink, onHost: !!onHost,
+        active: [...(onHost?.active ?? []), ...remoteTopologyJobs(remoteJobs, device.id, animateLink), ...codeJobs],
         recent: [],
       };
     });
     if (foreground && Number.isFinite(nextExpiry)) activityTimer = setTimeout(() => render(data), nextExpiry - at);
-    const hosts = [...data.hosts, ...remote];
-    const onlineHosts = hosts.filter(host => host.kind === "local" || host.status === "online");
-    const agentCount = data.hosts.reduce((sum, host) => sum + host.active.length, 0);
+    const hosts = [...data.hosts.filter(host => host !== primaryHost), ...remote];
+    const onlineHosts = hosts.filter(host => host.kind === "local" || host.onHost || host.status === "online");
+    const agentCount = data.hosts.reduce((sum, host) => sum + host.active.length, 0) +
+      codeAttempts.filter(item => item.state === "started" && codeDevices.get(item.device)?.online).length;
     const online = `${onlineHosts.length} 台设备在线 · ${agentCount} 个活动 Agent`;
     if (connection.textContent !== online) connection.textContent = online;
     dialog.dataset.connection = "online";
     links.setOnline(true);
-    const key = JSON.stringify([hosts, data.jobs, remoteJobs]);
+    const key = JSON.stringify([hosts, data.jobs, remoteJobs, codeAttempts]);
     if (rendered === key) return;
     rendered = key;
-    const entries = field => data.hosts.flatMap(host => host[field].map(session => ({ session, host: host.name, hostId: host.id ?? host.name })));
+    const entries = field => data.hosts.flatMap(host => host[field].map(session => ({
+      session, host: host.name, hostId: host === primaryHost ? primaryDevice.id : host.id ?? host.name,
+    })));
     const rows = entries("active");
     const history = entries("recent");
     const jobs = new Map(data.jobs.map(job => [jobKey(job), job]));
     const bySession = new Map([...history.toReversed(), ...rows].filter(item => item.session.ticketId)
       .map(item => [jobKey(item.session), item.session]));
-    snapshot = { rows, history, jobs, bySession, remoteJobs };
+    snapshot = { rows, history, jobs, bySession, remoteJobs, codeAttempts };
     const selectedKey = topology.contains(document.activeElement) || work.contains(document.activeElement)
       ? document.activeElement.dataset.nodeKey : undefined;
     const hub = topologyNode("hub", "", "souflow", "任务调度", "", "idle");
@@ -215,19 +248,21 @@ export function createMonitorView(node, selectFlow, onViewChange) {
       const group = node("div", "monitor-machine");
       const remoteStates = { online: host.communicating ? "局域网在线 · 近期收发" : "局域网在线 · 空闲",
         pending: "待接入", offline: "局域网离线" };
-      const state = host.kind === "local" ? "本机" : remoteStates[host.status];
+      const state = host.onHost ? `本机 · 连接器${host.status === "online" ? "在线" : "离线"}`
+        : host.kind === "local" ? "本机" : remoteStates[host.status];
       const device = topologyNode("device", host.id ?? host.name, host.name, "执行设备", state, "idle");
       const agents = node("div", "monitor-agents");
-      const running = host.kind === "remote" ? host.animateLink : host.active.some(session => session.status === "running");
+      const running = host.animateLink || host.active.some(session => !session.linkState && session.status === "running");
       routes.push({ from: hub, to: device, state: running ? "running" : "idle", trunk: true });
       for (const session of host.active) {
-        const title = host.kind === "remote" ? "远端工单"
+        const remoteJob = !!session.linkState;
+        const title = remoteJob ? "设备工单"
           : session.threadId ? `Codex Agent · …${session.threadId.slice(-8)}` : "Codex Agent";
         const stage = stageFor(jobs.get(jobKey(session)), session);
         const task = [session.ticketId, session.task].filter(Boolean).join(" · ");
-        const agent = topologyNode(host.kind === "remote" ? "job" : "agent", session.id, title, task,
-          host.kind === "remote" ? session.label : `${labels[stage]} · ${accountLabel(session)}`, session.status);
-        const routeState = host.kind === "remote" ? session.linkState : session.status;
+        const agent = topologyNode(remoteJob ? "job" : "agent", session.id, title, task,
+          remoteJob ? session.label : `${labels[stage]} · ${accountLabel(session)}`, session.status);
+        const routeState = remoteJob ? session.linkState : session.status;
         routes.push({ from: device, to: agent, state: routeState });
         agents.append(agent);
       }
@@ -238,7 +273,20 @@ export function createMonitorView(node, selectFlow, onViewChange) {
     topology.replaceChildren(hub, machines);
     links.setRoutes(routes);
     const items = data.overview;
-    work.replaceChildren(...items.map(job => {
+    const deliveries = codeAttempts.map(job => {
+      const row = node("li");
+      const title = `GitHub #${job.issue} · ${job.name}`;
+      const button = node("button", "monitor-job");
+      button.type = "button";
+      button.dataset.state = codeActive.has(job.state) ? "running" : job.state === "tested" ? "completed" : "failed";
+      button.dataset.nodeKey = `job/${job.id}`;
+      button.setAttribute("aria-haspopup", "dialog");
+      button.append(node("strong", "", title), node("span", "monitor-badge", codeStages[job.state]));
+      button.addEventListener("click", () => openDetail({ kind: "工单", id: job.id, title }));
+      row.append(button);
+      return row;
+    });
+    work.replaceChildren(...deliveries, ...items.map(job => {
       const row = node("li");
       if (job.deviceId) {
         const title = `文件核验 · ${job.deviceName}`;
@@ -267,7 +315,7 @@ export function createMonitorView(node, selectFlow, onViewChange) {
       row.append(button);
       return row;
     }));
-    if (!items.length) work.append(node("li", "monitor-empty", "暂无已派发工单。"));
+    if (!items.length && !deliveries.length) work.append(node("li", "monitor-empty", "暂无已派发工单。"));
     if (selectedKey) [...dialog.querySelectorAll("[data-node-key]")].find(item => item.dataset.nodeKey === selectedKey)?.focus();
     if (detail.open) renderDetail();
   }

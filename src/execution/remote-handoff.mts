@@ -47,6 +47,13 @@ export function createRemoteHandoff(deviceStore: Store<RemoteDevice>, jobStore: 
   const online = new Map<string, number>();
   const heartbeatAuditedAt = new Map<string, number>();
   const connected = (id: string, at = now()) => at - (online.get(id) ?? -Infinity) <= offlineMs;
+  function authenticate(id: string, authorization: string | undefined) {
+    const device = devices.get(id);
+    const key = authorization?.startsWith("Bearer ") ? authorization.slice(7) : "";
+    if (!device || device.revoked || !keyFormat.test(key)
+      || !timingSafeEqual(Buffer.from(device.keyHash, "hex"), Buffer.from(digest(key), "hex"))) return;
+    return device;
+  }
   function recordJob(job: RemoteJob, action: string, actor?: string,
     communication?: { direction: "to-device" | "from-device"; at: number }) {
     const event: BusinessEvent = { kind: "remote.job", subject: job.id,
@@ -57,6 +64,18 @@ export function createRemoteHandoff(deviceStore: Store<RemoteDevice>, jobStore: 
     return true;
   }
   return {
+    canAuthenticateCodeDevice: (id: string, authorization: string | undefined) => !!authenticate(id, authorization),
+    identifyCodeDevice(id: string, authorization: string | undefined, instance: string) {
+      const device = authenticate(id, authorization);
+      if (!device) return { status: 401 } as const;
+      if (!uuid.test(instance) || (device.instance && device.instance !== instance)) return { status: 409 } as const;
+      if (!device.instance) {
+        const bound = { ...device, instance };
+        if (!deviceStore.save(id, bound)) return { status: 503 } as const;
+        devices.set(id, bound);
+      }
+      return { status: 200, name: device.name } as const;
+    },
     addDevice(name: unknown, actor: string) {
       if (typeof name !== "string" || !/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,39}$/u.test(name)) return { status: 422 } as const;
       const registered = [...devices.values()].filter(item => !item.revoked);
@@ -92,10 +111,8 @@ export function createRemoteHandoff(deviceStore: Store<RemoteDevice>, jobStore: 
       return { status: 201, id: job.id } as const;
     },
     poll(id: string, authorization: string | undefined, input: unknown) {
-      const device = devices.get(id);
-      const key = authorization?.startsWith("Bearer ") ? authorization.slice(7) : "";
-      if (!device || device.revoked || !key || !keyFormat.test(key)
-        || !timingSafeEqual(Buffer.from(device.keyHash, "hex"), Buffer.from(digest(key), "hex"))) return { status: 401 } as const;
+      const device = authenticate(id, authorization);
+      if (!device) return { status: 401 } as const;
       const { instance, update } = object(input);
       if (typeof instance !== "string" || !uuid.test(instance)) return { status: 422 } as const;
       if (device.instance && device.instance !== instance) return { status: 409 } as const;

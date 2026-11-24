@@ -1,0 +1,199 @@
+import { randomUUID } from "node:crypto";
+import type { Checkpoint, RecordBusiness } from "../audit/activity-store.mts";
+import { contentDigest, type CodeOffer, type CodeReceipt, type CodeWork, validCodeWork,
+  workerMessageBytes, workerProtocolVersion, workerWaitMs } from "./code-worker-protocol.mts";
+import { IssueVerificationUncertain } from "./issue-verification.mts";
+
+type State = "offered" | CodeReceipt["phase"];
+export type WorkerAttempt = {
+  id: string; device: string; name: string; instance: string; repo: string; issue: number; revision: string;
+  flowId: string; digest: string; issueRevision: string; state: State; assignedAt: number; updatedAt: number;
+  plan: CodeWork["plan"]; weight: number; slots: number; assignedLoad: number;
+  receipt?: { digest: string; at: number; thread?: string; patch?: string };
+};
+type Device = { id: string; name: string; instance: string; repo: string; slots: number; ready: boolean; local?: boolean };
+type Ready = { device: Device; send: (offer?: CodeOffer) => void };
+type Running = { offer: CodeOffer; settled: (receipt: CodeReceipt) => void; started: (thread: string) => void; interrupt: () => void };
+const unfinished = (state: State) => state === "offered" || state === "accepted" || state === "started";
+
+export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: ReadonlySet<string>, now = Date.now, record?: RecordBusiness) {
+  const attempts = new Map(store.load().map(attempt => [attempt.id, attempt]));
+  const waiters = new Map<string, Ready>();
+  const online = new Map<string, { device: Device; at: number }>();
+  const running = new Map<string, Running>();
+  const wakeups = new Set<() => void>();
+  let closed = false;
+  const changed = () => { for (const wake of wakeups) wake(); };
+
+  function save(attempt: WorkerAttempt, fromDevice = false) {
+    const { id, repo, issue, revision, state, device, digest, assignedLoad, slots, receipt } = attempt;
+    if (!store.save(id, attempt, { kind: "remote.code", subject: id, flowId: attempt.flowId, attemptId: id,
+      details: { action: state, repo, issue, revision, device, digest, assignedLoad, slots, at: now(),
+        issueRevision: attempt.issueRevision, planVersion: attempt.plan.version, batchDigest: attempt.plan.batchDigest,
+        direction: state === "offered" ? "to-device" : fromDevice ? "from-device" : "host",
+        ...(fromDevice && receipt ? { deviceAt: receipt.at, thread: receipt.thread, patch: receipt.patch } : {}) } })) return false;
+    attempts.set(id, attempt);
+    return true;
+  }
+
+  for (const entry of attempts.values()) {
+    if (unfinished(entry.state) && !save({ ...entry, state: "interrupted", updatedAt: now() })) {
+      throw Error("无法恢复双机代码派发记录。");
+    }
+  }
+
+  function capacity(device: Pick<Device, "id">) {
+    const assigned = [...attempts.values()].filter(row => row.device === device.id && unfinished(row.state));
+    return { load: assigned.reduce((sum, row) => sum + row.weight, 0), count: assigned.length };
+  }
+
+  async function wait(signal: AbortSignal) {
+    if (signal.aborted || closed) return;
+    await new Promise<void>(resolve => {
+      const wake = () => {
+        wakeups.delete(wake);
+        signal.removeEventListener("abort", wake);
+        resolve();
+      };
+      wakeups.add(wake);
+      signal.addEventListener("abort", wake, { once: true });
+    });
+  }
+
+  return {
+    permits: (id: string) => allowed.has(id),
+    async poll(device: Device, signal: AbortSignal) {
+      if (!allowed.has(device.id) || closed || signal.aborted) return { status: 403 } as const;
+      if (waiters.has(device.id)) return { status: 409 } as const;
+      const at = now();
+      const previous = online.get(device.id);
+      online.set(device.id, { device, at });
+      if (!previous || at - previous.at > workerWaitMs * 2) record?.({
+        kind: "remote.code", subject: device.id, details: {
+          action: previous ? "reconnected" : "connected", direction: "from-device", device: device.id, repo: device.repo, slots: device.slots,
+        },
+      });
+      const offered = [...attempts.values()].find(row => row.device === device.id && row.instance === device.instance
+        && row.repo === device.repo && row.state === "offered");
+      const replay = offered && running.get(offered.id);
+      if (replay && device.ready) return { status: 200, offer: replay.offer } as const;
+      const offer = await new Promise<CodeOffer | undefined>(resolve => {
+        const settle = (offer?: CodeOffer) => {
+          clearTimeout(timer);
+          signal.removeEventListener("abort", abort);
+          waiters.delete(device.id);
+          resolve(offer);
+        };
+        const abort = () => settle();
+        const timer = setTimeout(abort, workerWaitMs);
+        signal.addEventListener("abort", abort, { once: true });
+        waiters.set(device.id, { device, send: settle });
+        changed();
+      });
+      return { status: 200, offer: offer ?? null } as const;
+    },
+    receipt(device: { id: string; instance: string }, receipt: CodeReceipt) {
+      const attempt = attempts.get(receipt.id);
+      if (!allowed.has(device.id) || !attempt || attempt.device !== device.id ||
+          attempt.instance !== device.instance || attempt.digest !== receipt.digest) return 409;
+      if (attempt.state === "interrupted" || (!unfinished(attempt.state) && receipt.phase === "interrupted")
+          || (unfinished(attempt.state) && !running.has(attempt.id))) return 410;
+      const digest = contentDigest(JSON.stringify(receipt));
+      const active = running.get(attempt.id);
+      if (attempt.receipt?.digest === digest) {
+        if (receipt.phase === "started") active?.started(receipt.thread);
+        return 200;
+      }
+      const permitted = attempt.state === "offered" ? ["accepted", "declined", "interrupted"]
+        : attempt.state === "accepted" ? ["started", "declined", "failed", "interrupted"]
+          : attempt.state === "started" ? ["tested", "failed", "interrupted"] : [];
+      if (!permitted.includes(receipt.phase) || (attempt.receipt && receipt.at < attempt.receipt.at)) return 409;
+      if (!save({ ...attempt, state: receipt.phase, updatedAt: now(), receipt: { digest, at: receipt.at,
+        ...("thread" in receipt ? { thread: receipt.thread } : attempt.receipt?.thread
+          ? { thread: attempt.receipt.thread } : {}),
+        ...("patch" in receipt ? { patch: receipt.patch } : {}) } }, true)) return 503;
+      const current = online.get(device.id);
+      if (current) current.at = now();
+      if (receipt.phase === "started") active?.started(receipt.thread);
+      if (!unfinished(receipt.phase)) active?.settled(receipt);
+      changed();
+      return 200;
+    },
+    async execute(work: CodeWork, signal: AbortSignal, timeoutMs: number, started: (thread: string) => void,
+      revalidate: (signal: AbortSignal) => Promise<void>) {
+      if (!validCodeWork(work)) throw Error("已批准的远端工单上下文无效。");
+      const deadline = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
+      const weight = work.files.length;
+      const pickTarget = () => [...waiters.values()]
+          .filter(entry => entry.device.ready && entry.device.repo === work.repo.toLowerCase())
+          .map(entry => ({ ...entry, ...capacity(entry.device) }))
+          .filter(entry => entry.count < entry.device.slots)
+          .sort((a, b) => (a.load + weight) / a.device.slots - (b.load + weight) / b.device.slots
+            || a.count - b.count || a.device.id.localeCompare(b.device.id))[0];
+      // 等待设备可能跨过 Issue 改派或正文修改。只在准备发出时回读，再用最新连接分配。
+      while (!deadline.aborted && !closed) {
+        if (!pickTarget()) {
+          await wait(deadline);
+          continue;
+        }
+        await revalidate(deadline);
+        if (deadline.aborted || closed) break;
+        const target = pickTarget();
+        if (!target) continue;
+        const { device } = target;
+        const id = randomUUID();
+        const digest = contentDigest(JSON.stringify(work));
+        const offer = { id, digest, version: workerProtocolVersion, work };
+        if (Buffer.byteLength(JSON.stringify({ offer })) > workerMessageBytes) throw Error("工单上下文超过设备接收上限。");
+        const assignedAt = now();
+        if (!save({ id, device: device.id, name: device.name, instance: device.instance, repo: work.repo, issue: work.issue,
+          revision: work.revision, digest, issueRevision: work.issueRevision,
+          flowId: work.plan.flowId, state: "offered", assignedAt, updatedAt: assignedAt,
+          plan: work.plan, slots: device.slots, assignedLoad: target.load, weight })) throw Error("无法保存设备派发记录。");
+        const result = await new Promise<CodeReceipt | undefined>(resolve => {
+          const settle = (receipt?: CodeReceipt) => {
+            deadline.removeEventListener("abort", interrupted);
+            running.delete(id);
+            resolve(receipt);
+          };
+          const interrupted = () => {
+            const current = attempts.get(id);
+            if (current && unfinished(current.state)) save({ ...current, state: "interrupted", updatedAt: now() });
+            settle();
+          };
+          running.set(id, { offer, settled: settle, started, interrupt: interrupted });
+          deadline.addEventListener("abort", interrupted, { once: true });
+          target.send(offer);
+        });
+        if (!result || result.phase === "interrupted") throw new IssueVerificationUncertain("needs-reconciliation");
+        return result;
+      }
+      throw new IssueVerificationUncertain("interrupted");
+    },
+    snapshot() {
+      const at = now();
+      return {
+        devices: [...online.values()].map(({ device: { instance: _instance, ...device }, at: seen }) => ({
+          ...device, ...capacity(device), lastSeen: seen, online: at - seen <= workerWaitMs * 2,
+        })),
+        attempts: [...attempts.values()].slice(-32).map(({ instance: _instance, ...attempt }) => attempt),
+      };
+    },
+    disconnect(id: string) {
+      waiters.get(id)?.send();
+      online.delete(id);
+      for (const [attempt, active] of running) {
+        if (attempts.get(attempt)?.device === id) active.interrupt();
+      }
+      changed();
+    },
+    close() {
+      closed = true;
+      for (const entry of waiters.values()) entry.send();
+      for (const active of running.values()) active.interrupt();
+      changed();
+    },
+  };
+}
+
+export type CodeWorkerPool = ReturnType<typeof createCodeWorkerPool>;

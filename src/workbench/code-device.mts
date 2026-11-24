@@ -1,0 +1,232 @@
+import { execFile } from "node:child_process";
+import { randomUUID, X509Certificate } from "node:crypto";
+import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { request } from "node:https";
+import { join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
+import { promisify } from "node:util";
+import { openActivityStore } from "../audit/activity-store.mts";
+import { startCodexReadOnlyTask } from "../execution/codex-command-attempt.mts";
+import { contentDigest, readCodeOffer, readWorkerCapacity, workerDigest, workerId, workerMessageBytes,
+  workerProtocolVersion, workerWaitMs, type CodeOffer, type CodeReceipt } from "../execution/code-worker-protocol.mts";
+import { isolatedIssueCheck } from "../execution/issue-delivery.mts";
+import { applyCheckedCodeChanges, codeResultSchema, maxCodeProposalBytes, maxEdits, prepareCodeProposal,
+  readEditableFile } from "../execution/local-code-changes.mts";
+import { lockWorkbench } from "./recovery.mts";
+
+const exec = promisify(execFile);
+const retryMs = 1500;
+type ReceiptContent = CodeReceipt extends infer Receipt ? Receipt extends CodeReceipt ? Omit<Receipt, "id" | "digest" | "at"> : never : never;
+type Pending = Pick<CodeOffer, "id" | "digest">;
+type Journal = { instance: string; pending: Pending[] };
+
+function connector(endpoint: URL, config: { id: string; key: string; certificate: string }) {
+  return (path: "wait" | "receipt", value: object, signal: AbortSignal) => new Promise<{
+    status: number; offer?: unknown;
+  }>((fulfill, reject) => {
+    const payload = JSON.stringify(value);
+    if (Buffer.byteLength(payload) > workerMessageBytes) { reject(Error("设备消息超过上限。")); return; }
+    const req = request(new URL(`/v1/code-workers/${config.id}/${path}`, endpoint), {
+      method: "POST", ca: config.certificate, signal, timeout: workerWaitMs + 5000,
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload), Authorization: `Bearer ${config.key}` },
+    }, response => {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      response.on("data", (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > workerMessageBytes) req.destroy();
+        else chunks.push(chunk);
+      });
+      response.on("error", reject);
+      response.on("end", () => {
+        try {
+          const status = response.statusCode ?? 503;
+          const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+          fulfill({ status, offer: body?.offer });
+        } catch (error) { reject(error); }
+      });
+    });
+    req.on("timeout", () => req.destroy(Error("连接超时。")));
+    req.on("error", reject);
+    req.end(payload);
+  });
+}
+
+async function doWork(offer: CodeOffer, root: string, image: string, timeoutMs: number, signal: AbortSignal,
+  publish: (receipt: ReceiptContent) => Promise<void>) {
+  const work = offer.work;
+  const target = await mkdtemp(join(root, "issue-"));
+  const workspace = join(target, "source");
+  const model = process.env.SOULFLOW_CODEX_EXECUTION_MODEL?.trim();
+  const git = async (...args: string[]) => (await exec("git", ["-C", workspace, "-c", "core.hooksPath=/dev/null",
+    "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential", ...args], {
+    signal, timeout: timeoutMs, env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+  })).stdout.trim();
+  try {
+    await mkdir(workspace, { mode: 0o700 });
+    await git("init", "--quiet");
+    await git("fetch", "--no-tags", "--no-recurse-submodules", "--depth=1", `https://github.com/${work.repo}.git`, work.revision);
+    await git("switch", "--detach", "FETCH_HEAD");
+    if (await git("rev-parse", "HEAD") !== work.revision) throw Error("设备签出的提交与工单不同。");
+    const sources = new Map(await Promise.all(work.files.map(async ({ path, sha256 }) => {
+      const source = await readEditableFile(workspace, path);
+      if (contentDigest(source.content) !== sha256) throw Error("设备签出的文件与工单不同。");
+      return [path, source] as const;
+    })));
+    let output: string | undefined;
+    let started: Promise<void> | undefined;
+    const checked = await prepareCodeProposal(target, sources, async issue => {
+      signal.throwIfAborted();
+      const attempt = startCodexReadOnlyTask({
+        workspace, ...(model ? { model } : {}), localLoginOnly: true, disableWebSearch: true,
+        outputMaxBytes: maxCodeProposalBytes, outputSchema: codeResultSchema, untrustedContext: work.context,
+        onEvent() {},
+        onThread(thread) {
+          if (!started) {
+            started = publish({ phase: "started", thread });
+            void started.catch(() => attempt.close());
+          }
+        },
+        prompt: [
+          "按已批准工单生成代码替换。只有 editableFiles 可以修改，readOnlySources 仅供参考。",
+          `只返回 JSON，含 report 和 1 至 ${maxEdits} 项 edits。每项只包含 path、before、after。before 使用当前唯一的短原文，按顺序应用，不要声称已运行测试。`,
+          ...(issue ? [`上一份补丁未应用，机器诊断：${JSON.stringify(issue)}。请重新生成完整补丁。`] : []),
+          work.instructions,
+        ].join("\n\n"),
+      });
+      const stop = () => attempt.close();
+      signal.addEventListener("abort", stop, { once: true });
+      if (signal.aborted) stop();
+      try {
+        if (await attempt.finished !== "completed") throw Error("设备上的 Codex 未完成。");
+        if (!started) throw Error("没有收到 Codex 会话确认。");
+        await started;
+        output = attempt.output();
+        return output;
+      } finally { signal.removeEventListener("abort", stop); }
+    });
+    await isolatedIssueCheck(workspace, image, timeoutMs, signal, true);
+    await applyCheckedCodeChanges(target, workspace, sources, checked);
+    await isolatedIssueCheck(workspace, image, timeoutMs, signal, false);
+    if (output === undefined) throw Error("设备未生成补丁。");
+    return { phase: "tested", output, patch: contentDigest(JSON.stringify(checked.changes)) } as const;
+  } finally {
+    await rm(target, { recursive: true, force: true });
+  }
+}
+
+async function main() {
+  if (process.argv.length !== 3) throw Error("请传入工作台下载的代码设备接入 JSON 文件。");
+  const configPath = process.argv[2];
+  if (!configPath) throw Error("设备接入文件路径为空。");
+  const file = resolve(configPath);
+  const config = JSON.parse(await readFile(file, "utf8"));
+  const endpoint = new URL(config.endpoint);
+  if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || endpoint.pathname !== "/" ||
+      endpoint.search || endpoint.hash || !workerId.test(config.id) || !workerDigest.test(config.key)) throw Error("设备接入文件无效。");
+  const certificate = new X509Certificate(config.certificate).toString();
+  await chmod(file, 0o600);
+  const repo = process.env.SOULFLOW_CODE_WORKER_REPO?.trim();
+  const image = process.env.SOULFLOW_GITHUB_CHECK_IMAGE?.trim();
+  const slots = Number(process.env.SOULFLOW_CODE_WORKER_SLOTS ?? 1);
+  const timeoutMs = Number(process.env.SOULFLOW_GITHUB_DELIVERY_TIMEOUT_MS ?? 300_000);
+  const capacity = readWorkerCapacity({ version: workerProtocolVersion, instance: randomUUID(), repo, slots, ready: true });
+  if (!capacity || !image || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 3_600_000) {
+    throw Error("设备需配置仓库、隔离检查镜像及有效并发设置。");
+  }
+  const checkImage = image;
+  const root = resolve(process.env.SOULFLOW_CODE_WORKER_ROOT ?? ".souflow/code-device");
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  const database = join(root, `${config.id}.sqlite`);
+  const closeLock = lockWorkbench(database);
+  const stop = new AbortController();
+  const halt = () => stop.abort();
+  process.once("SIGTERM", halt);
+  process.once("SIGINT", halt);
+  try {
+    const store = openActivityStore(database);
+    try {
+      const checkpoint = store.checkpoint<Journal>("worker");
+      const state = checkpoint.load()[0] ?? { instance: capacity.instance, pending: [] };
+      const save = () => {
+        if (!checkpoint.save("journal", state)) throw Error("设备无法写入回执状态。");
+      };
+      save();
+      const send = connector(endpoint, { id: config.id, key: config.key, certificate });
+      const publish = async (job: Pending, detail: ReceiptContent) => {
+        const receipt = { id: job.id, digest: job.digest, at: Date.now(), ...detail };
+        while (!stop.signal.aborted) {
+          const result = await send("receipt", { instance: state.instance, receipt }, stop.signal).catch(() => undefined);
+          if (result?.status === 200) return;
+          if (result?.status === 410) throw Error("设备工单已中断。");
+          if (result && result.status < 500) throw Error("工作台拒绝设备回执。");
+          await sleep(retryMs, undefined, { signal: stop.signal });
+        }
+        stop.signal.throwIfAborted();
+      };
+      const remove = (id: string) => { state.pending = state.pending.filter(job => job.id !== id); save(); };
+      // 进程重启后把遗留尝试交回主机核对。重新连接期间同一进程继续报告原任务。
+      for (const job of [...state.pending]) {
+        await publish(job, { phase: "interrupted" }).catch(error => {
+          if (error.message !== "设备工单已中断。") throw error;
+        });
+        remove(job.id);
+      }
+      const active = new Map<string, Promise<void>>();
+      async function run(offer: CodeOffer) {
+        let completed: ReceiptContent;
+        await publish(offer, { phase: "accepted" });
+        process.stdout.write(`已收到 GitHub #${offer.work.issue}。\n`);
+        try {
+          const deadline = AbortSignal.any([stop.signal, AbortSignal.timeout(timeoutMs)]);
+          completed = await doWork(offer, root, checkImage, timeoutMs, deadline, detail => publish(offer, detail));
+        } catch {
+          stop.signal.throwIfAborted();
+          completed = { phase: "failed" };
+        }
+        await publish(offer, completed);
+        process.stdout.write(`GitHub #${offer.work.issue} ${completed.phase === "tested" ? "本机检查已通过，结果已回传" : "未完成，已回报主机"}。\n`);
+      }
+      let connected = false;
+      try {
+        while (!stop.signal.aborted) {
+          const ready = active.size < slots;
+          const wait = new AbortController();
+          const polling = send("wait", { ...capacity, version: workerProtocolVersion, instance: state.instance, ready },
+            AbortSignal.any([stop.signal, wait.signal])).catch(() => undefined);
+          const result = ready ? await polling : await Promise.race([polling, ...active.values()]);
+          if (!ready && !result) { wait.abort(); if (!stop.signal.aborted) await sleep(retryMs, undefined, { signal: stop.signal }); continue; }
+          if (!result || result.status >= 500 || result.status === 409) {
+            connected = false;
+            await sleep(retryMs, undefined, { signal: stop.signal });
+            continue;
+          }
+          if (result.status !== 200) throw Error("工作台拒绝代码设备接入。");
+          if (!connected) process.stdout.write("已连到 souflow，等待调度器派单。\n");
+          connected = true;
+          if (result.offer === null) continue;
+          const offer = readCodeOffer(result.offer);
+          if (!offer || offer.work.repo.toLowerCase() !== capacity.repo) throw Error("设备收到无效或仓库不匹配的工单。");
+          if (active.has(offer.id)) { await sleep(retryMs, undefined, { signal: stop.signal }); continue; }
+          state.pending.push({ id: offer.id, digest: offer.digest });
+          save();
+          const task = run(offer).then(() => remove(offer.id)).catch(error => {
+            if (error.message === "设备工单已中断。") remove(offer.id);
+            else if (!stop.signal.aborted) { process.exitCode = 1; halt(); }
+          }).finally(() => { active.delete(offer.id); });
+          active.set(offer.id, task);
+        }
+      } finally {
+        halt();
+        await Promise.allSettled(active.values());
+      }
+    } finally { store.close(); }
+  } catch (error) {
+    if (!stop.signal.aborted || !(error instanceof Error) || error.name !== "AbortError") throw error;
+  } finally { closeLock(); }
+}
+
+main().catch(() => {
+  process.stderr.write("代码设备未能继续。请检查接入文件、工作台许可和本机配置。\n");
+  process.exitCode = 1;
+});
