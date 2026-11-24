@@ -13,7 +13,6 @@ import { readApprovedReviewFix } from "./approved-review-fix.mts";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
 import { hostname } from "node:os";
-import { isIPv4 } from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultAuditThresholds, openActivityStore, readActivity, scrubAuditText } from "../audit/activity-store.mts";
@@ -21,7 +20,7 @@ import { defaultAnswerMaxLength, maxQuestionsPerDecision } from "../decisions/qu
 import { codeReviewOptions, createLocalDispatch, type Run } from "../execution/local-dispatch.mts";
 import { createDispatchMonitor, dispatchOverview } from "../execution/dispatch-monitor.mts";
 import { createRemoteHandoff, type RemoteDevice, type RemoteJob } from "../execution/remote-handoff.mts";
-import { createRemoteWorkerIngress, readRemoteFiles, type RemoteLanConfig } from "./remote-worker-ingress.mts";
+import { createRemoteWorkerIngress, readRemoteFiles, remoteWorkerNetwork, type RemoteLanConfig } from "./remote-worker-ingress.mts";
 import { createCodexAccountDispatch, readCodexProfiles, type CodexAccountDispatch } from "../execution/codex-account-dispatch.mts";
 import { createConversationFlows, currentDevelopmentPlan, maxArtifactTextLength, phases, readPlanRevision, type StoredFlow } from "../planning/conversation-flow.mts";
 import { createProjectContextReader, snapshotIssueCandidates, type ProjectSettings } from "../planning/project-context.mts";
@@ -583,9 +582,13 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     offlineMs: integerSetting("SOULFLOW_LAN_OFFLINE_MS", 8000, 1500, 300_000),
     cert: await readFile(lanCert, "utf8"), key: await readFile(lanKey, "utf8"),
   } : undefined;
-  if ((lanHost || lanCert || lanKey) && (!remoteLan || !isIPv4(lanHost ?? "")
-    || !/^(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.|127\.0\.0\.1$)/.test(lanHost ?? ""))) {
-    throw Error("设备接入需配置本机私网地址、TLS 证书和私钥路径。");
+  if (lanHost || lanCert || lanKey) {
+    if (!remoteLan) throw Error("设备接入需同时配置监听地址、TLS 证书和私钥路径。");
+    const network = await remoteWorkerNetwork(remoteLan.host);
+    if (!network) throw Error("设备接口仅接受局域网、本机回环或 tailscale ip -4 确认的本机 Tailscale IPv4。");
+    if (network === "tailscale" && !new X509Certificate(remoteLan.cert).checkIP(remoteLan.host)) {
+      throw Error("设备 TLS 证书的 IP SAN 必须包含本机 Tailscale IPv4。");
+    }
   }
   const implementer = process.env.SOULFLOW_MEMBER_IMPLEMENTER_KEY;
   const reviewer = process.env.SOULFLOW_MEMBER_REVIEWER_KEY;

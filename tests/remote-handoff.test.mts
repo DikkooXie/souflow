@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { defaultAuditThresholds, openActivityStore, type BusinessEvent, type Checkpoint } from "../src/audit/activity-store.mts";
 import { createRemoteHandoff, type RemoteDevice, type RemoteJob } from "../src/execution/remote-handoff.mts";
-import { readRemoteFiles } from "../src/workbench/remote-worker-ingress.mts";
+import { readRemoteFiles, remoteWorkerNetwork } from "../src/workbench/remote-worker-ingress.mts";
 
 function checkpoint<T extends object>(events: BusinessEvent[]): Checkpoint<T> {
   const saved = new Map<string, T>();
@@ -28,6 +29,58 @@ const sha256 = createHash("sha256").update(text).digest("hex");
 const bytes = Buffer.byteLength(text);
 const files = ["docs/one.md", "docs/two.md"].map(path => ({ path, text, sha256, bytes }));
 const receipt = { sha256, bytes, headings: 1 };
+
+test("局域网继续可用，共享地址仅接受本机 Tailscale IPv4", async () => {
+  let queries = 0;
+  const readAddress = async () => {
+    queries++;
+    return "100.82.12.34";
+  };
+
+  for (const host of ["127.0.0.1", "10.0.0.1", "172.31.0.1", "192.168.0.1"]) {
+    assert.equal(await remoteWorkerNetwork(host, readAddress), "lan", host);
+  }
+  for (const host of ["0.0.0.0", "::", "100.63.255.255", "100.128.0.0", "172.32.0.1", "192.168.0.256", "localhost", "8.8.8.8"]) {
+    assert.equal(await remoteWorkerNetwork(host, readAddress), undefined, host);
+  }
+  assert.equal(queries, 0);
+
+  assert.equal(await remoteWorkerNetwork("100.82.12.34", readAddress), "tailscale");
+  assert.equal(await remoteWorkerNetwork("100.82.12.35", readAddress), undefined);
+  for (const host of ["100.64.0.1", "100.127.255.254"]) {
+    assert.equal(await remoteWorkerNetwork(host, async () => host), "tailscale", host);
+  }
+  assert.equal(await remoteWorkerNetwork("100.82.12.34", async () => { throw Error("Tailscale 未启动"); }), undefined);
+});
+
+test("工作台启动拒绝其他共享地址及与本机地址不符的证书", { skip: process.platform === "win32" }, async t => {
+  const openssl = spawnSync("openssl", ["version"]);
+  if ((openssl.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
+    t.skip("生成一次性测试证书需要 OpenSSL");
+    return;
+  }
+  assert.ifError(openssl.error);
+  assert.equal(openssl.status, 0);
+  const dir = await mkdtemp(join(tmpdir(), "souflow-tailscale-config-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  // 用不同的 IP SAN 验证启动入口确实检查证书，测试后删除一次性密钥。
+  execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "worker-key.pem",
+    "-out", "worker-cert.pem", "-days", "1", "-subj", "/CN=souflow-test", "-addext", "subjectAltName=IP:127.0.0.1"],
+  { cwd: dir, stdio: "ignore", timeout: 5000 });
+  await writeFile(join(dir, "tailscale"), "#!/bin/sh\n[ \"$*\" = 'ip -4' ] || exit 1\nprintf '%s\\n' 100.82.12.34\n", { mode: 0o700 });
+  const entry = fileURLToPath(new URL("../src/workbench/demo-server.mts", import.meta.url));
+  for (const [host, failure] of [["100.82.12.35", /确认的本机 Tailscale IPv4/], ["100.82.12.34", /IP SAN 必须包含本机 Tailscale IPv4/]] as const) {
+    const result = spawnSync(process.execPath, ["--experimental-strip-types", entry, "--codex"], {
+      cwd: dir, timeout: 5000, encoding: "utf8",
+      env: { PATH: dir, SOULFLOW_DEMO_PORT: "0", SOULFLOW_LAN_BIND: host, SOULFLOW_LAN_PORT: "0",
+        SOULFLOW_LAN_CERT_FILE: "worker-cert.pem", SOULFLOW_LAN_KEY_FILE: "worker-key.pem" },
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 1, host);
+    assert.match(result.stderr, failure);
+    assert.doesNotMatch(result.stdout, /决策收件箱/);
+  }
+});
 
 test("只允许绑定设备领取，重启及断线后继续同一工单，重复回执只写一次", () => {
   const events: BusinessEvent[] = [];
