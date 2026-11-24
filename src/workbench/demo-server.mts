@@ -21,6 +21,7 @@ import { codeReviewOptions, createLocalDispatch, type Run } from "../execution/l
 import { createDispatchMonitor, dispatchOverview } from "../execution/dispatch-monitor.mts";
 import { createRemoteHandoff, type RemoteDevice, type RemoteJob } from "../execution/remote-handoff.mts";
 import { createCodeWorkerPool, type WorkerAttempt } from "../execution/code-worker-pool.mts";
+import { loadLocalEnv, readCodeWorkerConfig, runtimeInteger } from "../config/runtime.mts";
 import { workerId } from "../execution/code-worker-protocol.mts";
 import { createRemoteWorkerIngress, readRemoteFiles, remoteWorkerNetwork, type RemoteLanConfig } from "./remote-worker-ingress.mts";
 import { createCodexAccountDispatch, readCodexProfiles, type CodexAccountDispatch } from "../execution/codex-account-dispatch.mts";
@@ -130,7 +131,8 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       if (!recovery) throw Error("局域网设备接入需要持久化的 Codex 工作台。");
       const handoff = createRemoteHandoff(audit.checkpoint<RemoteDevice>("remote-devices"),
         audit.checkpoint<RemoteJob>("remote-jobs"), remoteLan.offlineMs);
-      const code = codeDevices?.size ? createCodeWorkerPool(audit.checkpoint<WorkerAttempt>("remote-code"), codeDevices, Date.now, audit.record) : undefined;
+      const code = codeDevices?.size ? createCodeWorkerPool(audit.checkpoint<WorkerAttempt>("remote-code"),
+        codeDevices, readCodeWorkerConfig(), Date.now, audit.record) : undefined;
       return { handoff, code, ingress: createRemoteWorkerIngress(handoff, remoteLan, code), cert: new X509Certificate(remoteLan.cert).toString() };
     } catch (error) {
       closeStore();
@@ -551,13 +553,7 @@ function stringMapSetting(name: string): Record<string, string> {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try {
-    process.loadEnvFile();
-  } catch (error) {
-    if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
-      throw new Error("无法读取本地 .env。");
-    }
-  }
+  loadLocalEnv();
   const port = integerSetting("SOULFLOW_DEMO_PORT", 4173, 0, 65_535);
   const live = process.argv.includes("--codex");
   const auditPath = process.env.SOULFLOW_AUDIT_DB || resolve(".souflow", live ? "codex-audit.sqlite" : "demo-audit.sqlite");
@@ -634,9 +630,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     ...(recoverFailedIssue === undefined ? {} : { recoverFailedIssue }),
     ...(reviewFix === undefined ? {} : { reviewFix: readApprovedReviewFix(reviewFix) }),
     pollMs: integerSetting("SOULFLOW_GITHUB_POLL_MS", 20_000, 5000, 3_600_000),
-    timeoutMs: integerSetting("SOULFLOW_GITHUB_DELIVERY_TIMEOUT_MS", 300_000, 1000, 3_600_000),
+    timeoutMs: runtimeInteger("SOULFLOW_GITHUB_DELIVERY_TIMEOUT_MS", 1000, 3_600_000),
   } : undefined;
-  const deviceIds = process.env.SOULFLOW_CODE_DEVICE_IDS?.trim().split(",").map(id => id.trim()) ?? [];
+  const deviceIds = process.env.SOULFLOW_CODE_DEVICE_IDS?.trim().split(",").map(id => id.trim()).filter(Boolean) ?? [];
   if (deviceIds.some(id => !workerId.test(id))) throw Error("代码设备配置必须使用已登记的设备 ID。");
   // 成员凭据只用于工作台登录，子进程沿用清理后的环境。
   delete process.env.SOULFLOW_MEMBER_IMPLEMENTER_KEY;

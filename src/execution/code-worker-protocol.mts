@@ -1,10 +1,8 @@
 import { createHash } from "node:crypto";
+import { type CodeWorkerConfig, readCodeWorkerConfig } from "../config/runtime.mts";
 import { deliveryPath, maxCodeProposalBytes } from "./local-code-changes.mts";
 
 export const workerProtocolVersion = 1;
-export const workerWaitMs = 20_000;
-export const workerMaxSlots = 6;
-export const workerMessageBytes = 2 * 1024 * 1024;
 export const workerId = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 export const workerCommit = /^[a-f0-9]{40}$/;
 export const workerDigest = /^[a-f0-9]{64}$/;
@@ -38,23 +36,23 @@ const matches = (value: unknown, format: RegExp): value is string => typeof valu
 const positive = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 const repoPattern = /^[a-z\d][a-z\d-]{0,38}\/[a-z\d_.-]{1,100}$/i;
 
-export function readWorkerCapacity(input: unknown) {
+export function readWorkerCapacity(input: unknown, maxSlots: number) {
   const value = object(input);
   if (!value || value.version !== workerProtocolVersion || !matches(value.instance, workerId)
-      || !matches(value.repo, repoPattern) || !positive(value.slots) || value.slots > workerMaxSlots || typeof value.ready !== "boolean") return;
+      || !matches(value.repo, repoPattern) || !positive(value.slots) || value.slots > maxSlots || typeof value.ready !== "boolean") return;
   return { instance: value.instance, repo: value.repo.toLowerCase(), slots: value.slots, ready: value.ready };
 }
 
-export function validCodeWork(input: unknown): input is CodeWork {
+export function validCodeWork(input: unknown, config: CodeWorkerConfig): input is CodeWork {
   const work = object(input);
   const plan = object(work?.plan);
   if (!work || !plan || !matches(work.repo, repoPattern) || !positive(work.issue) || !matches(work.issueRevision, workerDigest)
       || !matches(work.revision, workerCommit) || !matches(plan.flowId, workerId) || !positive(plan.version)
       || !matches(plan.flowDigest, workerDigest) || !matches(plan.batchDigest, workerDigest)
-      || !Array.isArray(work.upstream) || work.upstream.length > 24 || !work.upstream.every(item => matches(item, workerCommit))
-      || !Array.isArray(work.files) || !work.files.length || work.files.length > 16
-      || typeof work.instructions !== "string" || !work.instructions.trim() || work.instructions.length > 12_000
-      || typeof work.context !== "string" || Buffer.byteLength(work.context) > 896 * 1024) return false;
+      || !Array.isArray(work.upstream) || work.upstream.length > config.maxUpstream || !work.upstream.every(item => matches(item, workerCommit))
+      || !Array.isArray(work.files) || !work.files.length || work.files.length > config.maxFiles
+      || typeof work.instructions !== "string" || !work.instructions.trim() || work.instructions.length > config.maxInstructions
+      || typeof work.context !== "string" || Buffer.byteLength(work.context) > config.maxContextBytes) return false;
   const paths = new Set<string>();
   for (const inputFile of work.files) {
     const file = object(inputFile);
@@ -64,10 +62,10 @@ export function validCodeWork(input: unknown): input is CodeWork {
   return true;
 }
 
-export function readCodeOffer(input: unknown): CodeOffer | undefined {
+export function readCodeOffer(input: unknown, config = readCodeWorkerConfig()): CodeOffer | undefined {
   const offer = object(input);
   if (!offer || offer.version !== workerProtocolVersion || !matches(offer.id, workerId) || !matches(offer.digest, workerDigest)
-      || !validCodeWork(offer.work) || contentDigest(JSON.stringify(offer.work)) !== offer.digest) return;
+      || !validCodeWork(offer.work, config) || contentDigest(JSON.stringify(offer.work)) !== offer.digest) return;
   return { version: offer.version, id: offer.id, digest: offer.digest, work: offer.work };
 }
 

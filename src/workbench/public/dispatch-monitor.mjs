@@ -197,19 +197,20 @@ export function createMonitorView(node, selectFlow, onViewChange) {
     const primaryDevice = [...codeDevices.values()].find(device => device.local);
     const primaryHost = primaryDevice && data.hosts.find(host => host.kind === "local");
     const codeAttempts = data.codeWorkers?.attempts ?? [];
+    const codeActivityMs = data.codeWorkers?.activityMs ?? remoteActivityMs;
     const remote = (data.remote?.devices ?? []).map(device => {
       const code = codeDevices.get(device.id);
       const status = code ? (code.online ? "online" : "offline") : device.status;
       const assigned = codeAttempts.filter(item => item.device === device.id);
-      const lastMessage = Math.max(device.lastSeen ?? -Infinity, ...assigned.map(item => item.updatedAt));
-      const expiresAt = lastMessage + remoteActivityMs;
+      const expiresAt = Math.max((device.lastSeen ?? -Infinity) + remoteActivityMs,
+        ...assigned.map(item => item.updatedAt + codeActivityMs));
       const communicating = status === "online" && expiresAt > at;
       if (communicating) nextExpiry = Math.min(nextExpiry, expiresAt);
       const animateLink = communicating && foreground && !reducedMotion.matches;
       const codeJobs = assigned.filter(item => codeActive.has(item.state)).map(item => ({
         id: item.id, ticketId: `#${item.issue}`, task: "开发与测试", label: codeStages[item.state],
         status: status === "online" ? "running" : "waiting",
-        linkState: animateLink && item.updatedAt + remoteActivityMs > at ? "running" : "idle",
+        linkState: animateLink && item.updatedAt + codeActivityMs > at ? "running" : "idle",
       }));
       const onHost = primaryDevice?.id === device.id ? primaryHost : undefined;
       return {

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { setImmediate, setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { promisify } from "node:util";
+import { dispatchTicketOutputBytes } from "../src/config/runtime.mts";
 import { createLocalDispatch, readDispatchTickets, runLocalJobs } from "../src/execution/local-dispatch.mts";
 import { applyLocalCodeChanges, readEditableFile, replayLocalCodePatch } from "../src/execution/local-code-changes.mts";
 import type { Flow } from "../src/planning/conversation-flow.mts";
@@ -62,8 +63,30 @@ test("a ten-ticket plan preserves dependencies while executing in waves of two",
   assert.equal(peak, 2);
   assert.deepEqual(lastInputs, ["T1", "T9"]);
   assert.ok(jobs.every(job => job.status === "ready"));
-  assert.throws(() => readDispatchTickets(" ".repeat(128 * 1024) + JSON.stringify({ tickets }),
-    ["AC-1"], new Set([guide])), /传输字节上限/);
+  const output = JSON.stringify({ tickets });
+  const bytes = Buffer.byteLength(output);
+  const limit = (value: number) => dispatchTicketOutputBytes({ SOULFLOW_DISPATCH_TICKET_OUTPUT_MAX_BYTES: String(value) });
+  assert.throws(() => readDispatchTickets(output, ["AC-1"], new Set([guide]), "report", undefined, false, limit(bytes - 1)),
+    /传输字节上限/);
+  assert.deepEqual(readDispatchTickets(output, ["AC-1"], new Set([guide]), "report", undefined, false, limit(bytes)), tickets);
+});
+
+test("the process reads local .env and inherited settings take precedence", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "souflow-dispatch-env-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, ".env"), "SOULFLOW_DISPATCH_TICKET_OUTPUT_MAX_BYTES=1428\n");
+  const runtime = new URL("../src/config/runtime.mts", import.meta.url).href;
+  const args = ["--experimental-strip-types", "--input-type=module", "--eval", `
+    import { loadLocalEnv, dispatchTicketOutputBytes } from ${JSON.stringify(runtime)};
+    loadLocalEnv();
+    process.stdout.write(String(dispatchTicketOutputBytes()));
+  `];
+  const env = { ...process.env };
+  delete env.SOULFLOW_DISPATCH_TICKET_OUTPUT_MAX_BYTES;
+  assert.equal((await exec(process.execPath, args, { cwd: dir, env })).stdout, "1428");
+  assert.equal((await exec(process.execPath, args, {
+    cwd: dir, env: { ...env, SOULFLOW_DISPATCH_TICKET_OUTPUT_MAX_BYTES: "2856" },
+  })).stdout, "2856");
 });
 
 test("code edits validate every path and anchor before changing a snapshot and emit an applicable patch", async t => {

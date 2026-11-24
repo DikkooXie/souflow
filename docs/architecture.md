@@ -159,11 +159,13 @@ souflow 通过 Codex App Server 运行规划，复用本机 Codex 登录。`SOUL
 
 ### 主机向指定设备派发代码工单
 
-开启 GitHub 对话工单交付与 Tailscale 接入后，为每台 Mac 各生成一份新的设备接入文件。使用文件的 `id` 配置主机侧的 `SOULFLOW_CODE_DEVICE_IDS`。每台执行设备使用同版本的 souflow 源码、各自已登录的 Codex 和 GitHub CLI、本机已安装的 Docker 检查镜像。配置 [执行设备参数](../.env.example)，再从 souflow 仓库根目录运行下面的命令。如果参数保存在设备本地 `.env`，可在 `node` 后加上 `--env-file=.env`。
+开启 GitHub 对话工单交付与 Tailscale 接入后，为每台 Mac 各生成一份新的设备接入文件。使用文件的 `id` 配置主机侧的 `SOULFLOW_CODE_DEVICE_IDS`。每台执行设备使用同版本的 souflow 源码、各自已登录的 Codex 和 GitHub CLI、本机已安装的 Docker 检查镜像。把接入文件的位置填入设备本地 `.env` 的 `SOULFLOW_CODE_WORKER_ENROLLMENT_FILE`，再从仓库根目录运行下面的命令。
 
 ```sh
-node --experimental-strip-types src/workbench/code-device.mts /path/to/device.json
+node --experimental-strip-types src/workbench/code-device.mts
 ```
+
+设备进程与主机都读取各自的 `.env`。用 [环境模板](../.env.example) 核对两端的等待时间、执行位上限和消息容量。连接超时与离线判定都须长于等待时间。设备重试间隔和工作目录可单独配置。升级后，本地 `.env` 缺省的新参数取自模板。
 
 设备通过 HTTPS 挂起等待请求，上报绑定仓库与空闲执行位。主机核对工单授权和上游合并提交后，选定设备并通过它的等待请求发出工单。派发携带固定提交、Issue 内容版本摘要、计划版本、允许修改的文件及摘要。调度使用已分派的修改文件数和设备执行位初步估算负载。文件数反映变更范围，模型耗时仍以实际回传为准。单台机器增加执行位可并行启动多个本机 Codex 会话。
 
@@ -187,7 +189,7 @@ node --experimental-strip-types src/workbench/code-device.mts /path/to/device.js
 
 规划就绪后，在「本地执行工单」选择「编写代码」。负责人确认开发计划版本、仓库提交和每单可编辑文件后，服务在独立的快照目录为每单启动本机 Codex 会话。工单可修改已纳入 Git 的普通源文件、测试和文档。没有先后关系的工单可以并行，编辑范围须互斥。需要改同一文件的工单必须按依赖串行。
 
-工单准备保存完整依赖图。执行器根据 `SOULFLOW_DISPATCH_MAX_CONCURRENT` 批次并发上限逐张启动已就绪的工单。拆单输出受传输字节上限约束，超限的批次停止准备。
+工单准备保存完整依赖图。执行器根据 `SOULFLOW_DISPATCH_MAX_CONCURRENT` 批次并发上限逐张启动已就绪的工单。拆单输出的传输上限由 `SOULFLOW_DISPATCH_TICKET_OUTPUT_MAX_BYTES` 配置，校验和 Codex 接收使用同一数值，超限的批次停止准备。
 
 执行模型根据提供的文件内容返回文本替换和交付说明。服务核对路径、原文和范围，再将改动写入该工单的工作目录并保存 `changes.patch`。涉及已脱敏的凭据片段时，改用未脱敏的原文锚点或缩小工单范围。
 

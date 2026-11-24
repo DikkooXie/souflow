@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { CodeWorkerPool } from "../execution/code-worker-pool.mts";
-import { readCodeReceipt, readWorkerCapacity, workerId, workerMessageBytes } from "../execution/code-worker-protocol.mts";
+import { readCodeReceipt, readWorkerCapacity, workerId } from "../execution/code-worker-protocol.mts";
 import type { RemoteHandoff } from "../execution/remote-handoff.mts";
 
 export async function handleCodeWorkerRequest(request: IncomingMessage, response: ServerResponse,
@@ -23,7 +23,7 @@ export async function handleCodeWorkerRequest(request: IncomingMessage, response
     try {
       let size = 0;
       const chunks: Buffer[] = [];
-      const limit = route[2] === "wait" ? 4096 : workerMessageBytes;
+      const limit = route[2] === "wait" ? pool.config.waitBodyBytes : pool.config.messageBytes;
       for await (const chunk of request) {
         size += chunk.length;
         if (size > limit) { send(413); return true; }
@@ -38,7 +38,7 @@ export async function handleCodeWorkerRequest(request: IncomingMessage, response
       const identity = handoff.identifyCodeDevice(id, request.headers.authorization, instance);
       if (identity.status !== 200) { send(identity.status); return true; }
       if (route[2] === "wait") {
-        const capacity = readWorkerCapacity(body);
+        const capacity = readWorkerCapacity(body, pool.config.maxSlots);
         if (!capacity) { send(422); return true; }
         if (response.destroyed) return true;
         const connection = new AbortController();

@@ -6,35 +6,36 @@ import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { openActivityStore } from "../audit/activity-store.mts";
+import { type CodeWorkerConfig, loadLocalEnv, readCodeWorkerConfig, runtimeInteger, runtimeSetting } from "../config/runtime.mts";
 import { startCodexReadOnlyTask } from "../execution/codex-command-attempt.mts";
-import { contentDigest, readCodeOffer, readWorkerCapacity, workerDigest, workerId, workerMessageBytes,
-  workerProtocolVersion, workerWaitMs, type CodeOffer, type CodeReceipt } from "../execution/code-worker-protocol.mts";
+import { contentDigest, readCodeOffer, readWorkerCapacity, workerDigest, workerId,
+  workerProtocolVersion, type CodeOffer, type CodeReceipt } from "../execution/code-worker-protocol.mts";
 import { isolatedIssueCheck } from "../execution/issue-delivery.mts";
 import { applyCheckedCodeChanges, codeResultSchema, maxCodeProposalBytes, maxEdits, prepareCodeProposal,
   readEditableFile } from "../execution/local-code-changes.mts";
 import { lockWorkbench } from "./recovery.mts";
 
 const exec = promisify(execFile);
-const retryMs = 1500;
 type ReceiptContent = CodeReceipt extends infer Receipt ? Receipt extends CodeReceipt ? Omit<Receipt, "id" | "digest" | "at"> : never : never;
 type Pending = Pick<CodeOffer, "id" | "digest">;
 type Journal = { instance: string; pending: Pending[] };
 
-function connector(endpoint: URL, config: { id: string; key: string; certificate: string }) {
+function connector(endpoint: URL, config: { id: string; key: string; certificate: string }, limits: CodeWorkerConfig) {
   return (path: "wait" | "receipt", value: object, signal: AbortSignal) => new Promise<{
     status: number; offer?: unknown;
   }>((fulfill, reject) => {
     const payload = JSON.stringify(value);
-    if (Buffer.byteLength(payload) > workerMessageBytes) { reject(Error("设备消息超过上限。")); return; }
+    const maxBytes = path === "wait" ? limits.waitBodyBytes : limits.messageBytes;
+    if (Buffer.byteLength(payload) > maxBytes) { reject(Error("设备消息超过上限。")); return; }
     const req = request(new URL(`/v1/code-workers/${config.id}/${path}`, endpoint), {
-      method: "POST", ca: config.certificate, signal, timeout: workerWaitMs + 5000,
+      method: "POST", ca: config.certificate, signal, timeout: limits.httpTimeoutMs,
       headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload), Authorization: `Bearer ${config.key}` },
     }, response => {
       const chunks: Buffer[] = [];
       let size = 0;
       response.on("data", (chunk: Buffer) => {
         size += chunk.length;
-        if (size > workerMessageBytes) req.destroy();
+        if (size > limits.messageBytes) req.destroy(Error("设备响应超过上限。"));
         else chunks.push(chunk);
       });
       response.on("error", reject);
@@ -116,9 +117,10 @@ async function doWork(offer: CodeOffer, root: string, image: string, timeoutMs: 
 }
 
 async function main() {
-  if (process.argv.length !== 3) throw Error("请传入工作台下载的代码设备接入 JSON 文件。");
-  const configPath = process.argv[2];
-  if (!configPath) throw Error("设备接入文件路径为空。");
+  loadLocalEnv();
+  const limits = readCodeWorkerConfig();
+  const configPath = process.argv[2] ?? runtimeSetting("SOULFLOW_CODE_WORKER_ENROLLMENT_FILE");
+  if (process.argv.length > 3 || !configPath) throw Error("请通过 SOULFLOW_CODE_WORKER_ENROLLMENT_FILE 指定设备接入文件。");
   const file = resolve(configPath);
   const config = JSON.parse(await readFile(file, "utf8"));
   const endpoint = new URL(config.endpoint);
@@ -128,14 +130,15 @@ async function main() {
   await chmod(file, 0o600);
   const repo = process.env.SOULFLOW_CODE_WORKER_REPO?.trim();
   const image = process.env.SOULFLOW_GITHUB_CHECK_IMAGE?.trim();
-  const slots = Number(process.env.SOULFLOW_CODE_WORKER_SLOTS ?? 1);
-  const timeoutMs = Number(process.env.SOULFLOW_GITHUB_DELIVERY_TIMEOUT_MS ?? 300_000);
-  const capacity = readWorkerCapacity({ version: workerProtocolVersion, instance: randomUUID(), repo, slots, ready: true });
-  if (!capacity || !image || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 3_600_000) {
+  const slots = runtimeInteger("SOULFLOW_CODE_WORKER_SLOTS", 1, limits.maxSlots);
+  const timeoutMs = runtimeInteger("SOULFLOW_GITHUB_DELIVERY_TIMEOUT_MS", 1000, 3_600_000);
+  const capacity = readWorkerCapacity({ version: workerProtocolVersion, instance: randomUUID(), repo, slots, ready: true }, limits.maxSlots);
+  const workspaceRoot = runtimeSetting("SOULFLOW_CODE_WORKER_ROOT");
+  if (!capacity || !image || !workspaceRoot) {
     throw Error("设备需配置仓库、隔离检查镜像及有效并发设置。");
   }
   const checkImage = image;
-  const root = resolve(process.env.SOULFLOW_CODE_WORKER_ROOT ?? ".souflow/code-device");
+  const root = resolve(workspaceRoot);
   await mkdir(root, { recursive: true, mode: 0o700 });
   const database = join(root, `${config.id}.sqlite`);
   const closeLock = lockWorkbench(database);
@@ -152,15 +155,21 @@ async function main() {
         if (!checkpoint.save("journal", state)) throw Error("设备无法写入回执状态。");
       };
       save();
-      const send = connector(endpoint, { id: config.id, key: config.key, certificate });
+      const send = connector(endpoint, { id: config.id, key: config.key, certificate }, limits);
       const publish = async (job: Pending, detail: ReceiptContent) => {
-        const receipt = { id: job.id, digest: job.digest, at: Date.now(), ...detail };
+        const base = { id: job.id, digest: job.digest, at: Date.now() };
+        let receipt: CodeReceipt = { ...base, ...detail };
+        const instance = state.instance;
+        // 超限是确定性失败，回报简短状态，避免在断线重试循环里反复发送。
+        if (Buffer.byteLength(JSON.stringify({ instance, receipt })) > limits.messageBytes) {
+          receipt = { ...base, phase: "failed" };
+        }
         while (!stop.signal.aborted) {
-          const result = await send("receipt", { instance: state.instance, receipt }, stop.signal).catch(() => undefined);
-          if (result?.status === 200) return;
+          const result = await send("receipt", { instance, receipt }, stop.signal).catch(() => undefined);
+          if (result?.status === 200) return receipt.phase;
           if (result?.status === 410) throw Error("设备工单已中断。");
           if (result && result.status < 500) throw Error("工作台拒绝设备回执。");
-          await sleep(retryMs, undefined, { signal: stop.signal });
+          await sleep(limits.retryMs, undefined, { signal: stop.signal });
         }
         stop.signal.throwIfAborted();
       };
@@ -179,13 +188,13 @@ async function main() {
         process.stdout.write(`已收到 GitHub #${offer.work.issue}。\n`);
         try {
           const deadline = AbortSignal.any([stop.signal, AbortSignal.timeout(timeoutMs)]);
-          completed = await doWork(offer, root, checkImage, timeoutMs, deadline, detail => publish(offer, detail));
+          completed = await doWork(offer, root, checkImage, timeoutMs, deadline, async detail => { await publish(offer, detail); });
         } catch {
           stop.signal.throwIfAborted();
           completed = { phase: "failed" };
         }
-        await publish(offer, completed);
-        process.stdout.write(`GitHub #${offer.work.issue} ${completed.phase === "tested" ? "本机检查已通过，结果已回传" : "未完成，已回报主机"}。\n`);
+        const phase = await publish(offer, completed);
+        process.stdout.write(`GitHub #${offer.work.issue} ${phase === "tested" ? "本机检查已通过，结果已回传" : "未完成，已回报主机"}。\n`);
       }
       let connected = false;
       try {
@@ -195,19 +204,19 @@ async function main() {
           const polling = send("wait", { ...capacity, version: workerProtocolVersion, instance: state.instance, ready },
             AbortSignal.any([stop.signal, wait.signal])).catch(() => undefined);
           const result = ready ? await polling : await Promise.race([polling, ...active.values()]);
-          if (!ready && !result) { wait.abort(); if (!stop.signal.aborted) await sleep(retryMs, undefined, { signal: stop.signal }); continue; }
+          if (!ready && !result) { wait.abort(); if (!stop.signal.aborted) await sleep(limits.retryMs, undefined, { signal: stop.signal }); continue; }
           if (!result || result.status >= 500 || result.status === 409) {
             connected = false;
-            await sleep(retryMs, undefined, { signal: stop.signal });
+            await sleep(limits.retryMs, undefined, { signal: stop.signal });
             continue;
           }
           if (result.status !== 200) throw Error("工作台拒绝代码设备接入。");
           if (!connected) process.stdout.write("已连到 souflow，等待调度器派单。\n");
           connected = true;
           if (result.offer === null) continue;
-          const offer = readCodeOffer(result.offer);
+          const offer = readCodeOffer(result.offer, limits);
           if (!offer || offer.work.repo.toLowerCase() !== capacity.repo) throw Error("设备收到无效或仓库不匹配的工单。");
-          if (active.has(offer.id)) { await sleep(retryMs, undefined, { signal: stop.signal }); continue; }
+          if (active.has(offer.id)) { await sleep(limits.retryMs, undefined, { signal: stop.signal }); continue; }
           state.pending.push({ id: offer.id, digest: offer.digest });
           save();
           const task = run(offer).then(() => remove(offer.id)).catch(error => {

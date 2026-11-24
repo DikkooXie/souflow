@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 import type { BusinessEvent, Checkpoint } from "../src/audit/activity-store.mts";
+import { readCodeWorkerConfig } from "../src/config/runtime.mts";
 import { createCodeWorkerPool, type WorkerAttempt } from "../src/execution/code-worker-pool.mts";
-import { contentDigest, readCodeOffer, type CodeOffer, type CodeWork } from "../src/execution/code-worker-protocol.mts";
+import { contentDigest, readCodeOffer, readWorkerCapacity, type CodeOffer, type CodeWork } from "../src/execution/code-worker-protocol.mts";
 
 const repo = "owner/repository";
 const first = { id: "00000000-0000-0000-0000-000000000001", name: "第一台 Mac", instance: randomUUID(), repo, slots: 1, ready: true };
@@ -115,4 +116,25 @@ test("设备就绪时重新检查授权，工单改动后不会发给设备", as
   assert.deepEqual(pool.snapshot().attempts, []);
   controller.abort();
   assert.deepEqual(await waiting, { status: 200, offer: null });
+});
+
+test("双机通信使用注入的离线时间、执行位和上下文限制", async t => {
+  const config = readCodeWorkerConfig({
+    SOULFLOW_CODE_WORKER_WAIT_MS: "100", SOULFLOW_CODE_WORKER_HTTP_TIMEOUT_MS: "180",
+    SOULFLOW_CODE_WORKER_OFFLINE_MS: "250", SOULFLOW_CODE_WORKER_MAX_SLOTS: "1",
+    SOULFLOW_CODE_WORKER_ACTIVITY_MS: "400", SOULFLOW_CODE_WORKER_MAX_UPSTREAM: "0",
+  });
+  assert.throws(() => readCodeWorkerConfig({ SOULFLOW_CODE_WORKER_WAIT_MS: "25000" }), /SOULFLOW_CODE_WORKER_HTTP_TIMEOUT_MS/);
+  assert.equal(readWorkerCapacity({ ...first, version: 1, slots: 2 }, config.maxSlots), undefined);
+  let now = 1000;
+  const pool = createCodeWorkerPool(database().checkpoint, new Set([first.id]), config, () => now);
+  t.after(pool.close);
+  const signal = new AbortController().signal;
+  const waiting = pool.poll(first, signal);
+  await assert.rejects(pool.execute(work, signal, 1000, () => {}, revalidate), /工单上下文无效/);
+  assert.deepEqual(await waiting, { status: 200, offer: null });
+  assert.equal(pool.snapshot().activityMs, 400);
+  assert.equal(pool.snapshot().devices[0]?.online, true);
+  now += 251;
+  assert.equal(pool.snapshot().devices[0]?.online, false);
 });

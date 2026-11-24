@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { Checkpoint, RecordBusiness } from "../audit/activity-store.mts";
+import { readCodeWorkerConfig } from "../config/runtime.mts";
 import { contentDigest, type CodeOffer, type CodeReceipt, type CodeWork, validCodeWork,
-  workerMessageBytes, workerProtocolVersion, workerWaitMs } from "./code-worker-protocol.mts";
+  workerProtocolVersion } from "./code-worker-protocol.mts";
 import { IssueVerificationUncertain } from "./issue-verification.mts";
 
 type State = "offered" | CodeReceipt["phase"];
@@ -16,7 +17,8 @@ type Ready = { device: Device; send: (offer?: CodeOffer) => void };
 type Running = { offer: CodeOffer; settled: (receipt: CodeReceipt) => void; started: (thread: string) => void; interrupt: () => void };
 const unfinished = (state: State) => state === "offered" || state === "accepted" || state === "started";
 
-export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: ReadonlySet<string>, now = Date.now, record?: RecordBusiness) {
+export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: ReadonlySet<string>,
+  config = readCodeWorkerConfig(), now = Date.now, record?: RecordBusiness) {
   const attempts = new Map(store.load().map(attempt => [attempt.id, attempt]));
   const waiters = new Map<string, Ready>();
   const online = new Map<string, { device: Device; at: number }>();
@@ -61,6 +63,7 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
   }
 
   return {
+    config,
     permits: (id: string) => allowed.has(id),
     async poll(device: Device, signal: AbortSignal) {
       if (!allowed.has(device.id) || closed || signal.aborted) return { status: 403 } as const;
@@ -68,7 +71,7 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
       const at = now();
       const previous = online.get(device.id);
       online.set(device.id, { device, at });
-      if (!previous || at - previous.at > workerWaitMs * 2) record?.({
+      if (!previous || at - previous.at > config.offlineMs) record?.({
         kind: "remote.code", subject: device.id, details: {
           action: previous ? "reconnected" : "connected", direction: "from-device", device: device.id, repo: device.repo, slots: device.slots,
         },
@@ -85,7 +88,7 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
           resolve(offer);
         };
         const abort = () => settle();
-        const timer = setTimeout(abort, workerWaitMs);
+        const timer = setTimeout(abort, config.waitMs);
         signal.addEventListener("abort", abort, { once: true });
         waiters.set(device.id, { device, send: settle });
         changed();
@@ -121,7 +124,7 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
     },
     async execute(work: CodeWork, signal: AbortSignal, timeoutMs: number, started: (thread: string) => void,
       revalidate: (signal: AbortSignal) => Promise<void>) {
-      if (!validCodeWork(work)) throw Error("已批准的远端工单上下文无效。");
+      if (!validCodeWork(work, config)) throw Error("已批准的远端工单上下文无效。");
       const deadline = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
       const weight = work.files.length;
       const pickTarget = () => [...waiters.values()]
@@ -144,7 +147,7 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
         const id = randomUUID();
         const digest = contentDigest(JSON.stringify(work));
         const offer = { id, digest, version: workerProtocolVersion, work };
-        if (Buffer.byteLength(JSON.stringify({ offer })) > workerMessageBytes) throw Error("工单上下文超过设备接收上限。");
+        if (Buffer.byteLength(JSON.stringify({ offer })) > config.messageBytes) throw Error("工单上下文超过设备接收上限。");
         const assignedAt = now();
         if (!save({ id, device: device.id, name: device.name, instance: device.instance, repo: work.repo, issue: work.issue,
           revision: work.revision, digest, issueRevision: work.issueRevision,
@@ -172,11 +175,14 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
     },
     snapshot() {
       const at = now();
+      const rows = [...attempts.values()];
       return {
+        activityMs: config.activityMs,
         devices: [...online.values()].map(({ device: { instance: _instance, ...device }, at: seen }) => ({
-          ...device, ...capacity(device), lastSeen: seen, online: at - seen <= workerWaitMs * 2,
+          ...device, ...capacity(device), lastSeen: seen, online: at - seen <= config.offlineMs,
         })),
-        attempts: [...attempts.values()].slice(-32).map(({ instance: _instance, ...attempt }) => attempt),
+        attempts: rows.filter((attempt, index) => unfinished(attempt.state) || index >= rows.length - config.recentAttempts)
+          .map(({ instance: _instance, ...attempt }) => attempt),
       };
     },
     disconnect(id: string) {
