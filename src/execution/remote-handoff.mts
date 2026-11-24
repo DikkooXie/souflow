@@ -45,10 +45,13 @@ export function createRemoteHandoff(deviceStore: Store<RemoteDevice>, jobStore: 
   const jobs = new Map(jobStore.load().map(job => [job.id, job]));
   // 探针存活只对当前工作台进程有效，重启后等设备重新报到。
   const online = new Map<string, number>();
-  const connected = (id: string) => now() - (online.get(id) ?? -Infinity) <= offlineMs;
-  function recordJob(job: RemoteJob, action: string, actor?: string) {
+  const heartbeatAuditedAt = new Map<string, number>();
+  const connected = (id: string, at = now()) => at - (online.get(id) ?? -Infinity) <= offlineMs;
+  function recordJob(job: RemoteJob, action: string, actor?: string,
+    communication?: { direction: "to-device" | "from-device"; at: number }) {
     const event: BusinessEvent = { kind: "remote.job", subject: job.id,
-      details: { action, deviceId: job.deviceId, revision: job.revision, status: job.status, received: job.receipts.length, actor } };
+      details: { action, deviceId: job.deviceId, revision: job.revision, status: job.status,
+        received: job.receipts.length, actor, ...communication } };
     if (!jobStore.save(job.id, job, event)) return false;
     jobs.set(job.id, job);
     return true;
@@ -75,6 +78,7 @@ export function createRemoteHandoff(deviceStore: Store<RemoteDevice>, jobStore: 
         details: { action: "revoked", name: device.name, actor } })) return 503;
       devices.set(id, next);
       online.delete(id);
+      heartbeatAuditedAt.delete(id);
       return 200;
     },
     enqueue(deviceId: unknown, revision: string, files: RemoteFile[], actor: string) {
@@ -95,13 +99,8 @@ export function createRemoteHandoff(deviceStore: Store<RemoteDevice>, jobStore: 
       const { instance, update } = object(input);
       if (typeof instance !== "string" || !uuid.test(instance)) return { status: 422 } as const;
       if (device.instance && device.instance !== instance) return { status: 409 } as const;
-      if (!connected(id)) {
-        const next = { ...device, instance, lastSeen: now() };
-        if (!deviceStore.save(id, next, { kind: "remote.device", subject: id,
-          details: { action: device.instance ? "reconnected" : "connected", name: device.name } })) return { status: 503 } as const;
-        devices.set(id, next);
-      }
-      online.set(id, now());
+      const at = now();
+      let progress: RemoteJob | undefined;
 
       if (update !== undefined) {
         const { id: jobId, receipts: value } = object(update);
@@ -118,15 +117,30 @@ export function createRemoteHandoff(deviceStore: Store<RemoteDevice>, jobStore: 
             && receipt.bytes === job.files[index]?.bytes);
           const status = !match ? "failed" : receipts.length === job.files.length ? "ready" : "running";
           const files = status === "running" ? job.files : job.files.map(({ path, sha256, bytes }) => ({ path, sha256, bytes }));
-          const next: RemoteJob = { ...job, receipts, status, files, ...(status === "running" ? {} : { finishedAt: now() }) };
-          if (!recordJob(next, status === "running" ? "progress" : "finished")) {
-            return { status: 503 } as const;
-          }
+          progress = { ...job, receipts, status, files, ...(status === "running" ? {} : { finishedAt: at }) };
         }
       }
+      if (progress && !recordJob(progress, progress.status === "running" ? "progress" : "finished", undefined,
+        { direction: "from-device", at })) return { status: 503 } as const;
+
       const job = [...jobs.values()].find(item => item.deviceId === id && unfinished(item.status));
+      if (job?.status === "queued" && !recordJob({ ...job, status: "running" }, "claimed", undefined,
+        { direction: "to-device", at })) return { status: 503 } as const;
+
+      // 连入或重连的审计随身份绑定和通信时间一起保存，成功后才标记在线。
+      const connectionAction = connected(id, at) ? undefined : device.instance ? "reconnected" : "connected";
+      // 一个离线判定窗口内，每台设备最多记录一次普通心跳审计。
+      const auditHeartbeat = !connectionAction && update === undefined
+        && at - (heartbeatAuditedAt.get(id) ?? -Infinity) >= offlineMs;
+      const action = connectionAction ?? (auditHeartbeat ? "heartbeat" : undefined);
+      const seen = { ...device, instance, lastSeen: at };
+      const event: BusinessEvent | undefined = action ? { kind: "remote.device", subject: id,
+        details: { action, direction: "from-device", at, ...(connectionAction ? { name: device.name } : {}) } } : undefined;
+      if (!deviceStore.save(id, seen, event)) return { status: 503 } as const;
+      devices.set(id, seen);
+      if (auditHeartbeat) heartbeatAuditedAt.set(id, at);
+      online.set(id, at);
       if (!job) return { status: 200, task: null } as const;
-      if (job.status === "queued" && !recordJob({ ...job, status: "running" }, "claimed")) return { status: 503 } as const;
       // 未收到上一次领取回执时仍返回同一工单和进度。
       return { status: 200, task: { id: job.id, revision: job.revision, files: job.files, receipts: job.receipts } } as const;
     },

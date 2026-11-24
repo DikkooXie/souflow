@@ -10,6 +10,8 @@ const labels = {
 };
 const clock = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const pollMs = 1500;
+// 最近通信覆盖两个调度状态轮询周期，避免一次刷新间隔就让连线停下。
+const remoteActivityMs = 2 * pollMs;
 const jobKey = item => item.ticketId ? `${item.batchId}/${item.ticketId}` : undefined;
 
 function stageFor(job, session) {
@@ -38,7 +40,10 @@ export function createMonitorView(node, selectFlow, onViewChange) {
   const recent = document.querySelector("#monitor-recent");
   const links = createDispatchLinks(document.querySelector("#monitor-map"), document.querySelector("#monitor-connections"));
   const remoteWorkers = createRemoteWorkers(node);
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
   let timer;
+  let activityTimer;
+  let latestData;
   let generation = 0;
   let rendered;
   let snapshot;
@@ -163,16 +168,28 @@ export function createMonitorView(node, selectFlow, onViewChange) {
   }
 
   function render(data) {
+    latestData = data;
+    clearTimeout(activityTimer);
+    const at = Date.now();
+    const foreground = document.visibilityState === "visible";
+    let nextExpiry = Infinity;
     remoteWorkers(data.remote);
     const deviceStates = new Map(data.remote?.devices.map(device => [device.id, device.status]));
     const remoteJobs = (data.remote?.jobs ?? []).map(job => ({ ...job, deviceStatus: deviceStates.get(job.deviceId) }));
-    const remote = (data.remote?.devices ?? []).map(device => ({
-      id: device.id, name: device.name, kind: "remote", status: device.status,
-      active: remoteJobs.filter(job => job.deviceId === device.id && job.status === "running")
-        .map(job => ({ id: job.id, status: device.status === "online" ? "running" : "interrupted",
-          task: `文件核验 · ${job.receipts.length}/${job.files.length}`, label: remoteJobStatus(job) })),
-      recent: [],
-    }));
+    const remote = (data.remote?.devices ?? []).map(device => {
+      const expiresAt = (device.lastSeen ?? -Infinity) + remoteActivityMs;
+      const communicating = device.status === "online" && expiresAt > at;
+      if (communicating) nextExpiry = Math.min(nextExpiry, expiresAt);
+      return {
+        id: device.id, name: device.name, kind: "remote", status: device.status, communicating,
+        animateLink: communicating && foreground && !reducedMotion.matches,
+        active: remoteJobs.filter(job => job.deviceId === device.id && job.status === "running")
+          .map(job => ({ id: job.id, status: device.status === "online" ? "running" : "interrupted",
+            task: `文件核验 · ${job.receipts.length}/${job.files.length}`, label: remoteJobStatus(job) })),
+        recent: [],
+      };
+    });
+    if (foreground && Number.isFinite(nextExpiry)) activityTimer = setTimeout(() => render(data), nextExpiry - at);
     const hosts = [...data.hosts, ...remote];
     const onlineHosts = hosts.filter(host => host.kind === "local" || host.status === "online");
     const agentCount = data.hosts.reduce((sum, host) => sum + host.active.length, 0);
@@ -197,10 +214,12 @@ export function createMonitorView(node, selectFlow, onViewChange) {
     const routes = [];
     for (const host of hosts) {
       const group = node("div", "monitor-machine");
-      const state = host.kind === "local" ? "本机" : host.status === "online" ? "局域网在线" : host.status === "pending" ? "待接入" : "局域网离线";
+      const remoteStates = { online: host.communicating ? "局域网在线 · 近期收发" : "局域网在线 · 空闲",
+        pending: "待接入", offline: "局域网离线" };
+      const state = host.kind === "local" ? "本机" : remoteStates[host.status];
       const device = topologyNode("device", host.id ?? host.name, host.name, "执行设备", state, "idle");
       const agents = node("div", "monitor-agents");
-      const running = host.active.some(session => session.status === "running");
+      const running = host.kind === "remote" ? host.animateLink : host.active.some(session => session.status === "running");
       routes.push({ from: hub, to: device, state: running ? "running" : "idle", trunk: true });
       for (const session of host.active) {
         const title = host.kind === "remote" ? "远端工单"
@@ -209,7 +228,8 @@ export function createMonitorView(node, selectFlow, onViewChange) {
         const task = [session.ticketId, session.task].filter(Boolean).join(" · ");
         const agent = topologyNode(host.kind === "remote" ? "job" : "agent", session.id, title, task,
           host.kind === "remote" ? session.label : `${labels[stage]} · ${accountLabel(session)}`, session.status);
-        routes.push({ from: device, to: agent, state: session.status });
+        const routeState = host.kind === "remote" && session.status === "running" && !running ? "idle" : session.status;
+        routes.push({ from: device, to: agent, state: routeState });
         agents.append(agent);
       }
       if (!host.active.length) agents.append(node("p", "monitor-idle", host.kind === "remote" ? "暂无执行中工单" : "暂无活动 Agent"));
@@ -261,6 +281,8 @@ export function createMonitorView(node, selectFlow, onViewChange) {
       if (dialog.open && id === generation) render(data);
     } catch {
       if (dialog.open && id === generation) {
+        latestData = undefined;
+        clearTimeout(activityTimer);
         dialog.dataset.connection = "offline";
         links.setOnline(false);
         connection.textContent = rendered ? "连接中断 · 下方为最后一次读取的状态" : "无法连接本机 souflow，正在重试";
@@ -268,6 +290,19 @@ export function createMonitorView(node, selectFlow, onViewChange) {
     }
     if (dialog.open && id === generation) timer = setTimeout(() => void refresh(id), pollMs);
   }
+
+  function updateRemoteMotion() {
+    if (dialog.open && latestData) render(latestData);
+  }
+
+  reducedMotion.addEventListener("change", updateRemoteMotion);
+  document.addEventListener("visibilitychange", () => {
+    updateRemoteMotion();
+    if (dialog.open && document.visibilityState === "visible") {
+      clearTimeout(timer);
+      void refresh(++generation);
+    }
+  });
 
   trigger.addEventListener("click", () => {
     connection.textContent = "正在读取调度状态…";
@@ -291,6 +326,8 @@ export function createMonitorView(node, selectFlow, onViewChange) {
   dialog.addEventListener("close", () => {
     ++generation;
     clearTimeout(timer);
+    clearTimeout(activityTimer);
+    latestData = undefined;
     links.hide();
     links.setOnline(false);
     onViewChange();

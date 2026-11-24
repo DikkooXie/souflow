@@ -4,8 +4,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import type { BusinessEvent, Checkpoint } from "../src/audit/activity-store.mts";
+import { defaultAuditThresholds, openActivityStore, type BusinessEvent, type Checkpoint } from "../src/audit/activity-store.mts";
 import { createRemoteHandoff, type RemoteDevice, type RemoteJob } from "../src/execution/remote-handoff.mts";
 import { readRemoteFiles } from "../src/workbench/remote-worker-ingress.mts";
 
@@ -127,6 +128,143 @@ test("历史过多时保留离线工单，重连完成后排在历史首位", ()
   assert.equal(history.length, 24);
   assert.equal(history[0]?.id, job.id);
   assert.equal(history[0]?.status, "ready");
+});
+
+test("SQLite 审计关联设备心跳与工单回执，拒绝错误身份并去重", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "souflow-remote-audit-"));
+  const path = join(directory, "audit.sqlite");
+  let time = Date.now();
+  const audit = openActivityStore(path, () => time, defaultAuditThresholds);
+  const reader = new DatabaseSync(path, { readOnly: true });
+  t.after(async () => {
+    reader.close();
+    audit.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const deviceStore = audit.checkpoint<RemoteDevice>("remote-devices");
+  let deviceSaves = 0;
+  let remainingFailures = 0;
+  const hub = createRemoteHandoff({
+    ...deviceStore,
+    save(id, row, event) {
+      ++deviceSaves;
+      // 仅让携带本次通信时间的写入失败，以便发现提前写入的重连审计。
+      if (remainingFailures > 0 && row.lastSeen === time) {
+        --remainingFailures;
+        return false;
+      }
+      return deviceStore.save(id, row, event);
+    },
+  }, audit.checkpoint<RemoteJob>("remote-jobs"), 10, () => time);
+  const created = hub.addDevice("audit-device", "implementer");
+  if (created.status !== 201) assert.fail();
+  const { id, key } = created.bundle;
+  const instance = randomUUID();
+  const rawMessage = "private-remote-audit-message";
+  const body = "# private-remote-audit-document\n";
+  const proof = { sha256: createHash("sha256").update(body).digest("hex"), bytes: Buffer.byteLength(body), headings: 1 };
+  const shippedFiles = files.map(file => ({ path: file.path, text: body, sha256: proof.sha256, bytes: proof.bytes }));
+  const poll = (identity: string, update?: { id: string; receipts: typeof proof[] }) =>
+    hub.poll(id, `Bearer ${key}`, { instance: identity, message: rawMessage, update });
+
+  // 读取 SQLite 行的所有列，按业务事件类型筛出记录，避开需要续传文件正文的工单快照。
+  const tables = reader.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all();
+  const auditRows = () => tables.flatMap(({ name }) => {
+    const table = String(name).replaceAll('"', '""');
+    return reader.prepare(`SELECT * FROM "${table}"`).all().map(row => JSON.stringify(row, (_key, value: unknown) => {
+      if (typeof value === "string" && value.startsWith("{")) return JSON.parse(value) as unknown;
+      return value;
+    }));
+  }).filter(row => row.includes('"remote.device"') || row.includes('"remote.job"'));
+  const event = (kind: string, action: string, subject: string) => auditRows().filter(row =>
+    [kind, action, subject].every(value => row.includes(JSON.stringify(value))));
+  function metadata(row: string | undefined, expected: Record<string, string | number>) {
+    assert.ok(row);
+    for (const [field, value] of Object.entries(expected)) {
+      assert.ok(row.includes(`${JSON.stringify(field)}:${JSON.stringify(value)}`), `缺少审计字段 ${field}`);
+    }
+  }
+
+  assert.deepEqual(poll(instance), { status: 200, task: null });
+  const connections = event("remote.device", "connected", id);
+  assert.equal(connections.length, 1);
+  metadata(connections[0], { direction: "from-device", at: time });
+  const heartbeat = () => event("remote.device", "heartbeat", id);
+  assert.equal(heartbeat().length, 0);
+  const heartbeatAt = ++time;
+  assert.equal(poll(instance).status, 200);
+  assert.equal(heartbeat().length, 1);
+  metadata(heartbeat()[0], { direction: "from-device", at: heartbeatAt });
+  ++time;
+  assert.equal(poll(instance).status, 200);
+  assert.equal(heartbeat().length, 1);
+  assert.equal(hub.snapshot().devices.find(device => device.id === id)?.lastSeen, time);
+
+  const job = hub.enqueue(id, revision, shippedFiles, "implementer");
+  if (job.status !== 201) assert.fail();
+  const claimedAt = ++time;
+  assert.equal(poll(instance).status, 200);
+  const claims = event("remote.job", "claimed", job.id);
+  assert.equal(claims.length, 1);
+  metadata(claims[0], { deviceId: id, direction: "to-device", at: claimedAt, received: 0 });
+  const updates = () => auditRows().filter(row => ["remote.job", "from-device", job.id].every(value => row.includes(JSON.stringify(value))));
+  assert.equal(updates().length, 0);
+  const first = { id: job.id, receipts: [proof], message: rawMessage };
+  ++time;
+  assert.equal(poll(randomUUID(), first).status, 409);
+  assert.equal(updates().length, 0);
+  assert.equal(hub.snapshot().devices.find(device => device.id === id)?.lastSeen, claimedAt);
+  assert.equal(poll(instance, first).status, 200);
+  assert.equal(updates().length, 1);
+  metadata(event("remote.job", "progress", job.id)[0], { deviceId: id, direction: "from-device", at: time, received: 1 });
+  assert.equal(hub.snapshot().devices.find(device => device.id === id)?.lastSeen, time);
+  ++time;
+  assert.equal(poll(instance, first).status, 200);
+  assert.equal(updates().length, 1);
+
+  const finish = { id: job.id, receipts: [proof, proof], message: rawMessage };
+  ++time;
+  const results = await Promise.all([first, finish].map(() => Promise.resolve().then(() => poll(instance, finish))));
+  assert.deepEqual(results, [{ status: 200, task: null }, { status: 200, task: null }]);
+  assert.equal(updates().length, 2);
+  metadata(event("remote.job", "finished", job.id)[0], { deviceId: id, direction: "from-device", at: time, received: 2 });
+  const deviceState = () => hub.snapshot().devices.find(device => device.id === id);
+  const savedDevice = () => deviceStore.load().find(device => device.id === id);
+  const reconnected = () => event("remote.device", "reconnected", id);
+  const previous = savedDevice();
+  assert.equal(previous?.instance, instance);
+  assert.equal(previous?.lastSeen, time);
+  time += 11;
+  const offline = deviceState();
+  assert.equal(offline?.status, "offline");
+  assert.equal(offline?.lastSeen, previous?.lastSeen);
+  assert.equal(reconnected().length, 0);
+
+  remainingFailures = 2;
+  const savesBeforeReconnect = deviceSaves;
+  for (let attempt = 1; attempt <= 2; ++attempt) {
+    assert.deepEqual(poll(instance), { status: 503 });
+    assert.deepEqual(deviceState(), offline);
+    assert.deepEqual(savedDevice(), previous);
+    assert.equal(reconnected().length, 0);
+    assert.equal(deviceSaves, savesBeforeReconnect + attempt);
+    ++time;
+  }
+
+  assert.deepEqual(poll(instance), { status: 200, task: null });
+  assert.equal(deviceSaves, savesBeforeReconnect + 3);
+  assert.deepEqual(deviceState(), { ...offline, status: "online", lastSeen: time });
+  assert.deepEqual(savedDevice(), { ...previous, instance, lastSeen: time });
+  assert.equal(reconnected().length, 1);
+  metadata(reconnected()[0], { direction: "from-device", at: time });
+  assert.equal(heartbeat().length, 1);
+  ++time;
+  assert.equal(poll(instance).status, 200);
+  assert.equal(reconnected().length, 1);
+  assert.equal(heartbeat().length, 2);
+
+  const logged = auditRows().join("\n");
+  for (const privateValue of [key, rawMessage, body.trim()]) assert.ok(!logged.includes(privateValue));
 });
 
 test("远端核验只读取固定提交中的普通 Markdown，排除未提交内容和符号链接", async t => {
