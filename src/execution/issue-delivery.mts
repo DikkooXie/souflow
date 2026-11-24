@@ -15,7 +15,7 @@ import { applyCheckedCodeChanges, codeResultSchema, deliveryPath, maxCodeProposa
 
 const exec = promisify(execFile);
 export type DeliverySpec = { instructions: string; files: string[]; dependsOn: number[]; baseRevision?: string; basePlanPath?: string; sourcePaths?: string[] };
-export type DeliveryTarget = { branch: string; head: string };
+export type DeliveryTarget = { branch: string; head: string; base?: string };
 export type PreparedDelivery = DeliveryTarget & { workspace: string; base: string };
 export type DeliveryFailure = {
   stage: "preflight" | "checkout" | "codex" | "dependencies" | "patch" | "tests" | "commit" | "publish" | "legacy";
@@ -25,6 +25,7 @@ export type DeliveryFailure = {
 export type PrepareIssue = (input: {
   number: number; flowId?: string; planVersion?: number; spec: DeliverySpec; branch: string; upstream: string[]; publisher: IssuePublisher;
   previousFailure?: DeliveryFailure;
+  reviewTarget?: DeliveryTarget & { base: string };
   repairing?: (issue: PatchIssue) => void;
 }, connected: (id: string) => void, signal: AbortSignal, assigned?: (account: AccountAssignment) => void) => Promise<PreparedDelivery>;
 
@@ -124,7 +125,7 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
     }
     finally { await exec("docker", ["rm", "-f", name], { timeout: 10_000 }).catch(() => undefined); }
   }
-  return async ({ number, flowId, planVersion, spec, branch, upstream, publisher, previousFailure, repairing }, connected, signal, assigned) => {
+  return async ({ number, flowId, planVersion, spec, branch, upstream, publisher, previousFailure, reviewTarget, repairing }, connected, signal, assigned) => {
     const session = monitor.begin({ title: `GitHub #${number}`, task: "开发与测试", ticketId: `#${number}`, flowId, ...(planVersion ? { planVersion } : {}) });
     let stage: DeliveryFailure["stage"] = "checkout";
     try {
@@ -134,7 +135,13 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
       const { base, author, email } = await publisher.checkout(workspace, signal);
       const git = async (args: string[]) => (await exec("git", ["-C", workspace, "-c", "core.hooksPath=/dev/null", ...args],
         { timeout: timeoutMs, signal })).stdout.trim();
-      await checkoutReviewedIssueBase(git, spec, upstream);
+      if (reviewTarget) {
+        if (!publisher.checkoutPublished || !spec.baseRevision || !/^[a-f0-9]{40}$/.test(spec.baseRevision)) throw new IssueDeliverySourcesChanged();
+        await publisher.checkoutPublished(workspace, reviewTarget, signal);
+        await git(["merge-base", "--is-ancestor", spec.baseRevision, "HEAD"]);
+      } else {
+        await checkoutReviewedIssueBase(git, spec, upstream);
+      }
       const editable = new Map(await Promise.all(spec.files.map(async file => [file, await readEditableFile(workspace, file)] as const)));
       const readOnlySources = spec.sourcePaths?.length
         ? await qualitySources(workspace, await git(["rev-parse", "HEAD"]), spec.sourcePaths, signal)
@@ -193,10 +200,10 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
       stage = "commit";
       await git(["add", "--", ...files]);
       await git(["-c", `user.name=${author}`, "-c", `user.email=${email}`, "-c", "commit.gpgsign=false",
-        "commit", "-m", `feat(issue): deliver GitHub issue #${number}`]);
+        "commit", "-m", reviewTarget ? `fix(issue): address review feedback for #${number}` : `feat(issue): deliver GitHub issue #${number}`]);
       const head = await git(["rev-parse", "HEAD"]);
       session.finish("completed");
-      return { workspace, base, branch, head };
+      return { workspace, base: reviewTarget?.base ?? base, branch, head };
     } catch (error) {
       session.finish(signal.aborted || error instanceof IssueVerificationUncertain ? "interrupted" : "failed");
       if (signal.aborted || error instanceof IssueVerificationUncertain || error instanceof IssueDeliverySourcesChanged || error instanceof IssueDeliveryFailed) throw error;
