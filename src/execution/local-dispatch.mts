@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { type BusinessEvent, type Checkpoint, scrubAuditText } from "../audit/activity-store.mts";
+import { dispatchTicketOutputBytes } from "../config/runtime.mts";
 import { currentDevelopmentPlan, type Flow } from "../planning/conversation-flow.mts";
 import { acceptanceCriteria, planningDigest, qualityBlock, qualityCurrent, qualityPacket, readVerification, reviewQuality,
   verificationSchema, type QualityReceipt, type QualityReviewer, type Verification } from "../planning/dispatch-quality.mts";
@@ -16,8 +17,6 @@ import { qualitySources } from "./codex-quality-review.mts";
 import { applyLocalCodeChanges, codeResultSchema, type LocalCodePatch, readEditableFile, readLocalCodePatch, replayLocalCodePatch } from "./local-code-changes.mts";
 
 const exec = promisify(execFile);
-// 用传输字节数控制资源，工单数量与同时执行的槽位独立。
-const ticketOutputMaxBytes = 128 * 1024;
 const maxReportLength = 8000;
 const string = { type: "string" };
 const strings = { type: "array", items: string };
@@ -108,7 +107,7 @@ function ticketSchema(kind: DispatchKind, routeModels: boolean, review: boolean)
 }
 
 export function readDispatchTickets(text: string | undefined, criteria: readonly string[], evidence: ReadonlySet<string>,
-  kind: DispatchKind = "report", routing?: ModelRouting, review = false): Ticket[] {
+  kind: DispatchKind = "report", routing?: ModelRouting, review = false, ticketOutputMaxBytes = dispatchTicketOutputBytes()): Ticket[] {
   if (text && Buffer.byteLength(text) > ticketOutputMaxBytes) throw Error("返回的工单方案超过传输字节上限。");
   const candidates = parse(text)?.tickets;
   if (!Array.isArray(candidates)) throw Error("返回的工单结构无效。");
@@ -256,10 +255,11 @@ async function evidenceCatalog(workspace: string, revision: string) {
 
 export function createLocalDispatch(workspace: string, concurrency: number, {
   split = startCodexQuestionAttempt, execute = startCodexReadOnlyTask, record, routing, monitor, store, artifactRoot, codexAccounts, qualityReviewer,
+  ticketOutputMaxBytes = dispatchTicketOutputBytes(),
 }: {
   split?: typeof startCodexQuestionAttempt; execute?: Start; record?: (event: BusinessEvent) => boolean;
   routing?: ModelRouting; monitor?: DispatchMonitor; store?: Checkpoint<Run>; artifactRoot?: string; codexAccounts?: CodexAccountDispatch;
-  qualityReviewer?: QualityReviewer;
+  qualityReviewer?: QualityReviewer; ticketOutputMaxBytes?: number;
 } = {}) {
   const runs = new Map<string, Run>();
   const operations = new Set<Promise<void>>();
@@ -378,7 +378,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
         });
         return attempt;
       }, session);
-      run.jobs = readDispatchTickets(output, criteria.map(item => item.id), new Set(catalog.keys()), run.kind, routing, !!reviewer)
+      run.jobs = readDispatchTickets(output, criteria.map(item => item.id), new Set(catalog.keys()), run.kind, routing, !!reviewer, ticketOutputMaxBytes)
         .map(ticket => ({ ...ticket, status: "queued" }));
       if (reviewer) {
         const tickets = run.jobs.map(job => ({ ...job, validation: job.validation ?? [], paths: job.editPaths ?? [] }));

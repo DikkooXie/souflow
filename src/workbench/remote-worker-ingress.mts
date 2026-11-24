@@ -4,7 +4,9 @@ import { createServer } from "node:https";
 import { isIPv4 } from "node:net";
 import { promisify } from "node:util";
 import { scrubAuditText } from "../audit/activity-store.mts";
+import type { CodeWorkerPool } from "../execution/code-worker-pool.mts";
 import { remoteMaxFileBytes, remoteMaxFiles, remotePath, type RemoteHandoff } from "../execution/remote-handoff.mts";
+import { handleCodeWorkerRequest } from "./code-worker-http.mts";
 
 export type RemoteLanConfig = { host: string; port: number; cert: string; key: string; offlineMs: number };
 const exec = promisify(execFile);
@@ -29,14 +31,16 @@ export async function remoteWorkerNetwork(host: string, ownTailscaleIPv4 = readT
   }
 }
 
-export function createRemoteWorkerIngress(handoff: RemoteHandoff, config: RemoteLanConfig) {
+export function createRemoteWorkerIngress(handoff: RemoteHandoff, config: RemoteLanConfig, code?: CodeWorkerPool) {
   const server = createServer({ cert: config.cert, key: config.key, requestTimeout: 10_000, headersTimeout: 5_000 }, async (request, response) => {
+    if (code && await handleCodeWorkerRequest(request, response, code, handoff)) return;
     const send = (status: number, body: object) => {
       response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
       response.end(JSON.stringify(body));
     };
     const match = /^\/v1\/devices\/([a-f0-9-]{36})\/poll$/.exec(request.url ?? "");
     if (request.method !== "POST" || !match?.[1]) return send(404, { error: "设备接口不存在。" });
+    if (code?.permits(match[1])) return send(403, { error: "此设备使用代码工单入口。" });
     if (request.headers["content-type"] !== "application/json" || request.headers.origin) return send(415, { error: "需要设备客户端。" });
     try {
       let size = 0;

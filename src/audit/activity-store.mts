@@ -17,7 +17,7 @@ export type BusinessEvent = {
     | "decision.answered" | "decision.updated" | "demo.reset" | "attempt.started" | "attempt.finished" | "model.started"
     | "dispatch.prepared" | "dispatch.started" | "dispatch.reviewed" | "dispatch.finished" | "dispatch.account-assigned" | "dispatch.quality" | "plan.revised"
     | "github.issue" | "github.selection" | "member.denied" | "member.revised" | "acceptance.decided" | "flow.resumed"
-    | "remote.device" | "remote.job";
+    | "remote.device" | "remote.job" | "remote.code";
   flowId?: string | undefined;
   attemptId?: string | undefined;
   subject?: string;

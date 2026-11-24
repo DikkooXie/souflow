@@ -74,19 +74,20 @@ export function createRemoteWorkers(node) {
     section.hidden = !data;
     if (!data) return;
     enrol.hidden = enqueue.hidden = !data.canManage;
-    const key = JSON.stringify([data.devices.map(({ id, name, status }) => [id, name, status]), data.canManage]);
+    const key = JSON.stringify([data.devices.map(({ id, name, status, code }) => [id, name, status, code]), data.canManage]);
     if (rendered === key) return;
     rendered = key;
     const nameById = new Map(data.devices.map(device => [device.id, device.name]));
     const selection = selector.value;
-    selector.replaceChildren(...data.devices.map(device => {
+    const verificationDevices = data.devices.filter(device => !device.code);
+    selector.replaceChildren(...verificationDevices.map(device => {
       const option = node("option", "", `${device.name} · ${deviceStatus[device.status]}`);
       option.value = device.id;
       return option;
     }));
     if (nameById.has(selection)) selector.value = selection;
     devices.replaceChildren(...data.devices.map(device => {
-      const item = node("li", "monitor-meta", `${device.name} · ${deviceStatus[device.status]}`);
+      const item = node("li", "monitor-meta", `${device.name} · ${device.code ? "代码设备" : deviceStatus[device.status]}`);
       if (data.canManage) {
         const button = node("button", "button", "撤销接入");
         button.type = "button";

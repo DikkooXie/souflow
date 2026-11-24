@@ -10,6 +10,8 @@ import { type AccountAssignment, type CodexAccountDispatch, withCodexAccount } f
 import { qualitySources } from "./codex-quality-review.mts";
 import type { DispatchMonitor } from "./dispatch-monitor.mts";
 import { IssueVerificationUncertain } from "./issue-verification.mts";
+import type { CodeWorkerPool } from "./code-worker-pool.mts";
+import { contentDigest, type CodeWork } from "./code-worker-protocol.mts";
 import { applyCheckedCodeChanges, codeResultSchema, deliveryPath, maxCodeProposalBytes, maxEdits, type PatchIssue,
   PatchRejection, prepareCodeProposal, readEditableFile } from "./local-code-changes.mts";
 
@@ -27,6 +29,8 @@ export type PrepareIssue = (input: {
   previousFailure?: DeliveryFailure;
   reviewTarget?: DeliveryTarget & { base: string };
   repairing?: (issue: PatchIssue) => void;
+  workerProof?: Pick<CodeWork, "repo" | "issueRevision" | "plan">;
+  revalidateWorker?: (signal: AbortSignal) => Promise<void>;
 }, connected: (id: string) => void, signal: AbortSignal, assigned?: (account: AccountAssignment) => void) => Promise<PreparedDelivery>;
 
 export class IssueDeliveryFailed extends Error {
@@ -103,11 +107,7 @@ export function parseDeliveryPlan(raw: string): ReadonlyMap<number, DeliverySpec
   return specs;
 }
 
-export function createIssueDeveloper(monitor: DispatchMonitor, options: {
-  root: string; image: string; model?: string; timeoutMs: number; codexAccounts?: CodexAccountDispatch;
-}): PrepareIssue {
-  const { root, image, model, timeoutMs, codexAccounts } = options;
-  async function npm(workspace: string, signal: AbortSignal, install: boolean) {
+export async function isolatedIssueCheck(workspace: string, image: string, timeoutMs: number, signal: AbortSignal, install: boolean) {
     const name = `souflow-${randomUUID()}`;
     // 安装只针对合并后的锁文件，补丁应用后的检查使用无网络、只读工作区。
     try {
@@ -124,9 +124,18 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
       throw Error(install ? "隔离环境依赖安装失败。" : "隔离环境质量检查失败。");
     }
     finally { await exec("docker", ["rm", "-f", name], { timeout: 10_000 }).catch(() => undefined); }
-  }
-  return async ({ number, flowId, planVersion, spec, branch, upstream, publisher, previousFailure, reviewTarget, repairing }, connected, signal, assigned) => {
-    const session = monitor.begin({ title: `GitHub #${number}`, task: "开发与测试", ticketId: `#${number}`, flowId, ...(planVersion ? { planVersion } : {}) });
+}
+
+export function createIssueDeveloper(monitor: DispatchMonitor, options: {
+  root: string; image: string; model?: string; timeoutMs: number; codexAccounts?: CodexAccountDispatch; workers?: CodeWorkerPool;
+}): PrepareIssue {
+  const { root, image, model, timeoutMs, codexAccounts, workers } = options;
+  return async ({ number, flowId, planVersion, spec, branch, upstream, publisher, previousFailure,
+    reviewTarget, repairing, workerProof, revalidateWorker }, connected, signal, assigned) => {
+    const runOnDevice = !!(workers && workerProof && !reviewTarget);
+    const session = runOnDevice ? undefined : monitor.begin({
+      title: `GitHub #${number}`, task: "开发与测试", ticketId: `#${number}`, flowId, ...(planVersion ? { planVersion } : {}),
+    });
     let stage: DeliveryFailure["stage"] = "checkout";
     try {
       await mkdir(root, { recursive: true, mode: 0o700 });
@@ -143,17 +152,38 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
         await checkoutReviewedIssueBase(git, spec, upstream);
       }
       const editable = new Map(await Promise.all(spec.files.map(async file => [file, await readEditableFile(workspace, file)] as const)));
+      const revision = await git(["rev-parse", "HEAD"]);
       const readOnlySources = spec.sourcePaths?.length
-        ? await qualitySources(workspace, await git(["rev-parse", "HEAD"]), spec.sourcePaths, signal)
+        ? await qualitySources(workspace, revision, spec.sourcePaths, signal)
         : {};
       if (spec.sourcePaths?.some(path => !Object.hasOwn(readOnlySources, path))) throw new IssueDeliverySourcesChanged();
       signal.throwIfAborted();
       const untrustedContext = JSON.stringify({ editableFiles: [...editable].map(([path, file]) => ({
         path, text: scrubAuditText(file.content),
       })), readOnlySources });
-      const checked = await withCodexAccount(codexAccounts, signal, account => {
+      let remotePatch: string | undefined;
+      async function remoteProposal() {
+        if (!workers || !workerProof || !revalidateWorker) throw Error("缺少代码设备或已核对的工单授权。");
+        stage = "codex";
+        const result = await workers.execute({
+          ...workerProof, issue: number, revision, upstream,
+          files: [...editable].map(([path, file]) => ({ path, sha256: contentDigest(file.content) })),
+          instructions: [spec.instructions, ...(previousFailure ? [retryInstruction[previousFailure.reason]] : [])].join("\n"),
+          context: untrustedContext,
+        }, signal, timeoutMs, connected, revalidateWorker);
+        if (result.phase !== "tested") throw new IssueVerificationUncertain("needs-reconciliation");
+        remotePatch = result.patch;
+        stage = "patch";
+        return result.output;
+      }
+      const checked = runOnDevice
+        ? await (async () => {
+          const output = await remoteProposal();
+          return prepareCodeProposal(target, editable, async () => output);
+        })()
+        : await withCodexAccount(codexAccounts, signal, account => {
         assigned?.(account);
-        session.assignAccount(account);
+        session?.assignAccount(account);
       }, accountOptions => prepareCodeProposal(target, editable, async diagnostic => {
         signal.throwIfAborted();
         stage = "codex";
@@ -163,8 +193,8 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
           workspace, ...(model ? { model } : {}), localLoginOnly: true, outputSchema: codeResultSchema,
           outputMaxBytes: maxCodeProposalBytes,
           onOutputOverflow(bytes) { overflowBytes = bytes; },
-          onEvent() {}, onModel: session.model, onAccount: session.account,
-          onThread(id) { connected(id); session.connected(id); },
+          onEvent() {}, ...(session ? { onModel: session.model, onAccount: session.account } : {}),
+          onThread(id) { connected(id); session?.connected(id); },
           prompt: [
             "对下方本机配置明确授权的工单生成代码替换。每个 before 是文件当前唯一存在的原文，after 为替换结果，按顺序应用。只编辑提供的文件。",
             `只输出 JSON。edits 必须有 1 至 ${maxEdits} 项，每项恰好包含 path、before、after 三个字符串。逐字复制简短、唯一的 before，按序考虑前一条替换后的源码；不要返回 before 与 after 相同的项。report 简述理由。你无法运行测试，请勿声称已经运行。`,
@@ -190,22 +220,25 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
           return attempt.output();
         } finally { clearTimeout(timer); signal.removeEventListener("abort", stop); }
       }, repairing));
+      if (remotePatch && contentDigest(JSON.stringify(checked.changes)) !== remotePatch) {
+        throw new IssueVerificationUncertain("needs-reconciliation");
+      }
       signal.throwIfAborted();
       stage = "dependencies";
-      await npm(workspace, signal, true);
+      await isolatedIssueCheck(workspace, image, timeoutMs, signal, true);
       stage = "patch";
       const { files } = await applyCheckedCodeChanges(target, workspace, editable, checked);
       stage = "tests";
-      await npm(workspace, signal, false);
+      await isolatedIssueCheck(workspace, image, timeoutMs, signal, false);
       stage = "commit";
       await git(["add", "--", ...files]);
       await git(["-c", `user.name=${author}`, "-c", `user.email=${email}`, "-c", "commit.gpgsign=false",
         "commit", "-m", reviewTarget ? `fix(issue): address review feedback for #${number}` : `feat(issue): deliver GitHub issue #${number}`]);
       const head = await git(["rev-parse", "HEAD"]);
-      session.finish("completed");
+      session?.finish("completed");
       return { workspace, base: reviewTarget?.base ?? base, branch, head };
     } catch (error) {
-      session.finish(signal.aborted || error instanceof IssueVerificationUncertain ? "interrupted" : "failed");
+      session?.finish(signal.aborted || error instanceof IssueVerificationUncertain ? "interrupted" : "failed");
       if (signal.aborted || error instanceof IssueVerificationUncertain || error instanceof IssueDeliverySourcesChanged || error instanceof IssueDeliveryFailed) throw error;
       throw new IssueDeliveryFailed(error instanceof PatchRejection
         ? { stage: "patch", reason: error.reason, patchIssue: error.issue } : { stage, reason: "unavailable" });

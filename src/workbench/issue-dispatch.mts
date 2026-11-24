@@ -238,8 +238,19 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       const prepared = await delivery.prepare({ number: c.number, spec, branch, publisher: remote, upstream,
         ...(c.retryCount && c.failure ? { previousFailure: c.failure } : {}),
         repairing: diagnostic => save(current(), "patch-repair", diagnostic),
+        ...(c.approval?.quality ? { workerProof: { repo: connection.repo, issueRevision: c.approval.issueRevision,
+          plan: { flowId: c.approval.flowId, version: c.approval.version,
+            flowDigest: c.approval.quality.flowDigest, batchDigest: c.approval.quality.batchDigest } },
+          async revalidateWorker(signal: AbortSignal) {
+            signal.throwIfAborted();
+            const latest = await connection.read(c.number);
+            if (!permits(c.claimedBy) || !stillAssignee(c, latest) || latest.pulls.length) {
+              throw new IssueVerificationUncertain("needs-reconciliation");
+            }
+            signal.throwIfAborted();
+          } } : {}),
         ...(c.approval ? { flowId: c.approval.flowId, planVersion: c.approval.version } : {}) },
-        sessionId => save({ ...current(), sessionId }, "connected"), abort.signal,
+        sessionId => { if (current().sessionId !== sessionId) save({ ...current(), sessionId }, "connected"); }, abort.signal,
         accountAssignment => save({ ...current(), accountAssignment }, "account-assigned"));
       const checkedIssue = await connection.read(c.number);
       if (!stillAssignee(c, checkedIssue) || checkedIssue.pulls.length) throw Error("工单状态已变化。");

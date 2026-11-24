@@ -20,6 +20,9 @@ import { defaultAnswerMaxLength, maxQuestionsPerDecision } from "../decisions/qu
 import { codeReviewOptions, createLocalDispatch, type Run } from "../execution/local-dispatch.mts";
 import { createDispatchMonitor, dispatchOverview } from "../execution/dispatch-monitor.mts";
 import { createRemoteHandoff, type RemoteDevice, type RemoteJob } from "../execution/remote-handoff.mts";
+import { createCodeWorkerPool, type WorkerAttempt } from "../execution/code-worker-pool.mts";
+import { loadLocalEnv, readCodeWorkerConfig, runtimeInteger } from "../config/runtime.mts";
+import { workerId } from "../execution/code-worker-protocol.mts";
 import { createRemoteWorkerIngress, readRemoteFiles, remoteWorkerNetwork, type RemoteLanConfig } from "./remote-worker-ingress.mts";
 import { createCodexAccountDispatch, readCodexProfiles, type CodexAccountDispatch } from "../execution/codex-account-dispatch.mts";
 import { createConversationFlows, currentDevelopmentPlan, maxArtifactTextLength, phases, readPlanRevision, type StoredFlow } from "../planning/conversation-flow.mts";
@@ -86,6 +89,7 @@ type WorkbenchOptions = {
   hostName?: string;
   codexAccounts?: CodexAccountDispatch;
   remoteLan?: RemoteLanConfig;
+  codeDevices?: ReadonlySet<string>;
   qualityReviewer?: QualityReviewer;
   qualityModel?: string;
 };
@@ -93,8 +97,11 @@ type WorkbenchOptions = {
 export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions, auditPath?: string, {
   limits = defaultLimits, inputLimits = defaultInputLimits, auditThresholds = defaultAuditThresholds,
   dispatchConcurrency = defaultDispatchConcurrency, dispatchAdapters, project, members, issueTracker, verifyIssue, issueDelivery,
-  memberTrackers, hostName = hostname(), codexAccounts, remoteLan, qualityReviewer, qualityModel,
+  memberTrackers, hostName = hostname(), codexAccounts, remoteLan, codeDevices, qualityReviewer, qualityModel,
 }: WorkbenchOptions = {}) {
+  if (codeDevices?.size && (!remoteLan || !issueDelivery || !issueTracker)) {
+    throw Error("代码设备需要开启设备接入和 GitHub 对话工单交付。");
+  }
   const memberFor = members && createMembers(members);
   if (memberFor && !live) throw Error("两位成员模式需要 Codex 工作台。");
   const loadProject = live && project ? createProjectContextReader(live[0], project) : undefined;
@@ -124,7 +131,9 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       if (!recovery) throw Error("局域网设备接入需要持久化的 Codex 工作台。");
       const handoff = createRemoteHandoff(audit.checkpoint<RemoteDevice>("remote-devices"),
         audit.checkpoint<RemoteJob>("remote-jobs"), remoteLan.offlineMs);
-      return { handoff, ingress: createRemoteWorkerIngress(handoff, remoteLan), cert: new X509Certificate(remoteLan.cert).toString() };
+      const code = codeDevices?.size ? createCodeWorkerPool(audit.checkpoint<WorkerAttempt>("remote-code"),
+        codeDevices, readCodeWorkerConfig(), Date.now, audit.record) : undefined;
+      return { handoff, code, ingress: createRemoteWorkerIngress(handoff, remoteLan, code), cert: new X509Certificate(remoteLan.cert).toString() };
     } catch (error) {
       closeStore();
       throw error;
@@ -157,7 +166,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           ...(issueDelivery.recoverFailedIssue ? { recoverFailedIssue: issueDelivery.recoverFailedIssue } : {}),
           ...(issueDelivery.reviewFix ? { reviewFix: issueDelivery.reviewFix } : {}),
           prepare: createIssueDeveloper(monitor, { ...issueDelivery, root: `${database}.artifacts/github`,
-            ...(codexAccounts ? { codexAccounts } : {}) }),
+            ...(codexAccounts ? { codexAccounts } : {}), ...(remoteLink?.code ? { workers: remoteLink.code } : {}) }),
         }) : undefined;
       const issuePlanning = live && github && issueTracker && issueDelivery?.conversation && reviewQuality
         ? createConversationDelivery(github, audit.checkpoint<IssueProposal>(`github-proposals:${issueTracker.repo.toLowerCase()}`),
@@ -267,9 +276,12 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
             }));
           });
         const remote = remoteLink?.handoff.snapshot();
+        const code = remoteLink?.code;
         return send(200, { ...monitor.snapshot(), jobs, overview: dispatchOverview(jobs, remote?.jobs ?? []),
           waiting: jobs.filter(job => job.status === "queued"), ...(remoteLink ? {
-          remote: { ...remote, endpoint: remoteLink.ingress.endpoint(), canManage: !member || member.id === "implementer" },
+          remote: { ...remote, devices: remote?.devices.map(device => ({ ...device, code: code?.permits(device.id) ?? false })),
+            endpoint: remoteLink.ingress.endpoint(), canManage: !member || member.id === "implementer" },
+          ...(code ? { codeWorkers: code.snapshot() } : {}),
         } : {}) });
       }
       if (path === "/api/audit" || path.startsWith("/api/audit?")) {
@@ -300,6 +312,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         const actor = member?.login ?? member?.id ?? "personal";
         if (revokeDevice) {
           const status = remoteLink.handoff.revoke(revokeDevice, actor);
+          if (status === 200) remoteLink.code?.disconnect(revokeDevice);
           return send(status, status === 200 ? { revoked: true } : { error: "无法撤销设备接入。" });
         }
         const body = await readJson(request);
@@ -312,6 +325,9 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           return send(201, { ...result.bundle, endpoint, certificate: remoteLink.cert });
         }
         const selection = body.value as { deviceId?: unknown; paths?: unknown } | null;
+        if (typeof selection?.deviceId === "string" && remoteLink.code?.permits(selection.deviceId)) {
+          return send(422, { error: "此设备接收调度器派发的代码工单。" });
+        }
         try {
           if (!live) return send(503, { error: "局域网设备接口尚未启动。" });
           const { revision, files } = await readRemoteFiles(live[0], selection?.paths);
@@ -502,6 +518,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
   });
   if (remoteLink) server.once("listening", remoteLink.ingress.start);
   server.on("close", () => {
+    remoteLink?.code?.close();
     remoteLink?.ingress.close();
     const attempts = inbox.close();
     // 结束尝试时仍会产生最终状态，先让编排写完这些事件再关闭存储。
@@ -536,13 +553,7 @@ function stringMapSetting(name: string): Record<string, string> {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try {
-    process.loadEnvFile();
-  } catch (error) {
-    if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
-      throw new Error("无法读取本地 .env。");
-    }
-  }
+  loadLocalEnv();
   const port = integerSetting("SOULFLOW_DEMO_PORT", 4173, 0, 65_535);
   const live = process.argv.includes("--codex");
   const auditPath = process.env.SOULFLOW_AUDIT_DB || resolve(".souflow", live ? "codex-audit.sqlite" : "demo-audit.sqlite");
@@ -619,8 +630,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     ...(recoverFailedIssue === undefined ? {} : { recoverFailedIssue }),
     ...(reviewFix === undefined ? {} : { reviewFix: readApprovedReviewFix(reviewFix) }),
     pollMs: integerSetting("SOULFLOW_GITHUB_POLL_MS", 20_000, 5000, 3_600_000),
-    timeoutMs: integerSetting("SOULFLOW_GITHUB_DELIVERY_TIMEOUT_MS", 300_000, 1000, 3_600_000),
+    timeoutMs: runtimeInteger("SOULFLOW_GITHUB_DELIVERY_TIMEOUT_MS", 1000, 3_600_000),
   } : undefined;
+  const deviceIds = process.env.SOULFLOW_CODE_DEVICE_IDS?.trim().split(",").map(id => id.trim()).filter(Boolean) ?? [];
+  if (deviceIds.some(id => !workerId.test(id))) throw Error("代码设备配置必须使用已登记的设备 ID。");
   // 成员凭据只用于工作台登录，子进程沿用清理后的环境。
   delete process.env.SOULFLOW_MEMBER_IMPLEMENTER_KEY;
   delete process.env.SOULFLOW_MEMBER_REVIEWER_KEY;
@@ -629,6 +642,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     ...(codexAccounts ? { codexAccounts } : {}),
     ...(advanced ? { qualityModel: advanced } : {}),
     ...(remoteLan ? { remoteLan } : {}),
+    ...(deviceIds.length ? { codeDevices: new Set(deviceIds) } : {}),
     ...(implementer !== undefined || reviewer !== undefined || extra ? { members: { implementer: implementer ?? "", reviewer: reviewer ?? "", additionalImplementers } } : {}),
     ...(claimEnabled && githubRepo ? {
       issueTracker: createGitHubIssues(process.cwd(), githubRepo, githubAccounts.implementer ?? githubAccounts.personal),
