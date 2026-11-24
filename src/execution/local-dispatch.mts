@@ -16,7 +16,8 @@ import { qualitySources } from "./codex-quality-review.mts";
 import { applyLocalCodeChanges, codeResultSchema, type LocalCodePatch, readEditableFile, readLocalCodePatch, replayLocalCodePatch } from "./local-code-changes.mts";
 
 const exec = promisify(execFile);
-const maxTickets = 6;
+// 用传输字节数控制资源，工单数量与同时执行的槽位独立。
+const ticketOutputMaxBytes = 128 * 1024;
 const maxReportLength = 8000;
 const string = { type: "string" };
 const strings = { type: "array", items: string };
@@ -108,8 +109,9 @@ function ticketSchema(kind: DispatchKind, routeModels: boolean, review: boolean)
 
 export function readDispatchTickets(text: string | undefined, criteria: readonly string[], evidence: ReadonlySet<string>,
   kind: DispatchKind = "report", routing?: ModelRouting, review = false): Ticket[] {
+  if (text && Buffer.byteLength(text) > ticketOutputMaxBytes) throw Error("返回的工单方案超过传输字节上限。");
   const candidates = parse(text)?.tickets;
-  if (!Array.isArray(candidates) || candidates.length > maxTickets) throw Error("返回的工单结构无效。");
+  if (!Array.isArray(candidates)) throw Error("返回的工单结构无效。");
   const tickets = candidates.map(candidate => {
     const item = object(candidate);
     if (!item || typeof item.id !== "string" || !identifiers([item.id])) throw Error("返回的工单 ID 无效。");
@@ -352,11 +354,12 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
       const prompt = [
         run.kind === "code"
           ? "把已生成的开发计划拆成本地代码工单，每单可以单独验证产物。只有确实需要前置补丁时才声明工单依赖。"
-          : "把已生成的 souflow 开发计划拆成至多六张可独立验收的本地核验工单。工单只根据提供的资料和前置报告产出核验报告。",
+          : "把已生成的 souflow 开发计划拆成可独立验收的本地核验工单。工单只根据提供的资料和前置报告产出核验报告。",
         run.kind === "code"
-          ? "每单 editPaths 列出需改动的 1 到 4 个现有文件。无依赖的工单填写空 dependsOn。修改同一文件的工单必须按依赖串行。下游只在前置补丁获人工批准后开始。sources 可列出辅助参考文件或为空，路径均从 availableSources 选择。工单至多六张。"
+          ? "每单 editPaths 列出需改动的 1 到 4 个现有文件。无依赖的工单填写空 dependsOn。修改同一文件的工单必须按依赖串行。下游只在前置补丁获人工批准后开始。sources 可列出辅助参考文件或为空，路径均从 availableSources 选择。"
           : "前置报告为必须输入时才填写 dependsOn。若需求明确说两张独立核验之后汇总，拆出两个无依赖节点和一个同时依赖它们的汇总节点。从 availableSources 指定一到四份资料，汇总单可只依赖报告。",
         "复用计划范围，必须覆盖每个固定验收 ID。每项 instructions 写明交付目标、参考资料及验收方法。工单 ID 用大写字母开头，仅含大写字母、数字和连字符。",
+        "工单数量由批准计划和独立验收边界决定。一次返回完整工单和依赖，不因可同时执行的槽位数合并工单。",
         "工单 ID 用 T1、T2 之类的短名称。criteria 只填下方验收项的 id，例如 AC-1；dependsOn 只填工单 ID，例如 T1。标题少于 100 字，说明少于 2000 字。",
         ...(reviewer ? ["每个 criteria ID 在 validation 中分别写一项，包含 criterion、可执行的 procedure 和可观察的 expected。验证步骤须覆盖对应的失败或并发条件。"] : []),
         ...(routing ? ["逐单判断难度。范围清楚、改动局部且验收直接时给 difficulty=routine；需要判断跨模块契约、权限、迁移或关键步骤证据不足时给 difficulty=advanced。routingReason 用一句话说明本单的可验证依据，不超过 240 字。"] : []),
@@ -368,7 +371,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
         title: flow.title, task: "拆分本地工单" });
       const output = await result(() => {
         const attempt = split({
-          workspace, prompt, outputSchema: ticketSchema(run.kind, !!routing, !!reviewer),
+          workspace, prompt, outputSchema: ticketSchema(run.kind, !!routing, !!reviewer), outputMaxBytes: ticketOutputMaxBytes,
           disableWebSearch: true, onModel(model) { run.planningModel = model; session?.model(model); },
           ...(session ? { onThread: session.connected, onAccount: session.account } : {}),
           onEvent(event) { if (event.kind === "question-requested") attempt.close(); },
