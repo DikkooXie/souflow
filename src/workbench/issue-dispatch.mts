@@ -7,9 +7,10 @@ import { IssueDeliveryFailed, IssueDeliverySourcesChanged, type DeliveryFailure,
 import { IssueVerificationUncertain, type VerifyIssue } from "../execution/issue-verification.mts";
 import type { PatchIssue } from "../execution/local-code-changes.mts";
 import { qualityBindingCurrent, type QualityBinding } from "../planning/dispatch-quality.mts";
+import type { ApprovedReviewFix } from "./approved-review-fix.mts";
 
 export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; prepare: PrepareIssue; pollMs: number; conversation?: boolean;
-  requireQuality?: boolean; recoverFailedIssue?: number };
+  requireQuality?: boolean; recoverFailedIssue?: number; reviewFix?: ApprovedReviewFix };
 
 function publisher(tracker: IssueTracker) {
   return (tracker as Partial<DeliveryTracker>).delivery;
@@ -23,6 +24,7 @@ export type Claim = Remote & {
   delivery?: DeliverySpec; approval?: { flowId: string; planId: string; version: number; issueRevision: string; quality?: QualityBinding };
   target?: DeliveryTarget; pull?: IssuePull;
   failure?: DeliveryFailure; retryCount?: number;
+  reviewFix?: { from: string; state: "running" | "publishing" | "complete" | "failed"; pendingHead?: string; base?: string };
 };
 const phases = { claiming: "正在认领", waiting: "等待上游 PR 合并", developing: "Codex 正在开发与测试", publishing: "正在推送并创建 PR", submitted: "已提交 PR", deliveryFailed: "开发或测试失败", running: "Codex 正在核验", done: "核验完成", conflict: "认领冲突", uncertain: "待核对", failed: "核验失败" };
 const stageNames = { preflight: "工单状态核对", checkout: "工作区准备", codex: "Codex 运行", dependencies: "依赖安装",
@@ -60,6 +62,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       action: event, ...c.approval, ...(c.target ? { branch: c.target.branch, head: c.target.head } : {}),
       ...(c.failure ? { failure: c.failure } : {}), ...(c.retryCount ? { retryCount: c.retryCount } : {}),
       ...(patchCheck ? { patchCheck } : {}),
+      ...(c.reviewFix ? { reviewFix: c.reviewFix } : {}),
       ...(event === "account-assigned" ? { codexAccount: c.accountAssignment } : {}),
       ...(c.pull ? { pull: c.pull.number, ci: c.pull.ci, merge: c.pull.mergeCommit, state: c.pull.state } : {}), actor: c.claimedBy, githubAccount: c.account, phase: c.phase, session: c.sessionId,
     } } : undefined)) throw new IssueActionError(503, "无法保存 GitHub 工单状态。");
@@ -77,7 +80,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       oldFormat ? "patch-recovery-queued" : "retry-queued");
   }
   for (const c of store.load()) {
-    if (["claiming", "running", "developing", "publishing"].includes(c.phase)) save({ ...c, phase: "uncertain" }, "restart");
+    if (c.reviewFix?.state === "running") save({ ...c, reviewFix: { ...c.reviewFix, state: "failed" } }, "review-fix-interrupted");
+    else if (["claiming", "running", "developing", "publishing"].includes(c.phase)) save({ ...c, phase: "uncertain" }, "restart");
     else {
       claims.set(c.number, c);
       queueRetry(c);
@@ -90,7 +94,10 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
         ...(approval ? { flowId: approval.flowId } : {}),
         ...(item.failure ? { failureMessage: `${stageNames[item.failure.stage]} · ${reasonNames[item.failure.reason]}` } : {}),
         pulls: pull ? [...item.pulls.filter(other => other.number !== pull.number), pull] : item.pulls,
-        progress: phase === "waiting" && item.retryCount ? "等待自动重试" : phases[phase] })),
+        progress: item.reviewFix?.state === "running" ? "Codex 正在续修 PR"
+          : item.reviewFix?.state === "publishing" ? "正在核对续修发布"
+          : item.reviewFix?.state === "failed" ? "PR 续修失败"
+          : phase === "waiting" && item.retryCount ? "等待自动重试" : phases[phase] })),
       ...candidates.filter(c => !claims.has(c.number)).map(c => ({ ...c, progress: "待认领" })),
     ] };
   }
@@ -155,6 +162,67 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     return issue.state === "OPEN" && (!c.approval || c.approval.issueRevision === issueRevision(issue)) && issue.assignees.length === 1
       && issue.assignees[0]?.toLowerCase() === c.account.toLowerCase();
   }
+  function confirmReviewFix(c: Claim, pull: IssuePull, target: DeliveryTarget) {
+    const state = c.reviewFix;
+    if (state?.state !== "publishing" || !state.pendingHead || pull.head !== state.pendingHead
+      || !state.base || pull.baseName !== state.base || pull.number !== c.pull?.number) return;
+    save({ ...c, target: { ...target, head: pull.head }, pull, reviewFix: { ...state, state: "complete" } }, "review-fix-published");
+  }
+  function dispatchReviewFix() {
+    const fix = delivery?.reviewFix;
+    if (!fix || !delivery.conversation || jobs.size >= maxActive) return;
+    const c = claims.get(fix.issue);
+    const target = c?.target;
+    const approved = c?.delivery;
+    if (c?.phase !== "submitted" || !target || target.head !== fix.head || c.pull?.number !== fix.pull
+      || c.reviewFix?.from === fix.head || !approved?.baseRevision || !qualityBindingCurrent(c.approval?.quality)
+      || !fix.files.every(path => approved.files.includes(path)) || !permits(c.claimedBy)) return;
+    const connection = memberTrackers.get(c.claimedBy) ?? tracker;
+    const remote = publisher(connection);
+    if (!remote?.checkoutPublished || !remote.updatePublished) return;
+    const update = remote.updatePublished;
+    const state = { from: fix.head, state: "running" as const };
+    save({ ...c, reviewFix: state }, "review-fix-started");
+    const current = () => claims.get(c.number) ?? c;
+    const verify = async () => {
+      const [account, issue, pull] = await Promise.all([
+        connection.account(), connection.read(c.number), remote.find(target.branch, fix.head, fix.pull),
+      ]);
+      if (account.toLowerCase() !== c.account.toLowerCase() || !stillAssignee(c, issue)
+        || !issue.pulls.some(item => item.number === fix.pull) || pull?.state !== "OPEN"
+        || pull.head !== fix.head || !pull.baseName || (c.pull?.baseName && pull.baseName !== c.pull.baseName)) {
+        throw Error("PR 或原工单授权已变化。");
+      }
+      return pull.baseName;
+    };
+    const job = (async () => {
+      try {
+        const base = await verify();
+        const prepared = await delivery.prepare({
+          number: c.number, spec: { ...approved, files: fix.files, instructions: `只处理本轮评审要求。\n${fix.instructions}` },
+          branch: target.branch, upstream: [], publisher: remote, reviewTarget: target,
+          ...(c.approval ? { flowId: c.approval.flowId, planVersion: c.approval.version } : {}),
+          repairing: diagnostic => save(current(), "patch-repair", diagnostic),
+        }, sessionId => save({ ...current(), sessionId }, "review-fix-connected"), abort.signal,
+        accountAssignment => save({ ...current(), accountAssignment }, "account-assigned"));
+        if (prepared.base !== base || await verify() !== base) throw Error("PR 目标已变化。");
+        abort.signal.throwIfAborted();
+        save({ ...current(), reviewFix: { ...state, state: "publishing", pendingHead: prepared.head, base } }, "review-fix-checked");
+        const pull = await update({ workspace: prepared.workspace, branch: target.branch,
+          from: fix.head, head: prepared.head, pull: fix.pull, base }, abort.signal);
+        confirmReviewFix(current(), pull, target);
+      } catch (error) {
+        const latest = current();
+        // 开始推送后只回读 GitHub，避免因响应丢失重复推送。
+        if (latest.reviewFix?.state === "running") {
+          save({ ...latest, reviewFix: { ...state, state: "failed" },
+            ...(error instanceof IssueDeliveryFailed ? { failure: error.failure } : {}) }, "review-fix-failed");
+        }
+      }
+    })();
+    jobs.add(job);
+    void job.then(() => jobs.delete(job), () => jobs.delete(job));
+  }
   async function develop(c: Claim, spec: DeliverySpec, upstream: string[]) {
     const connection = memberTrackers.get(c.claimedBy) ?? tracker;
     const remote = publisher(connection);
@@ -195,6 +263,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   }
   function dispatchReady() {
     if (!delivery || abort.signal.aborted) return;
+    dispatchReviewFix();
     for (const c of claims.values()) {
       if (jobs.size >= maxActive) break;
       if (c.phase !== "waiting" || !c.delivery) continue;
@@ -221,6 +290,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     let unavailable = false;
     for (const prior of [...claims.values()]) {
       if (!prior.target || (prior.phase !== "uncertain" && prior.phase !== "submitted")) continue;
+      if (prior.reviewFix?.state === "running") continue;
       // 关闭但未合并的 PR 仍可能重开。只停止轮询已合并且已收齐关闭与 CI 回执的工单。
       if (prior.pull?.state === "MERGED" && prior.state === "CLOSED"
         && ["SUCCESS", "FAILURE", "ERROR"].includes(prior.pull.ci ?? "")) continue;
@@ -236,6 +306,10 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
         ? await connection.read(prior.number).catch(() => undefined) : undefined;
       const c = claims.get(prior.number);
       if (!c || c.target !== prior.target || abort.signal.aborted) continue;
+      if (c.reviewFix?.state === "publishing") {
+        confirmReviewFix(c, pull, prior.target);
+        continue;
+      }
       const changed = JSON.stringify(c.pull) !== JSON.stringify(pull);
       if (changed || c.phase !== "submitted" || (issue && issue.state !== c.state)) {
         save({ ...c, ...(issue ? remoteIssue(issue) : {}), pull, phase: "submitted", syncedAt: Date.now() },

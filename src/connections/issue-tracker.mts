@@ -5,6 +5,7 @@ export type IssueSummary = { number: number; title: string; url: string; state: 
 export type IssuePull = {
   number: number; state: string; url: string;
   ci?: string; head?: string; mergeCommit?: string; draft?: boolean;
+  baseName?: string;
 };
 export type IssueDetail = IssueSummary & {
   pulls: IssuePull[];
@@ -22,6 +23,8 @@ export type IssuePublisher = {
   checkout(target: string, signal: AbortSignal): Promise<{ base: string; author: string; email: string }>;
   publish(input: { workspace: string; issue: number; branch: string; base: string; head: string; title: string }, signal: AbortSignal): Promise<IssuePull>;
   find(branch: string, head: string, knownPull?: number): Promise<IssuePull | undefined>;
+  checkoutPublished?(workspace: string, target: { branch: string; head: string }, signal: AbortSignal): Promise<void>;
+  updatePublished?(input: { workspace: string; branch: string; from: string; head: string; pull: number; base: string }, signal: AbortSignal): Promise<IssuePull>;
 };
 
 export type DeliveryTracker = IssueTracker & { delivery: IssuePublisher };

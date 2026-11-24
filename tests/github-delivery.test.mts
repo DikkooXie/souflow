@@ -79,6 +79,96 @@ test("只展示 PR 当前提交的 CI，合并 SHA 独立记录", () => {
   assert.equal(githubPull("a/b", pull).mergeCommit, "merged");
 });
 
+test("续修沿用批准范围和现有 PR，推送响应丢失时只回读", async t => {
+  const head = "b".repeat(40);
+  const next = "c".repeat(40);
+  const hash = "d".repeat(64);
+  const branch = "feat/47-123456789abc";
+  const initialPull: IssuePull = { number: 53, url: "https://github.com/a/b/pull/53", state: "OPEN", head, baseName: "main" };
+  const issue: IssueDetail = { number: 47, title: "核对重连", body: "保存重连状态", url: "https://github.com/a/b/issues/47",
+    state: "OPEN", assignees: ["member"], pulls: [initialPull] };
+  for (const scenario of ["success", "changed-head", "scope", "interrupted-publish", "changed-base"] as const) {
+    await t.test(scenario, async () => {
+      let remotePull = { ...initialPull };
+      let stored: Claim = { ...issue, pull: initialPull, target: { branch, head }, requestId: "authorized",
+        claimedBy: "member", account: "member", phase: "submitted", syncedAt: 0,
+        delivery: { ...spec, baseRevision: "a".repeat(40) },
+        approval: { flowId: "flow", planId: "plan", version: 1, issueRevision: issueRevision(issue),
+          quality: { policy: 1, flowDigest: hash, batchDigest: hash } } };
+      if (scenario === "changed-head") remotePull.head = next;
+      let prepares = 0;
+      let pushes = 0;
+      const events: string[] = [];
+      const tracker: DeliveryTracker = {
+        repo: "a/b", account: async () => "member", candidates: async () => [], read: async () => ({ ...issue, pulls: [remotePull] }),
+        assign: async () => assert.fail("不可重新认领"),
+        delivery: {
+          checkout: async () => assert.fail("不用真实工作区"), checkoutPublished: async () => {},
+          publish: async () => assert.fail("不可创建新 PR"),
+          find: async () => structuredClone(remotePull),
+          updatePublished: async input => {
+            assert.equal(input.from, head);
+            assert.equal(input.head, next);
+            assert.equal(input.pull, 53);
+            pushes++;
+            if (scenario === "interrupted-publish") throw Error("响应丢失");
+            if (scenario === "changed-base") {
+              remotePull = { ...remotePull, head: next, baseName: "other" };
+              throw Error("目标分支已变化");
+            }
+            remotePull = { ...remotePull, head: next };
+            return structuredClone(remotePull);
+          },
+        },
+      };
+      const open = () => createIssueDispatch(tracker, {
+        load: () => [structuredClone(stored)],
+        save(_id, item, event) {
+          stored = structuredClone(item);
+          if (event?.details && "action" in event.details) events.push(String(event.details.action));
+          return true;
+        },
+      }, async () => assert.fail(), () => true, 1, new Map(), {
+        specs: new Map(), conversation: true, requireQuality: true, pollMs: 60_000,
+        reviewFix: { issue: 47, pull: 53, head, instructions: "仅修评审", files: scenario === "scope" ? ["src/other.mts"] : [...spec.files] },
+        async prepare(input) {
+          prepares++;
+          assert.deepEqual(input.reviewTarget, { branch, head });
+          assert.equal(input.flowId, "flow");
+          assert.deepEqual(input.spec.files, spec.files);
+          return { workspace: "fixture", base: "main", branch, head: next };
+        },
+      });
+      const run = async (rounds: number) => {
+        const instance = open();
+        try {
+          for (let i = 0; i < rounds; i++) {
+            await instance.refresh();
+            await setImmediate();
+          }
+        } finally { await instance.close(); }
+      };
+      await run(2);
+      if (scenario === "interrupted-publish") {
+        assert.equal(stored.reviewFix?.state, "publishing");
+        assert.equal(stored.target?.head, head);
+        remotePull = { ...remotePull, head: next };
+      }
+      await run(2);
+      const completed = scenario === "success" || scenario === "interrupted-publish";
+      assert.equal(prepares, Number(completed || scenario === "changed-base"));
+      assert.equal(pushes, Number(completed || scenario === "changed-base"));
+      assert.equal(events.filter(action => action === "review-fix-published").length, Number(completed));
+      if (completed) {
+        assert.equal(stored.reviewFix?.state, "complete");
+        assert.equal(stored.target?.head, next);
+        assert.equal(stored.pull?.number, 53);
+      }
+      if (scenario === "changed-base") assert.equal(stored.reviewFix?.state, "publishing");
+    });
+  }
+});
+
 test("类型检查失败允许重试，Docker 启动失败或退出信号不视为检查结论", () => {
   assert.ok(isolatedCheckFailed(1));
   assert.ok(isolatedCheckFailed(2));

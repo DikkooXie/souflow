@@ -9,6 +9,7 @@ import { createGitHubIssues } from "../connections/github.mts";
 import type { IssueTracker } from "../connections/issue-tracker.mts";
 import { createIssueVerifier, type VerifyIssue } from "../execution/issue-verification.mts";
 import { createIssueDispatch, IssueActionError, type Claim, type IssueDeliveryOptions } from "./issue-dispatch.mts";
+import { readApprovedReviewFix } from "./approved-review-fix.mts";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
 import { hostname } from "node:os";
@@ -155,6 +156,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         audit.record, dispatchConcurrency, memberTrackers, issueDelivery && {
           specs: issueDelivery.specs, pollMs: issueDelivery.pollMs, conversation: true, requireQuality: true,
           ...(issueDelivery.recoverFailedIssue ? { recoverFailedIssue: issueDelivery.recoverFailedIssue } : {}),
+          ...(issueDelivery.reviewFix ? { reviewFix: issueDelivery.reviewFix } : {}),
           prepare: createIssueDeveloper(monitor, { ...issueDelivery, root: `${database}.artifacts/github`,
             ...(codexAccounts ? { codexAccounts } : {}) }),
         }) : undefined;
@@ -596,6 +598,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const issuePlan = process.env.SOULFLOW_GITHUB_DELIVERY_PLAN?.trim();
   const image = process.env.SOULFLOW_GITHUB_CHECK_IMAGE?.trim();
   const conversationDelivery = process.env.SOULFLOW_GITHUB_CONVERSATION_DELIVERY === "1";
+  const reviewFix = process.env.SOULFLOW_GITHUB_REVIEW_FIX;
+  delete process.env.SOULFLOW_GITHUB_REVIEW_FIX;
+  if (reviewFix !== undefined && !conversationDelivery) throw Error("PR 续修需要启用对话工单交付。");
   const recoverFailedIssue = process.env.SOULFLOW_GITHUB_RECOVER_FAILED_ISSUE === undefined ? undefined
     : integerSetting("SOULFLOW_GITHUB_RECOVER_FAILED_ISSUE", 0, 1, Number.MAX_SAFE_INTEGER);
   if (recoverFailedIssue !== undefined && !conversationDelivery) throw Error("恢复旧工单前请启用对话工单交付。");
@@ -609,6 +614,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     image, ...(routine ? { model: routine } : {}), ...(advanced ? { planningModel: advanced } : {}),
     conversation: conversationDelivery,
     ...(recoverFailedIssue === undefined ? {} : { recoverFailedIssue }),
+    ...(reviewFix === undefined ? {} : { reviewFix: readApprovedReviewFix(reviewFix) }),
     pollMs: integerSetting("SOULFLOW_GITHUB_POLL_MS", 20_000, 5000, 3_600_000),
     timeoutMs: integerSetting("SOULFLOW_GITHUB_DELIVERY_TIMEOUT_MS", 300_000, 1000, 3_600_000),
   } : undefined;

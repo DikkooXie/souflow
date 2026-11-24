@@ -5,15 +5,17 @@ import type { IssuePublisher, IssuePull } from "./issue-tracker.mts";
 const exec = promisify(execFile);
 const commandLimit = { timeout: 90_000, maxBuffer: 2 * 1024 * 1024 };
 
-export const githubPullFields = "number state isDraft headRefOid mergeCommit{oid} commits(last:1){nodes{commit{oid statusCheckRollup{state}}}}";
+export const githubPullFields = "number state isDraft headRefOid baseRefName mergeCommit{oid} commits(last:1){nodes{commit{oid statusCheckRollup{state}}}}";
 type PullNode = {
   number: number; state: string; isDraft: boolean; headRefOid: string; mergeCommit: { oid: string } | null;
+  baseRefName?: string;
   commits: { nodes: { commit: { oid: string; statusCheckRollup: { state: string } | null } }[] };
 };
 export function githubPull(repo: string, pr: PullNode): IssuePull {
   const commit = pr.commits.nodes[0]?.commit;
   return { number: pr.number, state: pr.state, url: `https://github.com/${repo}/pull/${pr.number}`,
-    draft: pr.isDraft, head: pr.headRefOid, ...(pr.mergeCommit ? { mergeCommit: pr.mergeCommit.oid } : {}),
+    draft: pr.isDraft, head: pr.headRefOid, ...(pr.baseRefName ? { baseName: pr.baseRefName } : {}),
+    ...(pr.mergeCommit ? { mergeCommit: pr.mergeCommit.oid } : {}),
     ci: commit?.oid === pr.headRefOid ? commit.statusCheckRollup?.state ?? "NONE" : "NONE" };
 }
 
@@ -24,8 +26,8 @@ export function createGitHubDelivery(repo: string, api: (args: string[]) => Prom
   async function git(args: string[], signal: AbortSignal) {
     // 凭据只进入固定 Git 命令。测试与 Codex 不使用此环境，也不读取全局 Git 助手。
     try {
-      await exec("git", ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
-        "-c", "core.hooksPath=/dev/null", ...args], { ...commandLimit, env: await credentialEnv(), signal });
+      return (await exec("git", ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
+        "-c", "core.hooksPath=/dev/null", ...args], { ...commandLimit, env: await credentialEnv(), signal })).stdout.trim();
     } catch { throw Error("GitHub 工作区操作失败。"); }
   }
   async function find(branch: string, head: string, knownPull?: number) {
@@ -40,6 +42,28 @@ export function createGitHubDelivery(repo: string, api: (args: string[]) => Prom
   }
   return {
     find,
+    async checkoutPublished(workspace, { branch, head }, signal) {
+      if (!/^feat\/\d+-[a-f0-9]{12}$/.test(branch) || !/^[a-f0-9]{40}$/.test(head)) throw Error("续修目标无效。");
+      const run = (args: string[]) => git(["-C", workspace, ...args], signal);
+      await run(["fetch", "--no-tags", url, `refs/heads/${branch}`]);
+      if (await run(["rev-parse", "FETCH_HEAD"]) !== head) throw Error("续修分支已经变化。");
+      await run(["switch", "--detach", head]);
+    },
+    async updatePublished({ workspace, branch, from, head, pull, base }, signal) {
+      if (!/^feat\/\d+-[a-f0-9]{12}$/.test(branch) || ![from, head].every(sha => /^[a-f0-9]{40}$/.test(sha))) {
+        throw Error("续修提交目标无效。");
+      }
+      const previous = await find(branch, from, pull);
+      if (previous?.state !== "OPEN" || previous.head !== from || previous.baseName !== base
+        || await git(["-C", workspace, "rev-list", "--parents", "-n", "1", head], signal) !== `${head} ${from}`) {
+        throw Error("PR 已变化，或续修提交不满足快进条件。");
+      }
+      const ref = `refs/heads/${branch}`;
+      await git(["-C", workspace, "push", `--force-with-lease=${ref}:${from}`, url, `${head}:${ref}`], signal);
+      const updated = await find(branch, head, pull);
+      if (updated?.head !== head || updated.baseName !== base) throw Error("无法确认续修发布。");
+      return updated;
+    },
     async checkout(target, signal) {
       const { default_branch: base } = JSON.parse(await api([`repos/${repo}`]));
       const { login: author, id } = JSON.parse(await api(["user"]));
