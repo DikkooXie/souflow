@@ -7,6 +7,12 @@ const version = 1;
 const kinds = ["research", "requirements", "technology", "prd", "development-plan"] as const;
 const dimensions = ["scope", "evidence", "verification"] as const;
 const details = { scope: "范围", evidence: "依据", verification: "验证" };
+export const qualityReviewLimits = {
+  summaryCharacters: 500,
+  quoteMinCharacters: 2,
+  quoteCharacters: 240,
+  references: { scope: 6, evidence: 6, verification: 24 },
+} as const;
 const requiredUpstream = {
   research: ["request"], requirements: ["research"], technology: ["requirements"], prd: ["requirements"],
   "development-plan": ["prd", "technology"],
@@ -142,13 +148,14 @@ export async function reviewQuality(packet: QualityPacket, payload: unknown, rev
   const entries = dimensions.map(key => {
     const row = object(parsed[key]);
     if (!row || (row.status !== "pass" && row.status !== "block") || typeof row.summary !== "string"
-      || !row.summary.trim() || row.summary.length > 500 || !Array.isArray(row.evidence) || !row.evidence.length
-      || row.evidence.length > (key === "verification" ? 24 : 6)) {
+      || !row.summary.trim() || row.summary.length > qualityReviewLimits.summaryCharacters || !Array.isArray(row.evidence)
+      || !row.evidence.length || row.evidence.length > qualityReviewLimits.references[key]) {
       throw Error("质量复核结论缺少依据，可以重试。");
     }
     const evidence = row.evidence.map(entry => {
       const { ref, quote } = object(entry) ?? {};
-      if (typeof ref !== "string" || typeof quote !== "string" || quote.trim().length < 2 || quote.length > 240
+      if (typeof ref !== "string" || typeof quote !== "string" || quote.trim().length < qualityReviewLimits.quoteMinCharacters
+        || quote.length > qualityReviewLimits.quoteCharacters
         || !Object.hasOwn(packet.references, ref) || !packet.references[ref]?.includes(quote)) {
         throw Error("质量复核引用无法在本轮资料找到，可以重试。");
       }
