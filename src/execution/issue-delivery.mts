@@ -191,7 +191,7 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
         stage = "codex";
         const result = await workers.execute({
           ...workerProof, issue: number, revision, upstream,
-          files: [...editable].map(([path, file]) => ({ path, sha256: contentDigest(file.content) })),
+          files: [...editable].map(([path, file]) => ({ path, sha256: contentDigest(file.content), bytes: Buffer.byteLength(file.content) })),
           instructions: [spec.instructions, acceptanceTestInstruction, ...(previousFailure ? [retryInstruction[previousFailure.reason]] : [])].join("\n"),
           context: untrustedContext,
         }, signal, timeoutMs, connected, revalidateWorker);

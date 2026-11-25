@@ -5,7 +5,8 @@ import { issueRevision, type IssueDetail } from "../connections/issue-tracker.mt
 import { startCodexReadOnlyTask } from "../execution/codex-command-attempt.mts";
 import { qualitySourceFileBytes } from "../execution/codex-quality-review.mts";
 import { parseDeliveryPlan } from "../execution/issue-delivery.mts";
-import { deliveryPath, maxSourceBytes } from "../execution/local-code-changes.mts";
+import { codeEditFileBytes } from "../config/runtime.mts";
+import { deliveryPath } from "../execution/local-code-changes.mts";
 import { currentDevelopmentPlan, type Flow } from "./conversation-flow.mts";
 import { acceptanceCriteria, prepareVerifiedDraft, readVerification, verificationSchema, type Verification } from "./dispatch-quality.mts";
 import { snapshotIssueCandidates } from "./project-context.mts";
@@ -108,7 +109,8 @@ export function createGitHubSelector(workspace: string, options: { model?: strin
       const path = match?.[2];
       return path && Number(match?.[1]) <= qualitySourceFileBytes && deliveryPath.test(path) ? [{ path, size: Number(match?.[1]) }] : [];
     }).slice(0, 240);
-    const files = new Set(catalog.filter(entry => entry.size <= maxSourceBytes).map(entry => entry.path));
+    const editLimit = codeEditFileBytes();
+    const files = new Set(catalog.filter(entry => entry.size <= editLimit).map(entry => entry.path));
     const readable = new Set(catalog.map(entry => entry.path));
     const criteria = acceptanceCriteria(flow);
     if (!criteria.length || criteria.length > 24) throw Error("工单校验未通过：缺少本轮验收项，或验收范围过大。");

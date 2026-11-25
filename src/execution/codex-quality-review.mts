@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { scrubAuditText } from "../audit/activity-store.mts";
-import { qualitySourceInputBytes } from "../config/runtime.mts";
+import { codeEditFileHardLimit, qualitySourceInputBytes } from "../config/runtime.mts";
 import { qualityReviewLimits, qualityReviewOutputBytes, qualityReviewSchema, ticketSourceReviewSchema,
   type QualityReviewer, type TicketSourceReviewer } from "../planning/dispatch-quality.mts";
 import { startCodexReadOnlyTask } from "./codex-command-attempt.mts";
@@ -9,7 +9,7 @@ import { deliveryPath } from "./local-code-changes.mts";
 
 const exec = promisify(execFile);
 const sourceLimit = 12;
-export const qualitySourceFileBytes = 65_536;
+export const qualitySourceFileBytes = codeEditFileHardLimit;
 const regularPath = /^(?:(?:docs|src|tests)\/[a-zA-Z0-9._/-]+\.(?:md|mts|mjs|html|css)|AGENTS\.md)$/;
 
 export function qualitySourcePath(path: string) {
