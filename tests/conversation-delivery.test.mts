@@ -352,7 +352,8 @@ test("保留原未授权草稿，十张工单分别核对固定源码，缺一�
       claimApproved: async () => assert.fail("未授权不得认领"), }, {
       load: () => [...checkpoint.values()], save(id, item) { checkpoint.set(id, structuredClone(item)); return true; },
     }, async () => assert.fail("不生成别的草稿"), async (packet, signal) => {
-      assert.equal(packet.sourceReviewMode, "per-ticket");
+      assert.equal(packet.sourceChecks?.length, missing ? 7 : 10);
+      assert.match(packet.references["source-check:T1"] ?? "", /固定源码 src\/feature-0\.mts/);
       assert.equal(packet.tickets.length, 10);
       return passingQualityReview(packet, signal);
     }, async (revision, paths) => {
@@ -468,6 +469,82 @@ test("一次授权批量认领后，只派发就绪工单，合并后接续下�
     assert.deepEqual(started, [1, 2]);
     assert.equal(records.get("2")?.pull?.number, 102);
   } finally { await github.close(); }
+});
+
+test("批次复核先读取逐单源码证据，技术拦截只在同版修订一次", async t => {
+  for (const kind of ["pass-after-fix", "still-blocked", "scope-block", "resume-after-batch-failure"] as const) await t.test(kind, async () => {
+    const flow = await readyQualityFlow();
+    const base = "a".repeat(40);
+    flow.project = { repository: { revision: base, commits: [] }, plan: { status: "read" }, github: { status: "read" } };
+    const proposalRows = new Map<string, IssueProposal>();
+    const calls: string[] = [];
+    let firstBatch = true;
+    const fixture = { id: "T1", title: "核对独立验收", instructions: "查明发送时机", criteria: ["AC-1"], validation,
+      paths: ["src/main.mts"], dependsOn: [], delivery: { outcome: "用户只收到一条待办", priorityReason: "核心结果", prerequisites: [] } };
+    const tracker: DeliveryTracker = {
+      repo: "a/b", candidates: async () => [], account: async () => "member", read: async () => assert.fail(), assign: async () => assert.fail(),
+      creation: { create: async () => assert.fail("未授权不得创建"), findCreated: async () => [] },
+      delivery: { checkout: async () => assert.fail("未授权不得执行"), find: async () => undefined, publish: async () => assert.fail() },
+    };
+    const service = createConversationDelivery({
+      permits: () => true, suggest: async () => [], claimApproved: async () => assert.fail("未授权不得认领"),
+    }, { load: () => [], save(id, p) { proposalRows.set(id, structuredClone(p)); return true; } }, async () => "new",
+    async packet => {
+      const title = packet.tickets[0]?.title;
+      calls.push(`批次 ${title}`);
+      assert.match(packet.references["source-check:T1"] ?? "", /固定提交中的接口/);
+      assert.equal(packet.sourceChecks?.[0]?.revision, base);
+      if (firstBatch && kind === "resume-after-batch-failure") {
+        firstBatch = false;
+        throw Error("独立质量复核暂不可用");
+      }
+      const result = qualityReviewOutput(packet);
+      if (kind === "scope-block") return JSON.stringify({ ...result, scope: { ...result.scope, status: "block", summary: "产品范围有冲突" } });
+      if (title === fixture.title || kind === "still-blocked") return JSON.stringify({ ...result,
+        verification: { ...result.verification, status: "block", summary: "缺少并发确认验证" } });
+      return JSON.stringify(result);
+    }, async (revision, paths) => {
+      assert.equal(revision, base);
+      return Object.fromEntries(paths.map(path => [path, "固定提交中的接口"]));
+    }, {
+      async draft(snapshot, id, correction) {
+        assert.equal(snapshot.project?.repository?.revision, base);
+        assert.ok(proposalRows.has(id));
+        if (!correction) return { tickets: [fixture], batchAcceptance: [] };
+        assert.deepEqual(correction.tickets, [fixture]);
+        assert.match(correction.findings, /缺少并发确认验证/);
+        calls.push("修订");
+        return { tickets: [{ ...fixture, title: "核对并发确认" }], batchAcceptance: [] };
+      },
+      publish: async () => assert.fail("未授权不得发布"), connection: () => tracker,
+      sourceReview: { concurrency: 1, async reviewer(packet) {
+        calls.push(`源码 ${packet.ticket.title}`);
+        const ref = "repo:src/main.mts";
+        return JSON.stringify({ status: firstBatch && kind === "resume-after-batch-failure" ? "block" : "pass",
+          summary: "找到固定提交中的接口", evidence: [{ ref, quote: packet.references[ref] }] });
+      } },
+    });
+    try {
+      assert.equal(service.begin(flow, "首版"), true);
+      while (["selecting", "reviewing"].includes(service.statuses([flow], "member")[0]?.status ?? "")) await setImmediate();
+      if (kind === "resume-after-batch-failure") {
+        const stalled = service.statuses([flow], "member")[0];
+        assert.equal(stalled?.status, "uncertain");
+        assert.equal(stalled?.sourceFindings?.[0]?.status, "block");
+        assert.match(stalled?.error ?? "", /暂不可用/);
+        assert.equal(service.cards([flow], "member").length, 0);
+        assert.equal(service.begin(flow, "首版", true), true);
+        while (["selecting", "reviewing"].includes(service.statuses([flow], "member")[0]?.status ?? "")) await setImmediate();
+      }
+      const expected = ["源码 核对独立验收", "批次 核对独立验收"];
+      if (kind === "resume-after-batch-failure") expected.push("源码 核对独立验收", "批次 核对独立验收");
+      if (kind !== "scope-block") expected.push("修订", "源码 核对并发确认", "批次 核对并发确认");
+      assert.deepEqual(calls, expected);
+      const ready = kind === "pass-after-fix" || kind === "resume-after-batch-failure";
+      assert.equal(service.statuses([flow], "member")[0]?.status, ready ? "pending" : "blocked");
+      assert.equal(service.cards([flow], "member").length, ready ? 1 : 0);
+    } finally { await service.close(); }
+  });
 });
 
 test("从新需求复核和授权，创建 Issue 后认领派发，重启后能找回丢失的建单回执", async () => {

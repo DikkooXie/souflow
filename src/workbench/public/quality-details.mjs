@@ -1,21 +1,23 @@
 const labels = { scope: "范围", evidence: "依据", verification: "验证" };
 
-export function renderQualityDetails(details, node, quality, batchAcceptance = []) {
-  const key = quality ? JSON.stringify([quality.batchDigest, quality.sourceChecks, batchAcceptance]) : "";
-  details.hidden = !quality;
+export function renderQualityDetails(details, node, quality, batchAcceptance = [], sourceFindings = []) {
+  const sourceChecks = quality?.sourceChecks ?? sourceFindings;
+  const hasEvidence = !!quality || sourceChecks.length > 0;
+  const key = hasEvidence ? JSON.stringify([quality?.batchDigest, sourceChecks, batchAcceptance]) : "";
+  details.hidden = !hasEvidence;
   if (details.dataset.batch === key) return;
   details.dataset.batch = key;
   details.open = false;
   details.replaceChildren();
-  if (!quality) return;
+  if (!hasEvidence) return;
 
-  const checks = [...Object.entries(quality.checks).map(([dimension, check]) => [labels[dimension], check]),
-    ...(quality.breakdown ?? []).map(check => [`工单 ${check.ticket} · 拆分与排序`, check]),
-    ...(quality.sourceChecks ?? []).map(check => [`工单 ${check.ticket} · 固定源码 ${check.revision.slice(0, 8)}`, check])];
+  const checks = [...Object.entries(quality?.checks ?? {}).map(([dimension, check]) => [labels[dimension], check]),
+    ...(quality?.breakdown ?? []).map(check => [`工单 ${check.ticket} · 拆分与排序`, check]),
+    ...sourceChecks.map(check => [`工单 ${check.ticket} · 固定源码 ${check.revision.slice(0, 8)}`, check])];
   const blocked = checks.some(([, check]) => check.status === "block");
-  const incomplete = quality.sourceChecks && quality.sourceChecks.length !== quality.breakdown?.length;
+  const incomplete = !quality || quality.sourceChecks && quality.sourceChecks.length !== quality.breakdown?.length;
   const documents = node("ul");
-  for (const { kind, id, version } of quality.documents) {
+  for (const { kind, id, version } of quality?.documents ?? []) {
     documents.append(node("li", "", `${kind} · v${version} · ${id}`));
   }
   const findings = node("ul");
@@ -29,8 +31,9 @@ export function renderQualityDetails(details, node, quality, batchAcceptance = [
     finding.append(quotes);
     findings.append(finding);
   }
-  details.append(node("summary", "", `质量复核依据 · ${blocked ? "已拦截" : incomplete ? "证据不足" : "已通过"}`),
-    node("p", "", "绑定的产物版本"), documents, findings);
+  details.append(node("summary", "", `质量复核依据 · ${blocked ? "已拦截" : incomplete ? "证据不足" : "已通过"}`));
+  if (quality) details.append(node("p", "", "绑定的产物版本"), documents);
+  details.append(findings);
   if (batchAcceptance.length) {
     const pending = node("ul");
     for (const { criterion, owner, issue, procedure, expected } of batchAcceptance) {

@@ -11,7 +11,7 @@ import { createLocalDispatch, readDispatchTickets, runLocalJobs } from "../src/e
 import { applyLocalCodeChanges, readEditableFile, replayLocalCodePatch } from "../src/execution/local-code-changes.mts";
 import type { Flow } from "../src/planning/conversation-flow.mts";
 import { createDispatchMonitor } from "../src/execution/dispatch-monitor.mts";
-import { qualitySourceFileBytes } from "../src/execution/codex-quality-review.mts";
+import { qualitySourceBudgetBytes, qualitySourceFileBytes } from "../src/execution/codex-quality-review.mts";
 import { maxSourceBytes } from "../src/execution/local-code-changes.mts";
 import { passingQualityReview, readyQualityFlow, validation } from "./fixtures/planning-quality.mts";
 
@@ -30,12 +30,14 @@ test("GitHub 拆单从固定提交区分只读资料和编辑文件，来源错�
   const git = async (...args: string[]) => (await exec("git", ["-C", repo, ...args])).stdout.trim();
   const editable = "src/feature.mts";
   const large = "src/reader.mts";
+  const additional = ["src/reader-two.mts", "src/reader-three.mts"];
   await git("init", "-q");
   await mkdir(join(repo, "docs"));
   await mkdir(join(repo, "src"));
   await writeFile(join(repo, guide), "Frozen guide");
   await writeFile(join(repo, editable), "export const enabled = true;");
   await writeFile(join(repo, large), "a".repeat(maxSourceBytes + 1));
+  await Promise.all(additional.map(path => writeFile(join(repo, path), "a".repeat(qualitySourceFileBytes))));
   await writeFile(join(repo, "docs/oversize.md"), "a".repeat(qualitySourceFileBytes + 1));
   await writeFile(join(repo, "docs/.private.md"), "ignore hidden files");
   await symlink("guide.md", join(repo, "docs/linked.md"));
@@ -68,7 +70,9 @@ test("GitHub 拆单从固定提交区分只读资料和编辑文件，来源错�
   assert.deepEqual(planned.tickets[0]?.sources, [guide, large]);
   assert.deepEqual(planned.tickets[0]?.paths, [editable]);
   const snapshot = JSON.parse(prompts[0]?.split("\n\n").at(-1) ?? "{}");
-  assert.deepEqual(snapshot.availableSources, [guide, editable, large]);
+  assert.deepEqual(new Set(snapshot.availableSources.map(([path]: [string, number]) => path)), new Set([guide, editable, large, ...additional]));
+  assert.equal(new Map(snapshot.availableSources).get(large), maxSourceBytes + 1);
+  assert.equal(snapshot.sourceBudgetBytes, qualitySourceBudgetBytes);
   assert.deepEqual(snapshot.availableEditPaths, [editable]);
   assert.ok(prompts[1]?.startsWith(prompts[0] ?? ""));
   assert.match(prompts[1] ?? "", /T1 的 sources/);
@@ -80,6 +84,11 @@ test("GitHub 拆单从固定提交区分只读资料和编辑文件，来源错�
   responses = [{ ...ticket, editPaths: [guide] }];
   await assert.rejects(dispatch.planGitHub(flow, "unauthorized-edit"), /编辑文件/);
   assert.equal(prompts.length, 5);
+  responses = [{ ...ticket, sources: [large, ...additional] }, ticket];
+  const withinBudget = await dispatch.planGitHub(flow, "oversize-sources");
+  assert.deepEqual(withinBudget.tickets[0]?.sources, [guide, large]);
+  assert.match(prompts[6] ?? "", new RegExp(`超过 ${qualitySourceBudgetBytes}`));
+  assert.equal(prompts.length, 7);
 });
 
 test("local dispatch requires criterion coverage, an acyclic graph and approved evidence", () => {

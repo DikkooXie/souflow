@@ -4,9 +4,9 @@ import { issueRevision } from "../connections/issue-tracker.mts";
 import type { DeliverySpec } from "../execution/issue-delivery.mts";
 import { currentDevelopmentPlan, type Flow } from "../planning/conversation-flow.mts";
 import type { DeliveryReviewScope } from "../planning/delivery-review.mts";
-import { acceptanceCriteria, planningDigest, qualityBlock, qualityCurrent, qualityPacket, reviewQuality, reviewTicketSources,
-  type BatchAcceptance, type PlannedTicketBatch, type QualityReceipt, type QualityReviewer, type QualityTicket,
-  type TicketSourceReviewer } from "../planning/dispatch-quality.mts";
+import { acceptanceCriteria, planningDigest, qualityBlock, qualityCurrent, qualityPacket, reviewQuality, reviewTicketSources, withTicketSourceEvidence,
+  type BatchAcceptance, type DraftCorrection, type PlannedTicketBatch, type QualityReceipt, type QualityReviewer, type QualityTicket,
+  type TicketSourceFinding, type TicketSourceReviewer } from "../planning/dispatch-quality.mts";
 import { IssueCoverageGap, type Selection, type SelectGitHubIssues } from "../planning/github-selection.mts";
 import { ticketDeliveryLines } from "../planning/ticket-delivery.mts";
 import type { DecisionCard } from "./demo-state.mts";
@@ -20,6 +20,9 @@ export type IssueProposal = {
   drafts?: QualityTicket[];
   batchAcceptance?: BatchAcceptance[];
   sourceReviewRequired?: boolean;
+  sourceFindings?: TicketSourceFinding[];
+  sourceError?: string;
+  corrected?: boolean;
   published?: number[];
   quality?: QualityReceipt; error?: string;
 };
@@ -43,12 +46,14 @@ const validated = (p: IssueProposal, flow: Flow | undefined) => valid(p, flow)
     && JSON.stringify(finding.paths) === JSON.stringify(ticketPaths(ticket)))));
 
 const missingBatchSources = "工单校验未通过：部分源码无法装入复核资料，请缩小范围后重新选单。";
+const reviewError = (error: unknown, fallback: string) => error instanceof Error && /^(工单校验|质量复核|独立质量复核)/.test(error.message)
+  ? error.message : fallback;
 
 export function createConversationDelivery(github: Pick<ReturnType<typeof createIssueDispatch>, "permits" | "suggest" | "claimApproved">, store: Checkpoint<IssueProposal>,
   select: SelectGitHubIssues, review: QualityReviewer,
   readSources: (revision: string, paths: string[], signal: AbortSignal) => Promise<Record<string, string>>,
   planned?: {
-    draft: (flow: Flow, id: string) => Promise<PlannedTicketBatch>;
+    draft: (flow: Flow, id: string, correction?: DraftCorrection) => Promise<PlannedTicketBatch>;
     publish: ReturnType<typeof createPlannedIssuePublication>;
     connection: (actor: string) => Parameters<ReturnType<typeof createPlannedIssuePublication>>[1] | undefined;
     sourceReview?: { concurrency: number; reviewer: TicketSourceReviewer };
@@ -63,6 +68,9 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
       issues: p.items.map(({ number, files, dependsOn, sourcePaths }) => ({ number, files, dependsOn, sourcePaths })),
       ...(p.drafts ? { drafts: p.drafts.map(({ id, dependsOn, paths, delivery }) => ({ id, dependsOn, paths, delivery })), published: p.published } : {}),
       ...(p.batchAcceptance?.length ? { batchAcceptance: p.batchAcceptance } : {}),
+      ...(p.corrected ? { corrected: true } : {}),
+      ...(p.sourceFindings?.length ? { sourceFindings: p.sourceFindings } : {}),
+      ...(p.sourceError ? { sourceError: p.sourceError } : {}),
     } })) return false;
     proposals.set(p.id, p);
     return true;
@@ -91,6 +99,42 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
       }
     } else proposals.set(p.id, p);
   }
+  async function reviewProposal(draft: IssueProposal, flow: Flow, planText: string,
+    keepFindings: (findings: TicketSourceFinding[], error?: string) => void) {
+    const { base, items, drafts } = draft;
+    const sourceReview = drafts && planned?.sourceReview;
+    const sourcePaths = sourceReview ? [] : drafts ? drafts.flatMap(ticketPaths)
+      : items.flatMap(item => [...item.files, ...(item.sourcePaths ?? [])]);
+    const evidence = sourcePaths.length ? await readSources(base, sourcePaths, abort.signal) : {};
+    if (sourcePaths.some(path => !Object.hasOwn(evidence, path))) throw Error(missingBatchSources);
+    const publishedPath = flow.project?.plan.path;
+    if (publishedPath && flow.project?.plan.status === "read") evidence[publishedPath] = planText;
+    const packet = qualityPacket(flow, base, draft.id, drafts ?? items.map(item => ({
+      id: String(item.number), title: item.title, instructions: item.instructions, criteria: item.criteria,
+      ...(item.sourcePaths ? { sources: item.sourcePaths } : {}),
+      dependsOn: item.dependsOn.map(String), paths: item.files, validation: item.validation,
+      issue: { revision: item.revision, text: item.issueText },
+    })), evidence, draft.batchAcceptance);
+    const sourceChecks: TicketSourceFinding[] = [];
+    let sourceFailure: PromiseRejectedResult | undefined;
+    if (sourceReview) {
+      const { concurrency, reviewer } = sourceReview;
+      if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw Error("工单校验未通过：源码复核并发配置无效。");
+      for (let offset = 0; offset < packet.tickets.length; offset += concurrency) {
+        abort.signal.throwIfAborted();
+        const findings = await Promise.allSettled(packet.tickets.slice(offset, offset + concurrency).map(async ticket =>
+          reviewTicketSources(packet, ticket, await readSources(base, ticketPaths(ticket), abort.signal), reviewer, abort.signal)));
+        sourceChecks.push(...findings.flatMap(finding => finding.status === "fulfilled" ? [finding.value] : []));
+        sourceFailure = findings.find(result => result.status === "rejected");
+        if (sourceFailure) break;
+      }
+      keepFindings(sourceChecks, sourceFailure ? reviewError(sourceFailure.reason, "逐单源码复核未完成，可以重试。") : undefined);
+    }
+    const quality = await reviewQuality(sourceReview ? withTicketSourceEvidence(packet, sourceChecks) : packet,
+      reviewedSelection(draft), review, abort.signal);
+    return { quality: sourceReview ? { ...quality, sourceChecks } : quality, sourceFailure };
+  }
+
   function begin(flow: Flow, planText?: string, retry = false) {
     const plan = currentDevelopmentPlan(flow);
     const base = flow.project?.repository?.revision;
@@ -104,7 +148,8 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
       && prior.drafts?.length ? prior : undefined;
     const p: IssueProposal = { id: reuse?.id ?? randomUUID(), flowId: flow.id, planId: plan.id, version: plan.version,
       actor, base, status: "selecting", createdAt: reuse?.createdAt ?? Date.now(), items: [],
-      ...(reuse?.drafts ? { drafts: reuse.drafts, ...(reuse.batchAcceptance?.length ? { batchAcceptance: reuse.batchAcceptance } : {}) } : {}) };
+      ...(reuse?.drafts ? { drafts: reuse.drafts, ...(reuse.batchAcceptance?.length ? { batchAcceptance: reuse.batchAcceptance } : {}),
+        ...(reuse.corrected ? { corrected: true } : {}) } : {}) };
     if (!save(p)) return false;
     const task = (async () => {
       let draft = p;
@@ -136,48 +181,39 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
           preparePlannedIssues(publicationBatch(draft, drafts), connection.repo);
         }
         if (!save(draft)) throw Error("无法保存待复核工单。");
-        const sourcePaths = sourceReview ? [] : drafts ? drafts.flatMap(ticketPaths)
-          : items.flatMap(item => [...item.files, ...(item.sourcePaths ?? [])]);
-        const evidence = sourcePaths.length ? await readSources(base, sourcePaths, abort.signal) : {};
-        if (sourcePaths.some(path => !Object.hasOwn(evidence, path))) {
-          throw Error(missingBatchSources);
-        }
-        const publishedPath = snapshot.project?.plan.path;
-        if (publishedPath && snapshot.project?.plan.status === "read") evidence[publishedPath] = planText;
-        const packet = qualityPacket(snapshot, base, p.id, drafts ?? items.map(item => ({
-          id: String(item.number), title: item.title, instructions: item.instructions, criteria: item.criteria,
-          ...(item.sourcePaths ? { sources: item.sourcePaths } : {}),
-          dependsOn: item.dependsOn.map(String), paths: item.files, validation: item.validation,
-          issue: { revision: item.revision, text: item.issueText },
-        })), evidence, draft.batchAcceptance);
-        const quality = await reviewQuality(sourceReview ? { ...packet, sourceReviewMode: "per-ticket" } : packet,
-          reviewedSelection(draft), review, abort.signal);
-        draft = { ...draft, quality };
-        if (sourceReview && !qualityBlock(quality)) {
-          const { concurrency, reviewer } = sourceReview;
-          if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw Error("工单校验未通过：源码复核并发配置无效。");
-          quality.sourceChecks = [];
-          for (let offset = 0; offset < packet.tickets.length; offset += concurrency) {
-            abort.signal.throwIfAborted();
-            const findings = await Promise.allSettled(packet.tickets.slice(offset, offset + concurrency).map(async ticket =>
-              reviewTicketSources(packet, ticket, await readSources(base, ticketPaths(ticket), abort.signal), reviewer, abort.signal)));
-            quality.sourceChecks.push(...findings.flatMap(finding => finding.status === "fulfilled" ? [finding.value] : []));
-            const failed = findings.find(finding => finding.status === "rejected");
-            if (failed) throw failed.reason;
+        for (;;) {
+          const { quality, sourceFailure } = await reviewProposal(draft, snapshot, planText, (sourceFindings, sourceError) => {
+            draft = { ...draft, sourceFindings, ...(sourceError ? { sourceError } : {}) };
+            if (!save(draft)) throw Error("无法保存逐单源码复核意见。");
+          });
+          const { sourceFindings: _complete, ...reviewed } = draft;
+          draft = { ...reviewed, quality };
+          if (sourceFailure) throw sourceFailure.reason;
+          if (quality.flowDigest !== planningDigest(flow)) throw Error("工单校验未通过：规划版本已变化，请重新选单。");
+          const error = qualityBlock(quality);
+          if (!error || !draft.drafts || !sourceReview || !planned || draft.corrected || quality.checks.scope.status === "block") {
+            if (!save(error ? { ...draft, status: "blocked", error } : { ...draft, status: "pending" })) throw Error("无法保存质量复核结果。");
+            break;
           }
-        }
-        if (quality.flowDigest !== planningDigest(flow)) throw Error("工单校验未通过：规划版本已变化，请重新选单。");
-        const error = qualityBlock(quality);
-        if (!save(error ? { ...draft, quality, status: "blocked", error } : { ...draft, quality, status: "pending" })) {
-          throw Error("无法保存质量复核结果。");
+          // 只修正技术核对与验证缺项。产品范围变化要回到原对话，任何修正版都重新复核。
+          draft = { ...draft, corrected: true };
+          if (!save(draft)) throw Error("无法保存首轮复核结果。");
+          const corrected = await planned.draft(snapshot, draft.id, {
+            findings: error, tickets: draft.drafts ?? [], batchAcceptance: draft.batchAcceptance ?? [],
+          });
+          const connection = planned.connection(actor);
+          if (!connection?.creation) throw Error("工单校验未通过：当前 GitHub 连接不支持创建 Issue。");
+          const { quality: _prior, batchAcceptance: _priorAcceptance, sourceFindings: _priorFindings, sourceError: _priorError, ...proposal } = draft;
+          draft = { ...proposal, drafts: corrected.tickets, ...(corrected.batchAcceptance.length ? { batchAcceptance: corrected.batchAcceptance } : {}) };
+          preparePlannedIssues(publicationBatch(draft, corrected.tickets), connection.repo);
+          if (!save(draft)) throw Error("无法保存修订工单。");
         }
       } catch (error) {
         if (error instanceof IssueCoverageGap) {
           save({ ...draft, status: "blocked", error: error.message });
           return;
         }
-        const message = error instanceof Error && /^(工单校验|质量复核|独立质量复核)/.test(error.message)
-          ? error.message : "无法完成 GitHub 选单或质量复核，可以重试。";
+        const message = reviewError(error, "无法完成 GitHub 选单或质量复核，可以重试。");
         save({ ...draft, status: "uncertain", error: message });
       }
     })();
@@ -275,10 +311,12 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
     statuses(flows: Flow[], actor: string) {
       const latest = new Map([...proposals.values()].filter(p => p.actor === actor && valid(p, flows.find(flow => flow.id === p.flowId)))
         .map(p => [p.flowId, p]));
-      return [...latest.values()].map(({ flowId, status, items, approvedAt, error, quality, drafts, published, batchAcceptance }) => ({
+      return [...latest.values()].map(({ flowId, status, items, approvedAt, error, quality, drafts, published, batchAcceptance, sourceFindings, sourceError }) => ({
         flowId, status, approved: approvedAt !== undefined, issues: published ?? items.map(item => item.number), error, quality,
         ...(drafts ? { createsIssues: true } : {}),
         ...(batchAcceptance?.length ? { batchAcceptance } : {}),
+        ...(!quality && sourceFindings?.length ? { sourceFindings } : {}),
+        ...(sourceError && sourceError !== error ? { sourceError } : {}),
       }));
     },
     has(id: string) { return proposals.has(id); },
