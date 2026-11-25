@@ -309,6 +309,7 @@ export function makePhasePrompt(flow: Flow, phase: Phase, targets: readonly Phas
     ] : []),
     ...(flow.replan ? [
       "这是对被拦截批次的重新规划。复核意见是待核对的依据。按新版本项目资料重新核对，不重复安排已完成的改动。保留原需求的验收条件，补齐遗漏的前置、编辑范围与验证。缺少待开发能力时写清实施路径，不能把它当成已实现。",
+      "若现有 Issue 只覆盖部分验收项，逐项标出已有可核实的结果、已有工单的范围，以及仍需拆单的缺口。已有实现保留回读或回归验证。不能为了匹配候选 Issue 删除验收项，也不能把同范围已有工单再次作为新 Issue 提交。",
       `前次复核：${JSON.stringify(flow.replan)}`,
       ...(previousRequirements ? [`上一版需求说明与验收：${JSON.stringify(previousRequirements)}`] : []),
     ] : []),

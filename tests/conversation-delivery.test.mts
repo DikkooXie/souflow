@@ -46,6 +46,45 @@ test("保留 Issue 正文中用井号声明的依赖，拒绝遗漏该依赖的�
   assert.throws(() => read([up, { ...down, dependsOn: [] }]));
 });
 
+test("现有 Issue 遗漏验收时允许原发起者重规划，旧未授权失败也能恢复", async () => {
+  const flow = await readyQualityFlow("推进设备接入");
+  flow.project = { repository: { revision: "a".repeat(40), commits: [] }, plan: { status: "read" }, github: { status: "read" } };
+  const plan = currentDevelopmentPlan(flow);
+  assert.ok(plan);
+  const item = makeIssue(1);
+  const oldError = "工单校验未通过：uncovered:AC-2。";
+  const legacy = { id: "old", flowId: flow.id, actor: "member", planId: plan.id, version: plan.version,
+    base: "a".repeat(40), items: [], status: "uncertain" as const, error: oldError, createdAt: 1 };
+  const saved = new Map<string, IssueProposal>([
+    [legacy.id, legacy],
+    ["approved", { ...legacy, id: "approved", actor: "other", approvedAt: 2 }],
+  ]);
+  const service = createConversationDelivery({
+    permits: () => true, suggest: async () => [item],
+    claimApproved: async () => assert.fail("缺少验收覆盖不得认领"),
+  }, { load: () => [...saved.values()], save(id, proposal) { saved.set(id, structuredClone(proposal)); return true; } },
+  async () => readGitHubSelection(JSON.stringify({ issues: [up] }), [item], available, ["AC-1", "AC-2"], readable),
+  async () => assert.fail("结构检查失败时不得进入内容复核"), async () => ({}));
+  try {
+    assert.equal(saved.get("approved")?.status, "uncertain");
+    assert.equal(service.replanFeedback(flow, "other"), undefined);
+    assert.equal(service.replanFeedback(flow, "member")?.batchId, "old");
+    assert.match(service.replanFeedback(flow, "member")?.findings ?? "", /未覆盖验收项 AC-2/);
+    assert.deepEqual(service.cards([flow], "member"), []);
+
+    const next = { ...flow, outputs: flow.outputs.map(output => ({ ...output, artifacts: output.artifacts
+      .filter(artifact => artifact.kind !== "ticket-drafts")
+      .map(artifact => artifact.id === plan.id ? { ...artifact, version: plan.version + 1 } : artifact) })) };
+    assert.equal(service.begin(next, "当前计划"), true);
+    await setImmediate();
+    const status = service.statuses([next], "member")[0];
+    assert.equal(status?.status, "blocked");
+    assert.match(status?.error ?? "", /未覆盖验收项 AC-2/);
+    assert.notEqual(service.replanFeedback(next, "member")?.batchId, "old");
+    assert.deepEqual(service.cards([next], "member"), []);
+  } finally { await service.close(); }
+});
+
 test("GitHub 选单验收映射错误时，在同一冻结资料内只修正一次", async t => {
   const repo = await mkdtemp(join(tmpdir(), "souflow-selection-repair-"));
   t.after(() => rm(repo, { recursive: true, force: true }));

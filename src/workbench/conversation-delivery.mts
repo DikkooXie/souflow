@@ -5,7 +5,7 @@ import type { DeliverySpec } from "../execution/issue-delivery.mts";
 import { currentDevelopmentPlan, type Flow } from "../planning/conversation-flow.mts";
 import { planningDigest, qualityBlock, qualityCurrent, qualityPacket, reviewQuality,
   type PlannedTicket, type QualityReceipt, type QualityReviewer, type QualityTicket } from "../planning/dispatch-quality.mts";
-import type { Selection, SelectGitHubIssues } from "../planning/github-selection.mts";
+import { IssueCoverageGap, type Selection, type SelectGitHubIssues } from "../planning/github-selection.mts";
 import { ticketDeliveryLines } from "../planning/ticket-delivery.mts";
 import type { DecisionCard } from "./demo-state.mts";
 import type { createIssueDispatch } from "./issue-dispatch.mts";
@@ -55,6 +55,11 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
     return true;
   }
   for (const p of store.load()) {
+    const gap = p.status === "uncertain" && p.approvedAt === undefined && IssueCoverageGap.fromLegacy(p.error);
+    if (gap) {
+      if (!save({ ...p, status: "blocked", error: gap.message })) throw Error("无法恢复 GitHub 选单。");
+      continue;
+    }
     const incompleteDrafts = p.approvedAt === undefined && p.drafts?.some(ticket => !ticket.delivery);
     if (p.status === "selecting" || p.status === "reviewing" || p.status === "authorizing"
       || (p.status === "pending" && (!p.quality || incompleteDrafts))) {
@@ -123,6 +128,10 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
           throw Error("无法保存质量复核结果。");
         }
       } catch (error) {
+        if (error instanceof IssueCoverageGap) {
+          save({ ...draft, status: "blocked", error: error.message });
+          return;
+        }
         const message = error instanceof Error && /^(工单校验|质量复核|独立质量复核)/.test(error.message)
           ? error.message : "无法完成 GitHub 选单或质量复核，可以重试。";
         save({ ...draft, status: "uncertain", error: message });
