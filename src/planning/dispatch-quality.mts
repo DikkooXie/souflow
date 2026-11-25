@@ -78,14 +78,15 @@ export function readVerification(raw: unknown, criteria: readonly string[], tick
 }
 
 export async function prepareVerifiedDraft<T>(generate: (feedback?: string) => Promise<string | undefined>,
-  parse: (output: string | undefined) => T): Promise<T> {
+  parse: (output: string | undefined) => T, extraFeedback?: (error: unknown) => string | undefined): Promise<T> {
   const output = await generate();
   try {
     return parse(output);
   } catch (error) {
-    if (!(error instanceof VerificationMappingError)) throw error;
+    const feedback = error instanceof VerificationMappingError ? error.message : extraFeedback?.(error);
+    if (feedback === undefined) throw error;
     // 修正一次并重新运行全部解析器，模型仍只看到同一份计划、仓库版本和允许范围。
-    return parse(await generate(error.message));
+    return parse(await generate(feedback));
   }
 }
 

@@ -61,6 +61,7 @@ export function createCodexQualityReviewer(workspace: string, model?: string, ti
         ...(planned ? [
           `为每张新建 Issue 返回一个 breakdown，ticket 填工单 ID。分别核对可独立演示结果、必要前置及同级顺序，任一不成立就给该工单 block。每条最多 ${qualityReviewLimits.breakdownReferences} 项依据，至少逐字引用自身 ticket: 条目。`,
           "仅交付界面、接口或存储层而无法单独演示用户结果时阻塞。测试应能以所列文件和已合并前置独立完成。缺少真正的上游、用依赖强制本可并行的工作串行、或同级顺序违背已确认计划时阻塞。单有自述理由无法证明优先级。",
+          "依据 planning.project.issueCandidates 中冻结的候选正文，核对每张新工单是否重复已有 Issue 的交付结果。范围重复、缺少真实上游或借既有 Issue 名义代替验收均须阻塞。",
         ] : []),
       ].join("\n"),
       untrustedContext: JSON.stringify(packet),
