@@ -68,6 +68,19 @@ test("复审拒绝不存在的引用及无法在原文找到的引文", async ()
   }
 });
 
+test("依据维度只接收上限内的有效引用", async () => {
+  const { payload, packet, signal } = await qualityFixture();
+  const output = qualityReviewOutput(packet);
+  output.evidence.evidence = Array.from({ length: 7 }, (_, start) => ({
+    ref: "request", quote: packet.planning.request.slice(start, start + 4),
+  }));
+  const review = async () => JSON.stringify(output);
+  await assert.rejects(reviewQuality(packet, payload, review, signal), /质量复核结论缺少依据/);
+  output.evidence.evidence.pop();
+  const receipt = await reviewQuality(packet, payload, review, signal);
+  assert.equal(receipt.checks.evidence.evidence.length, 6);
+});
+
 test("工单缺少幂等验收的验证步骤和预期结果时拒绝准备复审", async () => {
   const { flow, payload } = await qualityFixture();
   const invalid = { ...ticket, validation: ticket.validation.filter(item => item.criterion !== "AC-1") };
