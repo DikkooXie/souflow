@@ -119,6 +119,7 @@ export function createGitHubSelector(workspace: string, options: { model?: strin
         ...(options.newIssues ? [
           "先判断用户目的和候选覆盖范围。只有候选集按实际正文可覆盖全部固定验收项时才用 intent=existing。主题重合、跟踪整个里程碑或只覆盖部分验收项的候选，不能当作已经存在完整同范围的工单。",
           "对明确要开发的新结果，候选没有可执行、同范围的 Issue 时填 intent=new 和空 issues，系统会从本轮计划拆分缺口。保留现有 Issue 作为来源或前置依据，避免为已经有工单的结果重复建单。不要求开发时填 intent=none 和空 issues。下述选单条件仅适用于 intent=existing。",
+          "relatedIssues 用于核对先前交付和已声明依赖，只能在 issues 候选池中选择要认领的工单。",
         ] : []),
         "从候选 GitHub Issue 选至多三张能推进当前计划的小工单。",
         "仅从提供的现有文件路径中选可编辑文件。不为不同工单重复分配同一文件。若工单正文明确要求某个候选前置，保留依赖；前置不可执行时跳过该工单。缺少明确依据或本轮请求未要求推进代码时，返回空列表。",
@@ -128,7 +129,7 @@ export function createGitHubSelector(workspace: string, options: { model?: strin
         `用户请求：${JSON.stringify(flow.prompt)}`,
     ].join("\n");
     const context = JSON.stringify({ planText, plan, outputs: flow.outputs, criteria, publishedPlan: flow.project?.plan.path, revision,
-      availablePaths: [...files], readOnlyPaths: [...readable], issues: snapshotIssueCandidates(issues) });
+      availablePaths: [...files], readOnlyPaths: [...readable], issues: snapshotIssueCandidates(issues), relatedIssues: flow.project?.relatedIssues });
     let coverageGap: IssueCoverageGap | undefined;
     return prepareVerifiedDraft(async feedback => {
       signal.throwIfAborted();

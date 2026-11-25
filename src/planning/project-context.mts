@@ -2,7 +2,7 @@ import { matchesGitHubOrigin, validateGitHubRepo } from "../connections/github.m
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { scrubAuditText } from "../audit/activity-store.mts";
-import { issueRevision, type IssueDetail } from "../connections/issue-tracker.mts";
+import { issueRevision, type IssueDetail, type IssueTracker } from "../connections/issue-tracker.mts";
 
 const exec = promisify(execFile);
 const sha = /^[a-f0-9]{40,64}$/;
@@ -14,10 +14,15 @@ const issueBodyLimit = 3000;
 
 export type ProjectSettings = { planPath?: string; githubRepo?: string };
 type PullRequest = { number: number; state: "OPEN" | "CLOSED" | "MERGED"; title: string; url: string };
+type IssueSource = { number: number; title: string; body?: string; truncated?: boolean; revision?: string };
+type RelatedIssue = { number: number; url: string } & ({ status: "unavailable" }
+  | { status: "read"; state: "OPEN" | "CLOSED"; assigned: boolean; source: IssueSource });
 export type ProjectEvidence = {
   repository?: { revision: string; commits: { revision: string; subject: string }[] };
   plan: { status: "unconfigured" | "unavailable" | "read"; path?: string };
-  issueCandidates?: { number: number; title: string; body?: string; truncated?: boolean; revision?: string }[];
+  issueCandidates?: IssueSource[];
+  relatedIssues?: RelatedIssue[];
+  relatedIssueOmissions?: { count: number; examples: number[] };
   github: { status: "unconfigured" | "unavailable" | "read"; repo?: string; pullRequests?: PullRequest[] };
 };
 export type ProjectContext = { evidence: ProjectEvidence; planText?: string };
@@ -32,6 +37,38 @@ export function snapshotIssueCandidates(issues: readonly IssueDetail[]): NonNull
     return { number: issue.number, title: concise(issue.title), body: body.slice(0, issueBodyLimit),
       truncated: body.length > issueBodyLimit, revision: issueRevision(issue) };
   });
+}
+
+const dependencyLine = /^\s*(?:[-*+]\s+)?(?:依赖|depends on)(?=\s|[:：#]|$)/iu;
+function linkedIssueNumbers(text: string, repo: string) {
+  const urlsOrShorthand = /https:\/\/github\.com\/([a-z\d_.-]+\/[a-z\d_.-]+)\/issues\/([1-9]\d*)\b|(?<![\w/#])#([1-9]\d*)\b/gi;
+  const links = text.replace(/\[[^\]\r\n]*\]\((https:\/\/github\.com\/[^)\s]+)\)/gi, "$1");
+  return [...links.matchAll(urlsOrShorthand)].flatMap(match => {
+    if (match[1] ? match[1].toLowerCase() !== repo.toLowerCase() : /(?:\bPR|pull request)\s*$/i.test(links.slice(0, match.index))) return [];
+    const number = Number(match[2] ?? match[3]);
+    return Number.isSafeInteger(number) ? [number] : [];
+  });
+}
+
+export async function readRelatedIssues(tracker: Pick<IssueTracker, "repo" | "read">, candidates: readonly IssueDetail[], planText = "") {
+  const known = new Set(candidates.map(issue => issue.number));
+  const lines = [planText, ...candidates.map(issue => issue.body)].flatMap(text => text.split(/\r?\n/));
+  const ordered = [...lines.filter(line => dependencyLine.test(line)), ...lines.filter(line => !dependencyLine.test(line))];
+  const numbers = [...new Set(ordered.flatMap(line => linkedIssueNumbers(line, tracker.repo)))].filter(number => !known.has(number));
+  const issues = await Promise.all(numbers.slice(0, historyLimit).map(async (number): Promise<RelatedIssue> => {
+    const url = `https://github.com/${tracker.repo}/issues/${number}`;
+    try {
+      const issue = await tracker.read(number);
+      if (issue.number === number && (issue.state === "OPEN" || issue.state === "CLOSED")) {
+        const [source] = snapshotIssueCandidates([issue]);
+        if (source) return { number, url, status: "read", state: issue.state, assigned: issue.assignees.length > 0, source };
+      }
+    } catch { /* 只记录不可读状态，连接凭据与远端错误留在适配器边界。 */ }
+    return { number, url, status: "unavailable" };
+  }));
+  return { issues, ...(numbers.length > historyLimit ? {
+    omissions: { count: numbers.length - historyLimit, examples: numbers.slice(historyLimit, historyLimit * 2) },
+  } : {}) };
 }
 
 function parsePullRequests(text: string, repo: string): PullRequest[] {
