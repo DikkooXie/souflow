@@ -242,13 +242,15 @@ test("批准关联修复后安全回读建单结果，只续修同一 PR 并复�
     body: "两次存储失败后只产生一条审计。", assignees: ["member"], pulls: [pull] };
   const revision = issueRevision(original);
   const writes: string[] = [];
+  let accountReads = 0;
   let publishedRepair: IssueDetail | undefined;
   const rows = new Map<string, IssuePublication>();
   let stored: Claim = { ...original, pull, requestId: "approved", claimedBy: "member", account: "member", phase: "submitted", syncedAt: 0,
     target: { branch: "feat/47-original", head, base: "main" }, delivery: { ...spec, baseRevision: mergeBase },
     approval: { flowId: "flow", planId: "plan", version: 1, issueRevision: revision, quality } };
   const tracker: DeliveryTracker = {
-    repo: "a/b", candidates: async () => [], account: async () => "member",
+    repo: "a/b", candidates: async () => [],
+    async account() { return ++accountReads === 2 ? "other-account" : "member"; },
     assign: async () => assert.fail("续修沿用原工单和原 PR"),
     async read(number) {
       if (number === original.number) return { ...original, pulls: [pull] };
@@ -257,7 +259,8 @@ test("批准关联修复后安全回读建单结果，只续修同一 PR 并复�
       return publishedRepair;
     },
     creation: {
-      async create({ title, body }) {
+      async create({ title, body }, account) {
+        assert.equal(account, "member");
         writes.push("创建修复单");
         publishedRepair = { number: 66, url: "https://github.com/a/b/issues/66", title, body, state: "OPEN", assignees: [], pulls: [] };
         throw Error("GitHub 建单后响应断开。");
@@ -319,6 +322,11 @@ test("批准关联修复后安全回读建单结果，只续修同一 PR 并复�
     assert.deepEqual(writes, []);
     assert.equal(first.answerRepair(card.id, "member", answer), 200);
     assert.equal(first.answerRepair(card.id, "member", answer), 409);
+    await setImmediate();
+    assert.deepEqual(writes, []);
+    assert.equal(rows.size, 0);
+    assert.equal(stored.reviewFix?.state, "failed");
+    await first.refresh();
     await setImmediate();
     assert.deepEqual(writes, ["创建修复单"]);
     assert.equal(stored.reviewFix?.state, "failed");

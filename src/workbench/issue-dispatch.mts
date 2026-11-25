@@ -285,7 +285,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       try {
         const base = await verify();
         if (authorized) {
-          const issued = await delivery.publishRepair?.(authorized.repair.batch, connection, abort.signal);
+          const issued = await delivery.publishRepair?.(authorized.repair.batch, connection, abort.signal, c.account);
           const issue = issued?.get("REPAIR");
           if (issue?.state !== "OPEN") throw Error("关联修复 Issue 未确认或已关闭。");
           const latest = current();

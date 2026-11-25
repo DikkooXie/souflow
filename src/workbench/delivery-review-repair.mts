@@ -9,7 +9,7 @@ import type { Claim } from "./issue-dispatch.mts";
 import type { PlannedIssueBatch } from "./planned-issue-publication.mts";
 
 const authorize = "授权创建修复 Issue 并续修";
-const decline = "暂不续修";
+const decline = "拒绝本次续修";
 const question = {
   id: "authorization", title: "交付修复授权", allowCustom: false,
   prompt: "允许把下方内容发布到原 GitHub 仓库，并由 Codex 在已授权的文件范围内续修原 PR？",
