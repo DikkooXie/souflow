@@ -39,6 +39,8 @@ GitHub 选单可引用同一提交中直接相关的只读源码，例如承接�
 
 维护者可用 `SOULFLOW_GITHUB_REVIEW_FIX` 续修一张已经提交的原工单。参数绑定 Issue、PR、当前提交、原目标分支和原批准文件的子集，并给出本次评审要求。souflow 从该提交创建独立工作区，用原授权开发和隔离检查，通过后只用原 GitHub 账号快进原 PR 的分支。相同提交只启动一次，发布结果不确定时只回读已有 PR。
 
+交付的两类复核都已出具结论且当前提交被拦截时，原发起者可在「待决策」确认关联修复。卡片显示将发布的 Issue 正文，包含原 Issue、PR、当前提交、复核回执和原授权文件。授权后系统创建或回读该修复 Issue，并按原文件范围在同一 PR 续修。GitHub 写入结果不确定时可刷新工单列表回读同一次请求。完成后保留修复 Issue 和旧复核，重新核对新提交的两类证据。
+
 采用 Spec Kit 的只读跨文档核对方式，借鉴 OpenSpec 将结构错误作为阻塞条件。用可重复的规则评估版本和结构，用内容复核判断语义，用人来作实质产品决定。在现有规划和审计中接入这些检查，避免引入第二套文档目录或执行流程。[Spec Kit](https://github.com/github/spec-kit/blob/main/templates/commands/analyze.md) · [OpenSpec](https://github.com/Fission-AI/OpenSpec/blob/main/docs/cli.md#validation-commands) · [Anthropic](https://www.anthropic.com/research/demystifying-evals-for-ai-agents) · [OpenAI](https://developers.openai.com/api/docs/guides/evaluation-best-practices)
 
 | 检查对象 | 派发前应能回答 | 需要拦截的示例 |

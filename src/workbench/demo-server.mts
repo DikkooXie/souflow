@@ -164,6 +164,8 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       const acceptance = memberFor && createAcceptance(audit.record, recovery ? audit.checkpoint<StoredAcceptance>("acceptance") : undefined);
       if (issueTracker && (!recovery || !monitor)) throw Error("GitHub 认领需要持久化的 Codex 工作台。");
       if (issueDelivery && !issueDelivery.conversation) throw Error("GitHub 代码交付需要使用对话规划与派发前质量校验。");
+      const publishIssues = live && issueTracker?.creation
+        ? createPlannedIssuePublication(audit.checkpoint<IssuePublication>(`github-publications:${issueTracker.repo.toLowerCase()}`)) : undefined;
       let reviewScope: ((claim: Claim) => DeliveryReviewScope | undefined) | undefined;
       const github = issueTracker && monitor ? createIssueDispatch(issueTracker,
         audit.checkpoint<Claim>(`github-issues:${issueTracker.repo.toLowerCase()}`),
@@ -172,6 +174,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           specs: issueDelivery.specs, pollMs: issueDelivery.pollMs, conversation: true, requireQuality: true,
           ...(issueDelivery.recoverFailedIssue ? { recoverFailedIssue: issueDelivery.recoverFailedIssue } : {}),
           ...(issueDelivery.reviewFix ? { reviewFix: issueDelivery.reviewFix } : {}),
+          ...(publishIssues ? { publishRepair: publishIssues } : {}),
           ...(live ? { review: issueDelivery.review ?? createGitHubDeliveryReviewer(live[0], claim => reviewScope?.(claim),
             createCodexDeliveryReviewer(live[0], issueDelivery.timeoutMs, qualityModel ?? issueDelivery.planningModel)),
             reviewScopeCurrent: issueDelivery.reviewScopeCurrent ?? (claim => !!reviewScope?.(claim)) } : {}),
@@ -183,9 +186,9 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           createGitHubSelector(live[0], { timeoutMs: issueDelivery.timeoutMs, newIssues: !!(dispatch && issueTracker.creation),
             ...(issueDelivery.planningModel ? { model: issueDelivery.planningModel } : {}) }), reviewQuality,
           (revision, paths, signal) => qualitySources(live[0], revision, paths, signal),
-          dispatch && issueTracker.creation ? {
+          dispatch && publishIssues ? {
             draft: dispatch.planGitHub,
-            publish: createPlannedIssuePublication(audit.checkpoint<IssuePublication>(`github-publications:${issueTracker.repo.toLowerCase()}`)),
+            publish: publishIssues,
             connection: actor => github.permits(actor) ? memberTrackers?.get(actor) ?? issueTracker : undefined,
             ...(!qualityReviewer || ticketSourceReviewer ? { sourceReview: { concurrency: dispatchConcurrency,
               reviewer: ticketSourceReviewer ?? createCodexTicketSourceReviewer(live[0], qualityModel ?? issueDelivery.planningModel, issueDelivery.timeoutMs) } } : {}),
@@ -256,12 +259,13 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
     const state = inbox.snapshot();
     const actor = member?.login ?? member?.id ?? "personal";
     const issueCards = issuePlanning?.cards(conversations, actor) ?? [];
+    const repairCards = github?.repairCards(actor) ?? [];
     const deliveryReviews = github ? conversations.flatMap(flow => {
       const reviews = github.reviewStatus(flow.id, actor, member?.id === "reviewer");
       return reviews.length ? [{ flowId: flow.id, reviews }] : [];
     }) : [];
     return {
-      ...state, requests: [...state.requests, ...reviewCards, ...issueCards],
+      ...state, requests: [...state.requests, ...reviewCards, ...issueCards, ...repairCards],
       ...(issuePlanning ? { issuePlans: issuePlanning.statuses(conversations, actor) } : {}),
       ...(deliveryReviews.length ? { deliveryReviews } : {}),
       flows: conversations.map(flow => ({ ...flow, ...(replanFeedback(flow, actor, member) ? { canReplan: true } : {}) })),
@@ -556,6 +560,15 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           if (codex) return send(404, { error: "该操作用于本地演示。" });
           status = demo.disconnect(action[1]);
         } else {
+          if (github?.hasRepair(action[1])) {
+            if (!allowed("implementer", "github.repair.authorize", action[1])) return;
+            const body = await readJson(request, answerBodyBytes);
+            if ("status" in body) return send(body.status, { error: body.error });
+            const result = github.answerRepair(action[1], githubActor, body.value);
+            return send(result, result === 200 ? state() : { ...state(),
+              error: result === 422 ? "请选择有效授权选项。" : result === 503 ? "暂时无法保存授权。"
+                : "修复授权已处理，或原工单、PR 或复核版本已变化。" });
+          }
           if (issuePlanning?.has(action[1])) {
             if (!allowed("implementer", "github.authorize", action[1])) return;
             const body = await readJson(request, answerBodyBytes);
