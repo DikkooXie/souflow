@@ -9,7 +9,7 @@ import { deliveryPath } from "./local-code-changes.mts";
 const exec = promisify(execFile);
 const sourceLimit = 12;
 export const qualitySourceFileBytes = 65_536;
-const sourceBudgetBytes = 128 * 1024;
+export const qualitySourceBudgetBytes = 128 * 1024;
 const regularPath = /^(?:(?:docs|src|tests)\/[a-zA-Z0-9._/-]+\.(?:md|mts|mjs|html|css)|AGENTS\.md)$/;
 
 export function qualitySourcePath(path: string) {
@@ -30,7 +30,7 @@ export async function qualitySources(workspace: string, revision: string, paths:
     const raw = await git(["cat-file", "blob", blob[1]]);
     return [path, scrubAuditText(raw.stdout)] as const;
   }));
-  let remaining = sourceBudgetBytes;
+  let remaining = qualitySourceBudgetBytes;
   const selected: Record<string, string> = {};
   for (const entry of inputs) {
     if (!entry) continue;

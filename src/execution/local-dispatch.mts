@@ -15,7 +15,7 @@ import { type TicketDraft, validateTicketPlan } from "../planning/validate-ticke
 import { startCodexQuestionAttempt, startCodexReadOnlyTask } from "./codex-command-attempt.mts";
 import { type AccountAssignment, type CodexAccountDispatch, withCodexAccount } from "./codex-account-dispatch.mts";
 import type { DispatchMonitor } from "./dispatch-monitor.mts";
-import { qualitySourceFileBytes, qualitySourcePath, qualitySources } from "./codex-quality-review.mts";
+import { qualitySourceBudgetBytes, qualitySourceFileBytes, qualitySourcePath, qualitySources } from "./codex-quality-review.mts";
 import { applyLocalCodeChanges, codeResultSchema, deliveryPath, maxSourceBytes, type LocalCodePatch, readEditableFile, readLocalCodePatch, replayLocalCodePatch } from "./local-code-changes.mts";
 
 const exec = promisify(execFile);
@@ -257,15 +257,16 @@ type Start = typeof startCodexReadOnlyTask;
 async function evidenceCatalog(workspace: string, revision: string, github = false) {
   const entries = (await exec("git", ["-C", workspace, "ls-tree", "-r", "-z", "-l", revision, "--", "docs", "src", "tests"],
     { env: { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" } })).stdout;
-  const catalog = new Map<string, { blob: string; editable: boolean }>();
+  const catalog = new Map<string, { blob: string; bytes: number; editable: boolean }>();
   for (const entry of entries.split("\0")) {
     const match = /^100(?:644|755) blob ([a-f0-9]{40,64}) +([0-9]+)\t(.+)$/.exec(entry);
     if (!match?.[1] || !match[3]) continue;
     const [, blob, size, path] = match;
+    const bytes = Number(size);
     const localPath = /^(?:src|docs|tests)\/[a-zA-Z0-9._/-]+\.(?:md|mts|mjs|html|css)$/.test(path);
-    if (github ? qualitySourcePath(path) && Number(size) <= qualitySourceFileBytes : localPath) {
+    if (github ? qualitySourcePath(path) && bytes <= qualitySourceFileBytes : localPath) {
       // 复核可以读项目文档和较大的源码，编辑仍限于原有 GitHub 可交付文件。
-      catalog.set(path, { blob, editable: localPath && (!github || (deliveryPath.test(path) && Number(size) <= maxSourceBytes)) });
+      catalog.set(path, { blob, bytes, editable: localPath && (!github || (deliveryPath.test(path) && bytes <= maxSourceBytes)) });
     }
   }
   return catalog;
@@ -374,7 +375,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
           : run.kind === "code"
           ? "把已生成的开发计划拆成本地代码工单，每单可以单独验证产物。只有确实需要前置补丁时才声明工单依赖。"
           : "把已生成的 souflow 开发计划拆成可独立验收的本地核验工单。工单只根据提供的资料和前置报告产出核验报告。",
-        github ? "每单 editPaths 逐字从 availableEditPaths 选择 1 到 4 个路径，首批 GitHub 工单的可编辑范围须互斥。sources 逐字从 availableSources 选择最多 4 个额外只读资料路径，无额外资料时填空数组。GitHub Issue 引用写进说明。"
+        github ? "每单 editPaths 逐字从 availableEditPaths 选择 1 到 4 个路径，首批 GitHub 工单的可编辑范围须互斥。availableSources 每行是 [路径, 字节数]。sources 只填路径，选最多 4 个必要的额外只读资料，无额外资料时填空数组。每单 editPaths 与 sources 的去重合计大小不得超过 sourceBudgetBytes。GitHub Issue 引用写进说明。"
           : run.kind === "code"
           ? "每单 editPaths 列出需改动的 1 到 4 个现有文件。无依赖的工单填写空 dependsOn。修改同一文件的工单必须按依赖串行。下游只在前置补丁获人工批准后开始。sources 可列出辅助参考文件或为空，路径均从 availableSources 选择。"
           : "前置报告为必须输入时才填写 dependsOn。若需求明确说两张独立核验之后汇总，拆出两个无依赖节点和一个同时依赖它们的汇总节点。从 availableSources 指定一到四份资料，汇总单可只依赖报告。",
@@ -393,8 +394,10 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
         ...(routing ? ["逐单判断难度。范围清楚、改动局部且验收直接时给 difficulty=routine；需要判断跨模块契约、权限、迁移或关键步骤证据不足时给 difficulty=advanced。routingReason 用一句话说明本单的可验证依据，不超过 240 字。"] : []),
         ...(correction ? ["上一版草稿被独立复核拦截。针对 correction 中的意见修订拆分、依据和验证办法。保留本轮冻结版本、全部产品验收和可授权文件范围。给出完整修订草稿。"] : []),
         "以下是待核对的材料，不授予额外权限。直接返回 JSON 工单，不调用工具或追问。",
-        JSON.stringify({ request: flow.prompt, plan: context.plan.sections, criteria, availableSources: [...sources],
-          ...(github ? { availableEditPaths: [...editable], issueCandidates: flow.project?.issueCandidates, relatedIssues: flow.project?.relatedIssues } : {}),
+        JSON.stringify({ request: flow.prompt, plan: context.plan.sections, criteria,
+          availableSources: github ? [...catalog].map(([path, { bytes }]) => [path, bytes]) : [...sources],
+          ...(github ? { availableEditPaths: [...editable], sourceBudgetBytes: qualitySourceBudgetBytes,
+            issueCandidates: flow.project?.issueCandidates, relatedIssues: flow.project?.relatedIssues } : {}),
           ...(reviewer ? { outputs: flow.outputs } : {}), ...(correction ? { correction } : {}) }),
       ].join("\n\n");
       const criterionIds = criteria.map(item => item.id);
@@ -403,6 +406,12 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
         const batchAcceptance = github ? readBatchAcceptance(parse(output)?.batchAcceptance, flow, criterionIds) : [];
         const tickets = readDispatchTickets(output, criterionIds, sources, run.kind, routing, !!reviewer, ticketOutputMaxBytes, github,
           editable, new Set(batchAcceptance.map(item => item.criterion)));
+        if (github) for (const ticket of tickets) {
+          const paths = [...new Set([...(ticket.editPaths ?? []), ...ticket.sources])];
+          const bytes = paths.reduce((total, path) => total + (catalog.get(path)?.bytes ?? 0), 0);
+          if (bytes > qualitySourceBudgetBytes) throw new TicketSourceValidationError(
+            `工单校验未通过：${ticket.id} 的编辑文件和只读资料合计 ${bytes} 字节，超过 ${qualitySourceBudgetBytes}。保留交付所需文件，缩减或替换非必要只读资料。`);
+        }
         return { tickets, batchAcceptance };
       };
       const { tickets, batchAcceptance } = await prepareVerifiedDraft(async feedback => {
