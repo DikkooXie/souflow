@@ -51,7 +51,9 @@ test("GitHub 拆单从固定提交区分只读资料和编辑文件，来源错�
   await git("add", ".");
   await git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--no-gpg-sign", "-qm", "advance");
 
-  const ticket = { ...draft[0], sources: [guide, large], editPaths: [editable], validation,
+  const baseTicket = draft[0];
+  assert.ok(baseTicket);
+  const ticket = { ...baseTicket, sources: [guide, large], editPaths: [editable], validation,
     delivery: { outcome: "用户确认纪要后收到一条待办", priorityReason: "独立交付确认行为", prerequisites: [] } };
   const prompts: string[] = [];
   const sourceInputMaxBytes = qualitySourceInputBytes({});
@@ -100,6 +102,15 @@ test("GitHub 拆单从固定提交区分只读资料和编辑文件，来源错�
   assert.ok(Object.values(allEvidence).reduce((sum, text) => sum + Buffer.byteLength(text), 0) > oldLimit);
   const lessEvidence = await qualitySources(repo, revision, paths, signal, oldLimit);
   assert.ok(Object.keys(lessEvidence).length < paths.length);
+  const missingAcceptance = { ...ticket, criteria: [], validation: [] };
+  responses = [missingAcceptance, ticket];
+  const corrected = await dispatch.planGitHub(flow, "missing-acceptance");
+  assert.deepEqual(corrected.tickets[0]?.criteria, ticket.criteria);
+  assert.match(prompts[8] ?? "", /missing-criteria:T1.*uncovered:AC-1/);
+  assert.match(prompts[8] ?? "", /原计划验收条件必须完整保留/);
+  responses = [missingAcceptance, missingAcceptance];
+  await assert.rejects(dispatch.planGitHub(flow, "still-missing-acceptance"), /missing-criteria:T1/);
+  assert.equal(prompts.length, 11);
 });
 
 test("local dispatch requires criterion coverage, an acyclic graph and approved evidence", () => {
