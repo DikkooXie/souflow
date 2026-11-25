@@ -100,6 +100,11 @@ test("授权卡仅由发起者回答，固定计划并阻止双击重复派发",
   assert.equal(await resumed.answer(card.id, "member", response, [revised]), 409);
   revise({ sections: [{ title: "开发计划", text: "相同版本号、不同正文" }] });
   assert.equal(await resumed.answer(card.id, "member", response, [revised]), 409);
+  revised.outputs = flow.outputs.map(output => ({ ...output, artifacts: output.artifacts.map(artifact =>
+    artifact.kind === "prd" ? { ...artifact, version: artifact.version + 1 } : artifact) }));
+  assert.equal(resumed.cards([revised], "member").length, 0);
+  assert.equal(await resumed.answer(card.id, "member", response, [revised]), 409);
+  assert.equal(approvals.length, 0);
   assert.equal(await resumed.answer(card.id, "member", { ...response, issue: 99 }, [flow]), 422);
   assert.deepEqual((await Promise.all([
     resumed.answer(card.id, "member", response, [flow]), resumed.answer(card.id, "member", response, [flow]),

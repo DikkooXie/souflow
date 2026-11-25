@@ -8,14 +8,14 @@ const controls = [
   "select-decision", "send-request", "send-answer", "select-option", "simulation-disconnect", "reset-demo",
   "open-artifact", "open-history", "change-audit-range", "change-log-type", "refresh-audit", "toggle-audit-log",
   "toggle-conversations", "new-conversation", "open-archive", "close-archive",
-  "open-local-dispatch", "prepare-local-dispatch", "start-local-dispatch", "edit-plan", "open-monitor", "resume-workflow",
+  "open-local-dispatch", "prepare-local-dispatch", "start-local-dispatch", "edit-plan", "edit-prd", "open-monitor", "resume-workflow",
   "open-github", "close-github", "claim-github", "refresh-github",
 ] as const;
 
 export type BusinessEvent = {
   kind: "request.submitted" | "phase.started" | "phase.completed" | "flow.finished" | "decision.opened"
     | "decision.answered" | "decision.updated" | "demo.reset" | "attempt.started" | "attempt.finished" | "model.started"
-    | "dispatch.prepared" | "dispatch.started" | "dispatch.reviewed" | "dispatch.finished" | "dispatch.account-assigned" | "dispatch.quality" | "plan.revised"
+    | "dispatch.prepared" | "dispatch.started" | "dispatch.reviewed" | "dispatch.finished" | "dispatch.account-assigned" | "dispatch.quality" | "plan.revised" | "prd.revised"
     | "github.issue" | "github.selection" | "member.denied" | "member.revised" | "acceptance.decided" | "flow.resumed"
     | "remote.device" | "remote.job" | "remote.code";
   flowId?: string | undefined;

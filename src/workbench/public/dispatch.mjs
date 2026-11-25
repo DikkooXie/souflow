@@ -99,15 +99,18 @@ export function createDispatchPanel(node, post, openDecisions) {
   }
 
   function render() {
-    const plan = currentFlow?.outputs.flatMap(output => output.artifacts).find(artifact => artifact.kind === "development-plan");
+    const artifacts = currentFlow?.outputs.flatMap(output => output.artifacts) ?? [];
+    const plan = artifacts.find(artifact => artifact.kind === "development-plan");
+    const prd = artifacts.find(artifact => artifact.kind === "prd");
+    const outdated = !!(plan && prd && !plan.upstream.some(parent => parent.id === prd.id && parent.version === prd.version));
     const candidates = currentRuns.filter(run => run.flowId === currentFlow?.id && run.kind === kind.value);
-    currentRun = candidates.findLast(run => run.plan.id === plan?.id && run.plan.version === plan.version);
+    currentRun = outdated ? undefined : candidates.findLast(run => run.plan.id === plan?.id && run.plan.version === plan.version);
     const older = candidates.filter(run => run.id !== currentRun?.id && run.plan.version <= plan?.version).toReversed();
-    const versionsKey = JSON.stringify([currentFlow?.id, kind.value, plan?.version, older.map(run => run.id)]);
+    const versionsKey = JSON.stringify([currentFlow?.id, kind.value, plan?.version, outdated, older.map(run => run.id)]);
     if (version.dataset.key !== versionsKey) {
       version.dataset.key = versionsKey;
       const previous = version.value;
-      const latest = node("option", "", `当前计划 v${plan?.version ?? ""}`);
+      const latest = node("option", "", `当前计划 v${plan?.version ?? ""}${outdated ? "（待修订）" : ""}`);
       latest.value = "";
       version.replaceChildren(latest, ...older.map(run => {
         const option = node("option", "", `计划 v${run.plan.version} · ${run.id.slice(0, 8)}（历史批次）`);
@@ -122,15 +125,16 @@ export function createDispatchPanel(node, post, openDecisions) {
     const locked = currentRuns.some(item => item.flowId === currentFlow?.id && item.plan.version === plan?.version
       && item.acceptance?.length);
     review.hidden = !!past || run?.kind !== "code" || !hasPendingReview;
-    const key = JSON.stringify([currentFlow?.id, plan?.version, run, !!past, member?.id, locked]);
+    const key = JSON.stringify([currentFlow?.id, plan?.version, run, !!past, member?.id, locked, outdated]);
     if (rendered === key) return;
     rendered = key;
-    prepare.hidden = member?.id === "reviewer" || locked || !!past || (!!run && run.status !== "failed");
+    prepare.hidden = outdated || member?.id === "reviewer" || locked || !!past || (!!run && run.status !== "failed");
     prepare.textContent = run?.status === "failed" ? "重新准备工单" : "准备工单";
     start.hidden = member?.id === "reviewer" || locked || !!past || !["ready", "paused"].includes(run?.status);
     start.textContent = run?.status === "paused" ? "继续派发剩余工单" : "确认并执行";
     status.textContent = past ? `计划 v${past.plan.version} 的历史批次。请切回当前版本准备或执行工单。`
-      : !run ? `从开发计划 v${plan?.version ?? ""} 准备本地工单。代码补丁留在独立工作区，供人工复核。`
+      : outdated ? "请在项目文档核对新版 PRD 并保存新的开发计划，再准备工单。"
+        : !run ? `从开发计划 v${plan?.version ?? ""} 准备本地工单。代码补丁留在独立工作区，供人工复核。`
       : run.status === "preparing" ? (run.kind === "code" ? "正在生成并复核工单…" : "正在生成工单…")
         : run.status === "ready" ? `${run.quality ? "质量校验已通过。" : ""}核对${run.kind === "code" ? "代码" : "核验"}工单后确认执行。使用开发计划 v${run.plan.version} 和仓库提交 ${run.revision.slice(0, 8)}，工作区未提交内容不在本轮资料内。`
           : run.status === "waiting" ? "前往「待决策」验收前置补丁，通过后继续执行。"

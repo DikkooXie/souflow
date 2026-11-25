@@ -56,8 +56,18 @@ export type StoredFlow = { flow: Flow; planText?: string };
 
 type RunPhase = (flow: Flow, phase: Phase, targets: readonly PhaseTarget[], planText?: string) => Promise<readonly string[] | "interrupted" | undefined>;
 
+function documentVersion(flow: Flow, kind: "prd" | "development-plan") {
+  return flow.outputs.flatMap(output => output.artifacts).find(artifact => artifact.kind === kind);
+}
+
+function usesPrd(plan: Artifact, prd: Artifact) {
+  return plan.upstream.some(parent => parent.id === prd.id && parent.version === prd.version);
+}
+
 export function currentDevelopmentPlan(flow: Flow) {
-  return flow.outputs.flatMap(output => output.artifacts).find(artifact => artifact.kind === "development-plan");
+  const plan = documentVersion(flow, "development-plan");
+  const prd = documentVersion(flow, "prd");
+  if (plan && (!prd || usesPrd(plan, prd))) return plan;
 }
 
 export function readPlanRevision(input: unknown) {
@@ -65,7 +75,9 @@ export function readPlanRevision(input: unknown) {
   const { version, text } = input;
   if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 1) return;
   if (typeof text !== "string" || text.length > maxArtifactTextLength || !text.trim()) return;
-  return { version, text: text.trim() };
+  const prdVersion = "prdVersion" in input ? input.prdVersion : undefined;
+  if (prdVersion !== undefined && (typeof prdVersion !== "number" || !Number.isSafeInteger(prdVersion) || prdVersion < 1)) return;
+  return { version, text: text.trim(), prdVersion };
 }
 
 function nextTargets(flow: Flow, phase: Phase): PhaseTarget[] {
@@ -222,26 +234,34 @@ export function createConversationFlows(runPhase: RunPhase, limit: number, recor
       launch(flow);
       return 200;
     },
-    revisePlan(flow: Flow, revision: NonNullable<ReturnType<typeof readPlanRevision>>): 200 | 409 | 422 | 503 {
-      const plan = currentDevelopmentPlan(flow);
-      if (!flows.includes(flow) || flow.status !== "ready" || !plan || plan.version !== revision.version) return 409;
+    reviseDocument(flow: Flow, kind: "prd" | "development-plan",
+      revision: NonNullable<ReturnType<typeof readPlanRevision>>): 200 | 409 | 422 | 503 {
+      const document = documentVersion(flow, kind);
+      if (!flows.includes(flow) || flow.status !== "ready" || !document || document.version !== revision.version) return 409;
+      const prd = documentVersion(flow, "prd");
+      const newerPrd = kind === "development-plan" && prd && !usesPrd(document, prd) ? prd : undefined;
+      if (kind === "development-plan" && ((revision.prdVersion !== undefined && prd?.version !== revision.prdVersion)
+        || (newerPrd && revision.prdVersion !== newerPrd.version))) return 409;
       const text = store ? scrubAuditText(revision.text) : revision.text;
-      if (plan.sections[0]?.text.trim() === text) return 422;
+      if (!newerPrd && document.sections[0]?.text.trim() === text) return 422;
 
-      const replaces = { id: plan.id, version: plan.version };
-      const revised = { ...plan, version: plan.version + 1, replaces,
-        sections: [{ title: definitions["development-plan"].fields[0], text }] };
+      const replaces = { id: document.id, version: document.version };
+      const upstream = newerPrd ? document.upstream.map(parent => parent.id === newerPrd.id
+        ? { id: newerPrd.id, version: newerPrd.version } : parent) : document.upstream;
+      const revised = { ...document, version: document.version + 1, replaces, upstream,
+        sections: [{ title: definitions[kind].fields[0], text }] };
       const oldDrafts = flow.outputs.flatMap(output => output.artifacts).filter(artifact => artifact.kind === "ticket-drafts");
       // 旧草稿引用的是原计划，留在历史中，避免显示为改版后的执行依据。
-      const planHistory = [...(flow.planHistory ?? []), plan, ...oldDrafts];
+      const planHistory = [...(flow.planHistory ?? []), document, ...oldDrafts];
       const outputs = flow.outputs.map(output => ({
         ...output, artifacts: output.artifacts.filter(artifact => artifact.kind !== "ticket-drafts")
-          .map(artifact => artifact === plan ? revised : artifact),
+          .map(artifact => artifact === document ? revised : artifact),
       })).filter(output => output.artifacts.length > 0);
-      if (!save({ ...flow, planHistory, outputs }, { kind: "plan.revised", flowId: flow.id, subject: plan.id,
-        details: { previousVersion: plan.version, version: revised.version, archivedDrafts: oldDrafts.map(({ id, version }) => ({ id, version })) } })) return 503;
+      if (!save({ ...flow, planHistory, outputs }, { kind: kind === "prd" ? "prd.revised" : "plan.revised", flowId: flow.id, subject: document.id,
+        details: { previousVersion: document.version, version: revised.version, upstream,
+          archivedDrafts: oldDrafts.map(({ id, version }) => ({ id, version })) } })) return 503;
       Object.assign(flow, { planHistory, outputs });
-      onReady?.(flow, planTexts.get(flow.id));
+      if (kind === "development-plan") onReady?.(flow, planTexts.get(flow.id));
       return 200;
     },
     reset() {
