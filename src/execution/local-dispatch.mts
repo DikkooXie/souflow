@@ -163,8 +163,22 @@ export function readDispatchTickets(text: string | undefined, criteria: readonly
     }
     throw Error(message);
   }
-  if (github) validateDeliveryOrder(tickets);
-  if (kind === "code") {
+  if (github) {
+    validateDeliveryOrder(tickets);
+    const owners = new Map<string, string>();
+    for (const ticket of tickets) {
+      for (const path of ticket.editPaths ?? []) {
+        const key = path.toLowerCase();
+        const owner = owners.get(key);
+        if (owner) {
+          throw new RetryableTicketDraftError(
+            `工单校验未通过：编辑文件重复分配。${path} 同时分给了 ${owner} 和 ${ticket.id}。整批 GitHub 工单（含串行工单）的编辑路径必须互斥。把该文件分给一个工单，让其他工单复用它交付的接口，并保留各自的验收与真实依赖。不得移除原计划验收项或添加冻结清单外的文件。`,
+          );
+        }
+        owners.set(key, ticket.id);
+      }
+    }
+  } else if (kind === "code") {
     const byId = new Map(tickets.map(ticket => [ticket.id, ticket]));
     const ancestry = new Map(tickets.map(ticket => [ticket.id, ancestorsOf(ticket, byId)]));
     for (const [index, ticket] of tickets.entries()) {
@@ -382,7 +396,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
           : run.kind === "code"
           ? "把已生成的开发计划拆成本地代码工单，每单可以单独验证产物。只有确实需要前置补丁时才声明工单依赖。"
           : "把已生成的 souflow 开发计划拆成可独立验收的本地核验工单。工单只根据提供的资料和前置报告产出核验报告。",
-        github ? "每单 editPaths 逐字从 availableEditPaths 选择 1 到 4 个路径，首批 GitHub 工单的可编辑范围须互斥。availableSources 每行是 [路径, 字节数]。sources 只填路径，选最多 4 个必要的额外只读资料，无额外资料时填空数组。每单 editPaths 与 sources 的去重合计大小不得超过 sourceBudgetBytes。GitHub Issue 引用写进说明。"
+        github ? "每单 editPaths 逐字从 availableEditPaths 选择 1 到 4 个路径。整批 GitHub 工单（含串行工单）的编辑范围须互斥，共用接线文件只分给一个工单。availableSources 每行是 [路径, 字节数]。sources 只填路径，选最多 4 个必要的额外只读资料，无额外资料时填空数组。每单 editPaths 与 sources 的去重合计大小不得超过 sourceBudgetBytes。GitHub Issue 引用写进说明。"
           : run.kind === "code"
           ? "每单 editPaths 列出需改动的 1 到 4 个现有文件。无依赖的工单填写空 dependsOn。修改同一文件的工单必须按依赖串行。下游只在前置补丁获人工批准后开始。sources 可列出辅助参考文件或为空，路径均从 availableSources 选择。"
           : "前置报告为必须输入时才填写 dependsOn。若需求明确说两张独立核验之后汇总，拆出两个无依赖节点和一个同时依赖它们的汇总节点。从 availableSources 指定一到四份资料，汇总单可只依赖报告。",
@@ -610,8 +624,6 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
       const run: Run = { id, flowId: flow.id, plan, kind: "code", status: "preparing", jobs: [] };
       const { batchAcceptance } = await planTickets(flow, run, true, correction);
       const tickets = qualityTickets(run.jobs);
-      const files = tickets.flatMap(ticket => ticket.paths.map(path => path.toLowerCase()));
-      if (new Set(files).size !== files.length) throw Error("工单校验未通过：此轮 GitHub 工单的编辑范围重叠。");
       return { tickets: tickets.map(ticket => ({ ...ticket, delivery: readTicketDelivery(ticket.delivery, ticket.id, ticket.dependsOn) })),
         batchAcceptance };
     },
