@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createCodexTicketSourceReviewer } from "../src/execution/codex-quality-review.mts";
 import { currentDevelopmentPlan } from "../src/planning/conversation-flow.mts";
 import {
-  type BatchAcceptance, qualityBlock, qualityCurrent, qualityPacket, type QualityTicket, reviewQuality,
+  type BatchAcceptance, qualityBlock, qualityCurrent, qualityPacket, qualityReviewLimits, type QualityTicket,
+  reviewQuality, reviewTicketSources,
 } from "../src/planning/dispatch-quality.mts";
 import { passingQualityReview, qualityReviewOutput, readyQualityFlow } from "./fixtures/planning-quality.mts";
 
@@ -122,6 +124,51 @@ test("依据维度只接收上限内的有效引用", async () => {
   output.evidence.evidence.pop();
   const receipt = await reviewQuality(packet, payload, review, signal);
   assert.equal(receipt.checks.evidence.evidence.length, 6);
+});
+
+test("逐单源码复核只重查格式不合格的回执，沿用固定资料和阻塞标准", async () => {
+  const { packet, signal } = await qualityFixture();
+  const path = "src/minutes/confirmation.mts";
+  const source = "现有服务未核对可信成员身份。";
+  const block = { status: "block", summary: "缺少可信成员映射", evidence: [{ ref: `repo:${path}`, quote: source }] };
+  for (const malformed of ["{", JSON.stringify({ ...block, summary: "字".repeat(qualityReviewLimits.summaryCharacters + 1) })]) {
+    const packets: (string | undefined)[] = [];
+    const reviewer = createCodexTicketSourceReviewer(process.cwd(), undefined, 1000, options => {
+      packets.push(options.untrustedContext);
+      assert.equal(options.localLoginOnly, true);
+      assert.equal(options.disableWebSearch, true);
+      if (packets.length === 1) assert.doesNotMatch(options.prompt, /上一份结论未通过/);
+      else assert.match(options.prompt, /上一份结论未通过格式或引文校验.*同一份固定资料.*原标准判断是否阻塞/);
+      return { finished: Promise.resolve("completed"), close() {},
+        output: () => packets.length === 1 ? malformed : JSON.stringify(block) };
+    });
+    const result = await reviewTicketSources(packet, ticket, { [path]: source }, reviewer, signal);
+    assert.equal(result.status, "block");
+    assert.equal(result.summary, block.summary);
+    assert.equal(packets.length, 2);
+    assert.equal(packets[0], packets[1]);
+  }
+});
+
+test("逐单源码复核不会接纳两次不实引用或重试已有效的拦截", async () => {
+  const { packet, signal } = await qualityFixture();
+  const path = "src/minutes/confirmation.mts";
+  const source = "现有服务未核对可信成员身份。";
+  let calls = 0;
+  const block = { status: "block", summary: "缺少可信成员映射", evidence: [{ ref: `repo:${path}`, quote: source }] };
+  await assert.rejects(reviewTicketSources(packet, ticket, { [path]: source }, async (_packet, _signal, correction) => {
+    calls++;
+    if (calls === 2) assert.match(correction ?? "", /引用无法在本轮资料找到/);
+    return JSON.stringify({ ...block, evidence: [{ ref: `repo:${path}`, quote: "源码中不存在的引文" }] });
+  }, signal), /引用无法在本轮资料找到/);
+  assert.equal(calls, 2);
+  const receipt = await reviewTicketSources(packet, ticket, { [path]: source }, async (_packet, _signal, correction) => {
+    assert.equal(correction, undefined);
+    calls++;
+    return JSON.stringify(block);
+  }, signal);
+  assert.equal(receipt.status, "block");
+  assert.equal(calls, 3);
 });
 
 test("工单缺少幂等验收的验证步骤和预期结果时拒绝准备复审", async () => {
