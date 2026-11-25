@@ -55,7 +55,7 @@ export function readGitHubSelection(output: string | undefined, issues: readonly
       || !Number.isSafeInteger(row.number) || !byNumber.has(row.number)
       || Object.hasOwn(plan, row.number) || typeof row.reason !== "string" || !row.reason.trim()
       || row.reason.length > 400 || typeof row.instructions !== "string" || row.instructions.length > 2000
-      || !Array.isArray(row.criteria) || !row.criteria.every((id: unknown) => typeof id === "string" && required.includes(id))
+      || !Array.isArray(row.criteria) || !row.criteria.every((id: unknown) => typeof id === "string")
       || !Array.isArray(row.sourcePaths) || row.sourcePaths.length > maxSourcePaths || new Set(row.sourcePaths).size !== row.sourcePaths.length
       || !row.sourcePaths.every((path: unknown) => typeof path === "string" && readable.has(path))) throw invalid();
     plan[row.number] = row;
@@ -70,7 +70,7 @@ export function readGitHubSelection(output: string | undefined, issues: readonly
     for (const path of specification.files) used.add(path.toLowerCase());
     return { ...specification, instructions: scrubAuditText(specification.instructions), number: issue.number,
       title: scrubAuditText(issue.title), revision: issueRevision(issue), reason: scrubAuditText(row.reason), sourcePaths: row.sourcePaths,
-      criteria: row.criteria, validation: readVerification(row.validation, row.criteria, `#${issue.number}`),
+      criteria: row.criteria, validation: readVerification(row.validation, row.criteria, `#${issue.number}`, required),
       issueText: scrubAuditText(issue.body).slice(0, 3000) };
   });
   const errors = validateTicketPlan(required, selections.map(item => ({

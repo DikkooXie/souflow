@@ -55,8 +55,11 @@ export function acceptanceCriteria(flow: Flow) {
 
 class VerificationMappingError extends Error {}
 
-export function readVerification(raw: unknown, criteria: readonly string[], ticket?: string) {
+export function readVerification(raw: unknown, criteria: readonly string[], ticket?: string, allowed?: readonly string[]) {
   const subject = ticket ? `工单 ${ticket} ` : "";
+  if (allowed && criteria.some(id => !allowed.includes(id))) {
+    throw new VerificationMappingError(`工单校验未通过：${subject}验收编号必须从本轮资料原样选择：${allowed.join("、")}。`);
+  }
   const invalidMapping = () => new VerificationMappingError(
     `工单校验未通过：${subject}每项验收引用需要一条验证步骤和预期结果。按 criteria 中的编号原样填写，且每个编号只出现一次：${criteria.join("、") || "空"}。`);
   if (!Array.isArray(raw) || raw.length !== criteria.length || new Set(criteria).size !== criteria.length) {

@@ -86,6 +86,11 @@ test("GitHub 选单验收映射错误时，在同一冻结资料内只修正一�
   assert.equal(rejected.calls.length, 2);
   assert.match(String(rejected.result), /工单 #1.*AC-1/);
 
+  const copiedNumber = await select(up, { ...wrongId, criteria: ["AC-01"] });
+  assert.equal(copiedNumber.calls.length, 2);
+  assert.match(copiedNumber.calls[1]?.prompt ?? "", /工单 #1 验收编号必须从本轮资料原样选择：AC-1/);
+  assert.ok(Array.isArray(copiedNumber.result));
+
   const outsideScope = await select(up, { ...up, number: 99 });
   assert.equal(outsideScope.calls.length, 1);
   assert.match(String(outsideScope.result), /不在本轮候选资料/);

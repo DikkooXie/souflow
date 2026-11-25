@@ -126,7 +126,7 @@ export function readDispatchTickets(text: string | undefined, criteria: readonly
       throw Error("工单校验未通过（资料必须引用冻结版本中的普通文件或前置报告）。");
     }
     const ticket: Ticket = { id: item.id, title: item.title, instructions: item.instructions, criteria: item.criteria, dependsOn: item.dependsOn, sources };
-    if (review) ticket.validation = readVerification(item.validation, ticket.criteria, ticket.id);
+    if (review) ticket.validation = readVerification(item.validation, ticket.criteria, ticket.id, criteria);
     if (github) ticket.delivery = readTicketDelivery(item.delivery, ticket.id, ticket.dependsOn);
     if (routing) {
       const { difficulty, routingReason } = item;
