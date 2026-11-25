@@ -99,12 +99,15 @@ test("交付复核按当前头和工单版本保存，旧提交回执保留为�
     state: "OPEN", assignees: ["member"], pulls: [initialPull] };
   let remotePull = initialPull;
   let body = issue.body;
+  let linked = true;
+  let scopeCurrent = true;
+  let networkFailure = false;
   let stored: Claim = { ...issue, pull: initialPull, target: { branch: "feat/47-123456789abc", head: originalHead },
     requestId: "approved", claimedBy: "member", account: "member", phase: "submitted", syncedAt: 0,
     approval: { flowId: "flow", planId: "plan", version: 1, issueRevision: issueRevision(issue), quality } };
   const tracker: DeliveryTracker = {
     repo: "a/b", candidates: async () => [], account: async () => "member", assign: async () => assert.fail(),
-    read: async () => ({ ...issue, body, pulls: [remotePull] }),
+    read: async () => ({ ...issue, body, pulls: linked ? [remotePull] : [] }),
     delivery: { checkout: async () => assert.fail(), publish: async () => assert.fail(), find: async () => remotePull,
       reviewChanges: async () => assert.fail("测试只替换复核器") },
   };
@@ -112,12 +115,17 @@ test("交付复核按当前头和工单版本保存，旧提交回执保留为�
   const open = () => createIssueDispatch(tracker, { load: () => [stored], save(_id, item) { stored = structuredClone(item); return true; } },
     async () => assert.fail(), () => true, 1, new Map(), {
       specs: new Map(), conversation: true, pollMs: 60_000, prepare: async () => assert.fail(),
+      reviewScopeCurrent: () => scopeCurrent,
       async review(claim) {
         const head = claim.pull?.head;
         assert.ok(head);
         seen.push(head);
+        if (networkFailure) throw Error("临时网络失败");
         return { packetId: head, key: { repo: tracker.repo, issue: issue.number, issueRevision: issueRevision(issue), pull: initialPull.number,
-          head, mergeBase, plan: { id: "plan", version: 1, quality } }, status: head === originalHead ? "block" : "incomplete" };
+          head, mergeBase, plan: { id: "plan", version: 1, quality } }, ...(head === originalHead ? {
+          status: "block" as const, implementation: { status: "block" as const, summary: "缺少失败测试", evidence: [] },
+          requirements: { criteria: [] },
+        } : { status: "incomplete" as const }) };
       },
     });
   const run = async (service: ReturnType<typeof open>) => {
@@ -133,14 +141,70 @@ test("交付复核按当前头和工单版本保存，旧提交回执保留为�
   try {
     await run(restored);
     assert.deepEqual(seen, [originalHead]);
+    scopeCurrent = false;
+    assert.equal(restored.reviewStatus("flow", "member")[0]?.reviews[0]?.current, false);
+    scopeCurrent = true;
+    linked = false;
+    assert.equal((await run(restored))?.reviews[0]?.current, false);
+    linked = true;
     remotePull = { ...initialPull, head: nextHead };
+    networkFailure = true;
+    assert.equal((await run(restored))?.unavailable, true);
+    networkFailure = false;
     assert.deepEqual((await run(restored))?.reviews.map(item => [item.status, item.current]), [["block", false], ["incomplete", true]]);
     body = "已经修改过的工单";
     const updated = await run(restored);
     assert.equal(updated?.unavailable, true);
     assert.equal(updated?.reviews.some(item => item.current), false);
-    assert.deepEqual(seen, [originalHead, nextHead]);
+    assert.deepEqual(seen, [originalHead, nextHead, nextHead]);
   } finally { await restored.close(); }
+});
+
+test("复核执行位释放后继续检查已合并的工单", async () => {
+  const head = "a".repeat(40);
+  const hash = "b".repeat(64);
+  const quality = { policy: 1, flowDigest: hash, batchDigest: hash };
+  const claims = [47, 48].map(number => {
+    const pull: IssuePull = { number: number + 10, url: `https://github.com/a/b/pull/${number + 10}`, state: "MERGED", ci: "SUCCESS", head };
+    const issue: IssueDetail = { number, title: `工单 ${number}`, body: "已完成", url: `https://github.com/a/b/issues/${number}`,
+      assignees: ["member"], pulls: [pull], state: "CLOSED" };
+    const claim: Claim = { ...issue, pull, requestId: "approved", claimedBy: "member", account: "member", phase: "submitted", syncedAt: 0,
+      target: { branch: `feat/${number}-123456789abc`, head },
+      approval: { flowId: "flow", planId: "plan", version: 1, issueRevision: issueRevision(issue), quality } };
+    return { issue, pull, claim };
+  });
+  let releaseFirst = () => {};
+  const firstSlot = new Promise<void>(resolve => { releaseFirst = resolve; });
+  const reviewed: number[] = [];
+  const tracker: DeliveryTracker = { repo: "a/b", candidates: async () => [], account: async () => "member", assign: async () => assert.fail(),
+    async read(number) {
+      const item = claims.find(input => input.issue.number === number);
+      assert.ok(item);
+      return item.issue;
+    }, delivery: { checkout: async () => assert.fail(), publish: async () => assert.fail(),
+      find: async (_branch, _head, pull) => claims.find(input => input.pull.number === pull)?.pull,
+      reviewChanges: async () => assert.fail() },
+  };
+  const service = createIssueDispatch(tracker, { load: () => claims.map(item => item.claim), save: () => true },
+    async () => assert.fail(), () => true, 1, new Map(), {
+      specs: new Map(), conversation: true, pollMs: 60_000, prepare: async () => assert.fail(),
+      async review(claim) {
+        reviewed.push(claim.number);
+        if (reviewed.length === 1) await firstSlot;
+        return { packetId: String(claim.number), key: { repo: tracker.repo, issue: claim.number,
+          issueRevision: claim.approval?.issueRevision ?? "", pull: claim.pull?.number ?? 0, head, mergeBase: head,
+          plan: { id: "plan", version: 1, quality } }, status: "block", implementation: { status: "block", summary: "待补", evidence: [] },
+          requirements: { criteria: [] } };
+      },
+    });
+  try {
+    await service.refresh();
+    assert.deepEqual(reviewed, [47]);
+    releaseFirst();
+    await setImmediate();
+    await service.refresh();
+    assert.deepEqual(reviewed, [47, 48]);
+  } finally { releaseFirst(); await service.close(); }
 });
 
 test("续修沿用批准范围和现有 PR，推送响应丢失时只回读", async t => {

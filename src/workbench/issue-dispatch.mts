@@ -13,7 +13,8 @@ import type { ReviewIssueDelivery } from "./github-delivery-review.mts";
 import { hasPublicationMarker } from "./planned-issue-publication.mts";
 
 export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; prepare: PrepareIssue; pollMs: number; conversation?: boolean;
-  requireQuality?: boolean; recoverFailedIssue?: number; reviewFix?: ApprovedReviewFix; review?: ReviewIssueDelivery };
+  requireQuality?: boolean; recoverFailedIssue?: number; reviewFix?: ApprovedReviewFix; review?: ReviewIssueDelivery;
+  reviewScopeCurrent?: (claim: Claim) => boolean };
 
 function publisher(tracker: IssueTracker) {
   return (tracker as Partial<DeliveryTracker>).delivery;
@@ -28,6 +29,7 @@ export type Claim = Remote & {
   target?: DeliveryTarget; pull?: IssuePull;
   checked?: CheckedIssue;
   observedIssueRevision?: string;
+  observedReviewLink?: boolean;
   deliveryReviews?: { observed: string; receipt: DeliveryReviewReceipt }[];
   claimUncertain?: boolean;
   failure?: DeliveryFailure; retryCount?: number;
@@ -78,16 +80,22 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     claims.set(c.number, c);
   }
   const reviewVersion = (c: Claim) => JSON.stringify([c.pull?.number, c.pull?.head, c.pull?.baseName, c.approval, c.observedIssueRevision,
+    c.observedReviewLink,
     c.checked?.head === c.pull?.head ? c.checked : undefined]);
-  function queueReview(c: Claim, connection: IssueTracker, remote: NonNullable<ReturnType<typeof publisher>>) {
+  const activeReviewScope = (c: Claim) => c.observedIssueRevision === c.approval?.issueRevision && c.observedReviewLink === true
+    && (delivery?.reviewScopeCurrent?.(c) ?? true);
+  function queueReview(c: Claim, connection: IssueTracker, remote: NonNullable<ReturnType<typeof publisher>>, retry: boolean) {
     const review = delivery?.review;
     if (!review || !remote.reviewChanges || !c.approval?.quality || !c.pull?.head || reviewJobs.size >= maxActive || reviewJobs.has(c.number)) return;
-    if (c.observedIssueRevision !== c.approval.issueRevision) return;
+    if (!activeReviewScope(c)) return;
     const observed = reviewVersion(c);
-    if (c.deliveryReviews?.some(item => item.observed === observed) || reviewUnavailable.get(c.number) === observed) return;
+    const prior = c.deliveryReviews?.find(item => item.observed === observed)?.receipt;
+    if (prior && (!retry || prior.implementation && prior.requirements)) return;
+    if (reviewUnavailable.get(c.number) === observed && !retry) return;
+    reviewUnavailable.delete(c.number);
     const unavailable = () => {
       const latest = claims.get(c.number);
-      if (!latest || abort.signal.aborted || reviewVersion(latest) !== observed) return;
+      if (!latest || abort.signal.aborted || reviewVersion(latest) !== observed || !activeReviewScope(latest)) return;
       reviewUnavailable.set(c.number, observed);
       log({ kind: "github.issue", subject: subject(c.number), flowId: c.approval?.flowId, details: {
         action: "delivery-review-unavailable", pull: c.pull?.number, head: c.pull?.head,
@@ -95,9 +103,10 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     };
     const job = review(c, connection, remote, abort.signal).then(receipt => {
       const latest = claims.get(c.number);
-      if (!latest || abort.signal.aborted || reviewVersion(latest) !== observed) return;
+      if (!latest || abort.signal.aborted || reviewVersion(latest) !== observed || !activeReviewScope(latest)) return;
       if (!receipt) { unavailable(); return; }
-      save({ ...latest, deliveryReviews: [...(latest.deliveryReviews ?? []), { observed, receipt }] }, `delivery-review-${receipt.status}`);
+      save({ ...latest, deliveryReviews: [...(latest.deliveryReviews ?? []).filter(item => item.observed !== observed), { observed, receipt }] },
+        `delivery-review-${receipt.status}`);
     }).catch(unavailable).finally(() => { reviewJobs.delete(c.number); });
     reviewJobs.set(c.number, job);
   }
@@ -125,7 +134,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   function snapshot(canClaim: boolean) {
     return { repo: tracker.repo, canClaim: canClaim && !delivery?.conversation, ...(delivery ? { deliveryEnabled: true, conversationEnabled: delivery.conversation === true } : {}), items: [
       ...[...claims.values()].reverse().map(({ requestId: _id, account: _account, phase, delivery, pull, approval,
-        checked: _checked, deliveryReviews: _reviews, observedIssueRevision: _issueRevision, ...item }) => ({ ...item,
+        checked: _checked, deliveryReviews: _reviews, observedIssueRevision: _issueRevision, observedReviewLink: _reviewLink, ...item }) => ({ ...item,
         ...(delivery ? { dependsOn: delivery.dependsOn, mode: "delivery" } : {}),
         ...(approval ? { flowId: approval.flowId } : {}),
         ...(item.failure ? { failureMessage: `${stageNames[item.failure.stage]} · ${reasonNames[item.failure.reason]}` } : {}),
@@ -334,24 +343,24 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     }
   }
   let polling: Promise<void> | undefined;
-  async function pollDelivery() {
+  async function pollDelivery(retryReviews = false) {
     if (abort.signal.aborted) return;
     let unavailable = false;
     for (const prior of [...claims.values()]) {
       if (!prior.target || (prior.phase !== "uncertain" && prior.phase !== "submitted")) continue;
       if (prior.reviewFix?.state === "running") continue;
-      // 关闭但未合并的 PR 仍可能重开。只停止轮询已合并且已收齐关闭与 CI 回执的工单。
-      if (prior.pull?.state === "MERGED" && prior.state === "CLOSED"
-        && ["SUCCESS", "FAILURE", "ERROR"].includes(prior.pull.ci ?? "")) continue;
       const connection = memberTrackers.get(prior.claimedBy) ?? tracker;
       const remote = publisher(connection);
       if (!remote) continue;
+      const checkIssue = delivery?.review && remote.reviewChanges && prior.approval?.quality;
+      // 已合并的工单可能仍在等复核执行位，继续回读其关联。
+      if (!checkIssue && prior.pull?.state === "MERGED" && prior.state === "CLOSED"
+        && ["SUCCESS", "FAILURE", "ERROR"].includes(prior.pull.ci ?? "")) continue;
       const pulled = await remote.find(prior.target.branch, prior.target.head, prior.pull?.number)
         .then(pull => ({ pull, failed: false }), () => ({ pull: undefined, failed: true }));
       unavailable ||= pulled.failed;
       const { pull } = pulled;
       if (!pull) continue;
-      const checkIssue = delivery?.review && remote.reviewChanges && prior.approval?.quality;
       const issue = checkIssue || (pull.state === "MERGED" && prior.state !== "CLOSED")
         ? await connection.read(prior.number).catch(() => undefined) : undefined;
       const c = claims.get(prior.number);
@@ -362,19 +371,22 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       }
       const changed = JSON.stringify(c.pull) !== JSON.stringify(pull);
       const observedIssueRevision = issue && checkIssue ? issueRevision(issue) : c.observedIssueRevision;
-      if (changed || c.phase !== "submitted" || (issue && issue.state !== c.state) || observedIssueRevision !== c.observedIssueRevision) {
+      const observedReviewLink = issue && checkIssue ? issue.pulls.some(other => other.number === pull.number) : c.observedReviewLink;
+      if (changed || c.phase !== "submitted" || (issue && issue.state !== c.state) || observedIssueRevision !== c.observedIssueRevision
+        || observedReviewLink !== c.observedReviewLink) {
         save({ ...c, ...(issue ? remoteIssue(issue) : {}), pull, phase: "submitted", syncedAt: Date.now(),
-          ...(observedIssueRevision ? { observedIssueRevision } : {}) },
+          ...(observedIssueRevision ? { observedIssueRevision } : {}), ...(observedReviewLink === undefined ? {} : { observedReviewLink }) },
           changed ? "pull-sync" : undefined);
       }
       const latest = claims.get(c.number);
-      if (latest?.phase === "submitted") queueReview(latest, connection, remote);
+      if (latest?.phase === "submitted" && issue) queueReview(latest, connection, remote, retryReviews);
     }
     dispatchReady();
     if (unavailable) throw Error("部分 GitHub PR 暂时无法读取。");
   }
-  function syncDelivery() {
-    polling ??= pollDelivery().finally(() => { polling = undefined; });
+  function syncDelivery(retryReviews = false): Promise<void> {
+    if (retryReviews && polling) return polling.catch(() => undefined).then(() => syncDelivery(true));
+    polling ??= pollDelivery(retryReviews).finally(() => { polling = undefined; });
     return polling;
   }
   const timer = delivery && setInterval(() => {
@@ -390,10 +402,11 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       return [...claims.values()].filter(c => c.approval?.flowId === flowId && c.claimedBy === actor && c.pull?.head)
         .map(c => {
           const observed = reviewVersion(c);
+          const current = activeReviewScope(c);
           return { number: c.number, pull: c.pull?.number, head: c.pull?.head, running: reviewJobs.has(c.number),
             unavailable: reviewUnavailable.get(c.number) === observed
-              || !!c.observedIssueRevision && c.observedIssueRevision !== c.approval?.issueRevision, reviews: (c.deliveryReviews ?? [])
-              .map(({ receipt, observed: prior }) => ({ ...receipt, current: prior === observed })) };
+              || !!c.observedIssueRevision && !current, reviews: (c.deliveryReviews ?? [])
+              .map(({ receipt, observed: prior }) => ({ ...receipt, current: current && prior === observed })) };
         });
     },
     async suggest() {
@@ -450,7 +463,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       dispatchReady();
     },
     refresh() {
-      refreshing ??= (async () => { await refresh(); await syncDelivery(); })().finally(() => { refreshing = undefined; });
+      refreshing ??= (async () => { await refresh(); await syncDelivery(true); })().finally(() => { refreshing = undefined; });
       return refreshing;
     },
     async claim(id: string, actor: string) {
