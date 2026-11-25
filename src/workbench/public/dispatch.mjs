@@ -132,7 +132,7 @@ export function createDispatchPanel(node, post, openDecisions) {
     prepare.textContent = run?.status === "failed" ? "重新准备工单" : "准备工单";
     start.hidden = member?.id === "reviewer" || locked || !!past || !["ready", "paused"].includes(run?.status);
     start.textContent = run?.status === "paused" ? "继续派发剩余工单" : "确认并执行";
-    status.textContent = past ? `计划 v${past.plan.version} 的历史批次。请切回当前版本准备或执行工单。`
+    status.textContent = past ? `计划 v${past.plan.version} 的历史批次。${past.error ?? "请切回当前版本准备或执行工单。"}`
       : outdated ? "请在项目文档核对新版 PRD 并保存新的开发计划，再准备工单。"
         : !run ? `从开发计划 v${plan?.version ?? ""} 准备本地工单。代码补丁留在独立工作区，供人工复核。`
       : run.status === "preparing" ? (run.kind === "code" ? "正在生成并复核工单…" : "正在生成工单…")
