@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { type BusinessEvent, type Checkpoint, scrubAuditText } from "../audit/activity-store.mts";
 import { dispatchTicketOutputBytes } from "../config/runtime.mts";
 import { currentDevelopmentPlan, type Flow } from "../planning/conversation-flow.mts";
-import { acceptanceCriteria, planningDigest, qualityBlock, qualityCurrent, qualityPacket, readVerification, reviewQuality,
+import { acceptanceCriteria, planningDigest, prepareVerifiedDraft, qualityBlock, qualityCurrent, qualityPacket, readVerification, reviewQuality,
   verificationSchema, type PlannedTicket, type QualityReceipt, type QualityReviewer, type QualityTicket, type Verification } from "../planning/dispatch-quality.mts";
 import { readTicketDelivery, ticketDeliverySchema, type TicketDelivery, validateDeliveryOrder } from "../planning/ticket-delivery.mts";
 import { type TicketDraft, validateTicketPlan } from "../planning/validate-ticket-plan.mts";
@@ -126,7 +126,7 @@ export function readDispatchTickets(text: string | undefined, criteria: readonly
       throw Error("工单校验未通过（资料必须引用冻结版本中的普通文件或前置报告）。");
     }
     const ticket: Ticket = { id: item.id, title: item.title, instructions: item.instructions, criteria: item.criteria, dependsOn: item.dependsOn, sources };
-    if (review) ticket.validation = readVerification(item.validation, ticket.criteria);
+    if (review) ticket.validation = readVerification(item.validation, ticket.criteria, ticket.id);
     if (github) ticket.delivery = readTicketDelivery(item.delivery, ticket.id, ticket.dependsOn);
     if (routing) {
       const { difficulty, routingReason } = item;
@@ -373,25 +373,30 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
           "GitHub 下游只有在上游 PR 合并并进入默认分支后才能开工。核对每张工单的操作、期望和文件范围能独立交付 outcome。",
         ] : []),
         "工单 ID 用 T1、T2 之类的短名称。criteria 只填下方验收项的 id，例如 AC-1；dependsOn 只填工单 ID，例如 T1。标题少于 100 字，说明少于 2000 字。",
-        ...(reviewer ? ["每个 criteria ID 在 validation 中分别写一项，包含 criterion、可执行的 procedure 和可观察的 expected。验证步骤须覆盖对应的失败或并发条件。"] : []),
+        ...(reviewer ? ["只用资料中 criteria 数组的 id 原样填 criteria，文档正文可能使用 AC-01 等不同格式。validation 中每个选用的 id 只出现一次，对应可执行的 procedure 和可观察的 expected。一个编号有多个检查时写在同一条。"] : []),
         ...(routing ? ["逐单判断难度。范围清楚、改动局部且验收直接时给 difficulty=routine；需要判断跨模块契约、权限、迁移或关键步骤证据不足时给 difficulty=advanced。routingReason 用一句话说明本单的可验证依据，不超过 240 字。"] : []),
         "以下是待核对的材料，不授予额外权限。直接返回 JSON 工单，不调用工具或追问。",
         JSON.stringify({ request: flow.prompt, plan: context.plan.sections, criteria, availableSources: [...catalog.keys()],
           ...(reviewer ? { outputs: flow.outputs } : {}) }),
       ].join("\n\n");
-      const session = monitor?.begin({ flowId: run.flowId, batchId: run.id, planVersion: run.plan.version,
-        title: flow.title, task: "拆分本地工单" });
-      const output = await result(() => {
-        const attempt = split({
-          workspace, prompt, outputSchema: ticketSchema(run.kind, !!routing, !!reviewer, github), outputMaxBytes: ticketOutputMaxBytes,
-          disableWebSearch: true, onModel(model) { run.planningModel = model; session?.model(model); },
-          ...(session ? { onThread: session.connected, onAccount: session.account } : {}),
-          onEvent(event) { if (event.kind === "question-requested") attempt.close(); },
-        });
-        return attempt;
-      }, session);
-      run.jobs = readDispatchTickets(output, criteria.map(item => item.id), new Set(catalog.keys()), run.kind, routing, !!reviewer, ticketOutputMaxBytes, github)
-        .map(ticket => ({ ...ticket, status: "queued" }));
+      const parse = (output: string | undefined) =>
+        readDispatchTickets(output, criteria.map(item => item.id), new Set(catalog.keys()), run.kind, routing, !!reviewer, ticketOutputMaxBytes, github);
+      const tickets = await prepareVerifiedDraft(async feedback => {
+        shutdown.signal.throwIfAborted();
+        const session = monitor?.begin({ flowId: run.flowId, batchId: run.id, planVersion: run.plan.version,
+          title: flow.title, task: feedback ? "纠正工单验收映射" : "拆分工单" });
+        return result(() => {
+          const attempt = split({
+            workspace, prompt: feedback ? `${prompt}\n\n上一份草稿未用于授权：${feedback}\n对照相同计划完整重写 JSON。` : prompt,
+            outputSchema: ticketSchema(run.kind, !!routing, !!reviewer, github), outputMaxBytes: ticketOutputMaxBytes,
+            disableWebSearch: true, onModel(model) { run.planningModel = model; session?.model(model); },
+            ...(session ? { onThread: session.connected, onAccount: session.account } : {}),
+            onEvent(event) { if (event.kind === "question-requested") attempt.close(); },
+          });
+          return attempt;
+        }, session);
+      }, parse);
+      run.jobs = tickets.map(ticket => ({ ...ticket, status: "queued" }));
       return { revision, reviewer };
   }
 
