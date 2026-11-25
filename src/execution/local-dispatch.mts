@@ -111,10 +111,14 @@ function ticketSchema(kind: DispatchKind, routeModels: boolean, review: boolean,
 
 class RetryableTicketDraftError extends Error {}
 
+function assertTicketOutputSize(bytes: number, maxBytes: number) {
+  if (bytes > maxBytes) throw Error(`工单校验未通过：返回的工单方案超过传输字节上限（${bytes} / ${maxBytes} 字节）。`);
+}
+
 export function readDispatchTickets(text: string | undefined, criteria: readonly string[], evidence: ReadonlySet<string>,
   kind: DispatchKind = "report", routing?: ModelRouting, review = false, ticketOutputMaxBytes = dispatchTicketOutputBytes(),
   github = false, editable = evidence, outsideTickets = new Set<string>()): Ticket[] {
-  if (text && Buffer.byteLength(text) > ticketOutputMaxBytes) throw Error("返回的工单方案超过传输字节上限。");
+  if (text) assertTicketOutputSize(Buffer.byteLength(text), ticketOutputMaxBytes);
   const candidates = parse(text)?.tickets;
   if (!Array.isArray(candidates)) throw Error("返回的工单结构无效。");
   const tickets = candidates.map(candidate => {
@@ -424,7 +428,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
       ].join("\n\n");
       const criterionIds = criteria.map(item => item.id);
       const parseDraft = (output: string | undefined) => {
-        if (output && Buffer.byteLength(output) > ticketOutputMaxBytes) throw Error("返回的工单方案超过传输字节上限。");
+        if (output) assertTicketOutputSize(Buffer.byteLength(output), ticketOutputMaxBytes);
         const batchAcceptance = github ? readBatchAcceptance(parse(output)?.batchAcceptance, flow, criterionIds) : [];
         const tickets = readDispatchTickets(output, criterionIds, sources, run.kind, routing, !!reviewer, ticketOutputMaxBytes, github,
           editable, new Set(batchAcceptance.map(item => item.criterion)));
@@ -440,16 +444,20 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
         shutdown.signal.throwIfAborted();
         const session = monitor?.begin({ flowId: run.flowId, batchId: run.id, planVersion: run.plan.version,
           title: flow.title, task: feedback ? "纠正工单引用" : correction ? "按复核意见修订工单" : "拆分工单" });
-        return result(() => {
+        let overflowBytes: number | undefined;
+        const output = await result(() => {
           const attempt = split({
             workspace, prompt: feedback ? `${prompt}\n\n上一份草稿未用于授权：${feedback}\n对照相同计划完整重写 JSON。` : prompt,
             outputSchema: ticketSchema(run.kind, !!routing, !!reviewer, github), outputMaxBytes: ticketOutputMaxBytes,
+            onOutputOverflow(bytes) { overflowBytes = bytes; },
             disableWebSearch: true, onModel(model) { run.planningModel = model; session?.model(model); },
             ...(session ? { onThread: session.connected, onAccount: session.account } : {}),
             onEvent(event) { if (event.kind === "question-requested") attempt.close(); },
           });
           return attempt;
         }, session);
+        if (overflowBytes !== undefined) assertTicketOutputSize(overflowBytes, ticketOutputMaxBytes);
+        return output;
       }, parseDraft, error => error instanceof RetryableTicketDraftError ? error.message : undefined);
       run.jobs = tickets.map(ticket => ({ ...ticket, status: "queued" }));
       return { revision, reviewer, batchAcceptance };
