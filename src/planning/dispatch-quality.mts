@@ -193,6 +193,7 @@ export type TicketSourcePacket = {
   plan: QualityPacket["planning"]["documents"][number] | undefined;
   upstream: readonly QualityTicket[];
   references: Record<string, string>;
+  handoff?: { original: string; changedPaths: readonly string[] };
 };
 export type TicketSourceFinding = Finding & { ticket: string; revision: string; paths: string[]; sourceDigest: string };
 export type TicketSourceReviewer = (packet: TicketSourcePacket, signal: AbortSignal, correction?: string) => Promise<string | undefined>;
@@ -258,12 +259,13 @@ function readFinding(value: unknown, packet: Pick<QualityPacket, "references">, 
 }
 
 export async function reviewTicketSources(batch: QualityPacket, ticket: QualityTicket,
-  sources: Record<string, string>, reviewer: TicketSourceReviewer, signal: AbortSignal): Promise<TicketSourceFinding> {
+  sources: Record<string, string>, reviewer: TicketSourceReviewer, signal: AbortSignal,
+  handoff?: TicketSourcePacket["handoff"]): Promise<TicketSourceFinding> {
   const paths = [...new Set([...ticket.paths, ...(ticket.sources ?? [])])];
   const missing = paths.filter(path => !Object.hasOwn(sources, path));
   if (missing.length) throw Error(`工单校验未通过：${ticket.id} 的固定源码未完整读入（${missing.join("、")}）。`);
   const references = Object.fromEntries(paths.map(path => [`repo:${path}`, sources[path] ?? ""]));
-  const packet: TicketSourcePacket = { revision: batch.revision, ticket, references,
+  const packet: TicketSourcePacket = { revision: batch.revision, ticket, references, ...(handoff ? { handoff } : {}),
     plan: batch.planning.documents.find(document => document.kind === "development-plan"),
     upstream: batch.tickets.filter(parent => ticket.dependsOn.includes(parent.id)),
     criteria: batch.planning.criteria.filter(item => ticket.criteria.includes(item.id)) };
@@ -276,7 +278,12 @@ export async function reviewTicketSources(batch: QualityPacket, ticket: QualityT
     let value: unknown;
     try { value = JSON.parse(raw ?? "null"); }
     catch { throw new ReviewFindingFormatError("质量复核未返回可解析的 JSON 结论，可以重试。"); }
-    return readFinding(value, packet, qualityReviewLimits.breakdownReferences);
+    const changed = handoff?.changedPaths ?? [];
+    const finding = readFinding(value, packet, Math.max(qualityReviewLimits.breakdownReferences, changed.length));
+    if (finding.status === "pass" && changed.some(path => !finding.evidence.some(({ ref }) => ref === `repo:${path}`))) {
+      throw new ReviewFindingFormatError("质量复核缺少已变更交接路径的逐字依据。每条变更路径至少引用一次，可以重试。");
+    }
+    return finding;
   }, error => error instanceof ReviewFindingFormatError ? error.message : undefined);
   return { ...finding, ticket: ticket.id, revision: batch.revision, paths, sourceDigest: hash(references) };
 }

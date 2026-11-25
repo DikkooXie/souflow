@@ -10,7 +10,8 @@ import { openActivityStore } from "../src/audit/activity-store.mts";
 import { createGitHubDelivery, githubPull } from "../src/connections/github-delivery.mts";
 import { type DeliveryTracker, issueRevision, type IssueDetail, type IssuePull } from "../src/connections/issue-tracker.mts";
 import { qualitySources } from "../src/execution/codex-quality-review.mts";
-import { checkoutReviewedIssueBase, type DeliveryFailure, isolatedCheckFailed, IssueDeliveryFailed, IssueDeliverySourcesChanged, parseDeliveryPlan,
+import { createDispatchMonitor } from "../src/execution/dispatch-monitor.mts";
+import { checkoutReviewedIssueBase, createIssueDeveloper, type DeliveryFailure, isolatedCheckFailed, IssueDeliveryFailed, IssueDeliverySourcesChanged, parseDeliveryPlan,
   passingAcceptanceTests } from "../src/execution/issue-delivery.mts";
 import { type Claim, createIssueDispatch } from "../src/workbench/issue-dispatch.mts";
 import { createPlannedIssuePublication, type IssuePublication } from "../src/workbench/planned-issue-publication.mts";
@@ -62,6 +63,85 @@ test("派发只使用已校验基线或声明的前置合并，拒绝其间变�
     [prerequisite]), IssueDeliverySourcesChanged);
   git(["switch", "--detach", pushedAfter]);
   await assert.rejects(checkoutReviewedIssueBase(runGit, delivery, [pushedAfter]), IssueDeliverySourcesChanged);
+});
+
+test("只接受直接上游合并改变的只读资料并固定实际 Git 对象", async t => {
+  const repo = await mkdtemp(join(tmpdir(), "souflow-handoff-"));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const git = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=Test",
+    "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", ...args],
+  { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  const runGit = async (args: string[]) => git(...args);
+  const source = "src/upstream.mts";
+  const main = "src/main.mts";
+  const change = async (path: string, value: string) => {
+    await writeFile(join(repo, path), value);
+    git("add", "--", path);
+    git("commit", "-qm", value);
+    return git("rev-parse", "HEAD");
+  };
+  git("init", "-q", "--initial-branch=main");
+  await mkdir(join(repo, "src"));
+  await change(main, "approved edit");
+  const original = await change(source, "original source");
+  const delivery = { ...spec, baseRevision: original, dependsOn: [1], sourcePaths: [source], sourceFrom: [{ path: source, issue: 1 }] };
+  for (const mode of ["--no-ff", "--squash"]) {
+    git("switch", "-C", "main", original);
+    git("switch", "-C", "feat/upstream", original);
+    const head = await change(source, "merged source");
+    git("switch", "main");
+    git("merge", mode, "--no-edit", "feat/upstream");
+    if (mode === "--squash") git("commit", "-qm", "squash");
+    const merge = git("rev-parse", "HEAD");
+    const latest = await change(main, "unrelated later change");
+    const producer = { issue: 1, pull: 10, head, merge, baseName: "main", files: [source], sources: [source] };
+    const result = await checkoutReviewedIssueBase(runGit, delivery, [merge], async () => [producer]);
+    assert.deepEqual(result?.producers, [producer]);
+    assert.equal(result?.execution, merge);
+    assert.equal(result?.blobs.find(blob => blob.path === source)?.sha, git("rev-parse", `${merge}:${source}`));
+    assert.equal(git("rev-parse", "HEAD"), merge);
+    git("switch", "--detach", latest);
+    await assert.rejects(checkoutReviewedIssueBase(runGit, delivery, [latest], async () => [producer]), IssueDeliverySourcesChanged);
+    if (mode === "--squash") {
+      let accountAcquired = false;
+      const prepare = createIssueDeveloper(createDispatchMonitor("fixture"), {
+        root: join(repo, "artifacts"), image: "unused", timeoutMs: 5000,
+        codexAccounts: { async run(_signal, _assigned, execute) {
+          accountAcquired = true;
+          return execute({});
+        } },
+        startTask: () => assert.fail("等待账号时上游变更，不能启动 Codex"),
+      });
+      await assert.rejects(prepare({
+        number: 2, branch: "feat/2-test", spec: delivery, upstream: [merge],
+        publisher: {
+          async checkout(target) {
+            git("clone", "-q", "--branch", "main", "--", repo, target);
+            return { base: "main", author: "Fixture", email: "fixture@example.invalid" };
+          },
+          find: async () => assert.fail("已有父工单凭据"),
+          publish: async () => assert.fail("失效交接不得发布"),
+        },
+        sourceHandoff: {
+          current: async () => [accountAcquired ? { ...producer, head: original } : producer],
+          review: async proof => assert.deepEqual(proof.changedPaths, [source]),
+          ready() { assert.equal(accountAcquired, false); },
+        },
+      }, () => assert.fail("不得启动会话"), new AbortController().signal), IssueDeliverySourcesChanged);
+      assert.equal(accountAcquired, true);
+    }
+    git("switch", "-C", "main", original);
+    await change(source, "unrelated earlier change");
+    const later = await change(source, "merged source");
+    await assert.rejects(checkoutReviewedIssueBase(runGit, delivery, [later],
+      async () => [{ ...producer, merge: later }]), IssueDeliverySourcesChanged);
+  }
+  git("switch", "-C", "main", original);
+  await writeFile(join(repo, main), "out of scope in the same merge");
+  git("add", "--", main);
+  const merge = await change(source, "merged and unapproved");
+  await assert.rejects(checkoutReviewedIssueBase(runGit, delivery, [merge],
+    async () => [{ issue: 1, pull: 10, head: original, merge, baseName: "main", files: [source], sources: [source] }]), IssueDeliverySourcesChanged);
 });
 
 test("拒绝任何越出已批准源码的路径以及缺失、循环或重复的依赖", () => {

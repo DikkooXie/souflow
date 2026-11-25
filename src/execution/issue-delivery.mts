@@ -8,6 +8,7 @@ import type { IssuePublisher } from "../connections/issue-tracker.mts";
 import { startCodexReadOnlyTask } from "./codex-command-attempt.mts";
 import { type AccountAssignment, type CodexAccountDispatch, withCodexAccount } from "./codex-account-dispatch.mts";
 import { qualitySources } from "./codex-quality-review.mts";
+import { IssueDeliverySourcesChanged, proveSourceHandoff, type SourceHandoff, type SourceProducer } from "./dependency-source-handoff.mts";
 import type { DispatchMonitor } from "./dispatch-monitor.mts";
 import { IssueVerificationUncertain } from "./issue-verification.mts";
 import type { CodeWorkerPool } from "./code-worker-pool.mts";
@@ -17,10 +18,11 @@ import { applyCheckedCodeChanges, codeResultSchema, deliveryPath, maxCodeProposa
 
 const exec = promisify(execFile);
 const acceptanceTestInstruction = "在获授权的测试文件里验证实际行为。测试名标注其真正验证的 AC 编号，沿用工单里的编号格式。不要给无关测试加编号。";
-export type DeliverySpec = { instructions: string; files: string[]; dependsOn: number[]; baseRevision?: string; basePlanPath?: string; sourcePaths?: string[] };
+export type DeliverySpec = { instructions: string; files: string[]; dependsOn: number[]; baseRevision?: string; basePlanPath?: string; sourcePaths?: string[];
+  sourceFrom?: { path: string; issue: number }[] };
 export type DeliveryTarget = { branch: string; head: string; base?: string };
 export type CheckedIssue = { head: string; passingTests: string[] };
-export type PreparedDelivery = DeliveryTarget & { workspace: string; base: string; checked?: CheckedIssue };
+export type PreparedDelivery = DeliveryTarget & { workspace: string; base: string; executionRevision?: string; checked?: CheckedIssue };
 export type DeliveryFailure = {
   stage: "preflight" | "checkout" | "codex" | "dependencies" | "patch" | "tests" | "commit" | "publish" | "legacy";
   reason: "unavailable" | "format" | "scope" | "redacted" | "match" | "size" | "empty" | "check-failed";
@@ -33,6 +35,11 @@ export type PrepareIssue = (input: {
   repairing?: (issue: PatchIssue) => void;
   workerProof?: Pick<CodeWork, "repo" | "issueRevision" | "plan">;
   revalidateWorker?: (signal: AbortSignal) => Promise<void>;
+  sourceHandoff?: {
+    current: (branch: string, signal: AbortSignal) => Promise<readonly SourceProducer[]>;
+    review: (handoff: SourceHandoff, sources: Record<string, string>, signal: AbortSignal) => Promise<void>;
+    ready: () => void;
+  };
 }, connected: (id: string) => void, signal: AbortSignal, assigned?: (account: AccountAssignment) => void) => Promise<PreparedDelivery>;
 
 export class IssueDeliveryFailed extends Error {
@@ -79,11 +86,10 @@ const retryInstruction = {
   redacted: "",
 } satisfies Record<DeliveryFailure["reason"], string>;
 
-export class IssueDeliverySourcesChanged extends Error {
-  constructor() { super("依赖合并改变了已校验的源码或项目计划，请重新规划。"); }
-}
+export { IssueDeliverySourcesChanged };
 
-export async function checkoutReviewedIssueBase(git: (args: string[]) => Promise<string>, spec: DeliverySpec, upstream: readonly string[]) {
+export async function checkoutReviewedIssueBase(git: (args: string[]) => Promise<string>, spec: DeliverySpec, upstream: readonly string[],
+  resolveProducers?: () => Promise<readonly SourceProducer[]>) {
   const commits = [...(spec.baseRevision ? [spec.baseRevision] : []), ...upstream];
   for (const sha of commits) {
     if (!/^[a-f0-9]{40}$/.test(sha)) throw Error("上游合并提交无效。");
@@ -94,11 +100,20 @@ export async function checkoutReviewedIssueBase(git: (args: string[]) => Promise
   const base = upstream.length ? await git(["rev-list", "--topo-order", "--max-count=1", ...upstream]) : spec.baseRevision;
   for (const sha of commits) await git(["merge-base", "--is-ancestor", sha, base]);
   const paths = [...spec.files, ...(spec.sourcePaths ?? []), ...(spec.basePlanPath ? [spec.basePlanPath] : [])];
+  let handoff: SourceHandoff | undefined;
   if (base !== spec.baseRevision) {
     try { await git(["--literal-pathspecs", "diff", "--quiet", "--no-ext-diff", "--no-textconv", spec.baseRevision, base, "--", ...paths]); }
-    catch { throw new IssueDeliverySourcesChanged(); }
+    catch {
+      if (!resolveProducers || !spec.sourceFrom?.length) throw new IssueDeliverySourcesChanged();
+      try {
+        handoff = await proveSourceHandoff(git, spec.baseRevision, base,
+          [...spec.files, ...(spec.basePlanPath ? [spec.basePlanPath] : [])], spec.sourcePaths ?? [], await resolveProducers());
+        if (!handoff) throw new IssueDeliverySourcesChanged();
+      } catch { throw new IssueDeliverySourcesChanged(); }
+    }
   }
   await git(["switch", "--detach", base]);
+  return handoff;
 }
 
 export function parseDeliveryPlan(raw: string): ReadonlyMap<number, DeliverySpec> {
@@ -152,10 +167,11 @@ export async function isolatedIssueCheck(workspace: string, image: string, timeo
 
 export function createIssueDeveloper(monitor: DispatchMonitor, options: {
   root: string; image: string; model?: string; timeoutMs: number; codexAccounts?: CodexAccountDispatch; workers?: CodeWorkerPool;
+  startTask?: typeof startCodexReadOnlyTask;
 }): PrepareIssue {
-  const { root, image, model, timeoutMs, codexAccounts, workers } = options;
+  const { root, image, model, timeoutMs, codexAccounts, workers, startTask = startCodexReadOnlyTask } = options;
   return async ({ number, flowId, planVersion, spec, branch, upstream, publisher, previousFailure,
-    reviewTarget, repairing, workerProof, revalidateWorker }, connected, signal, assigned) => {
+    reviewTarget, repairing, workerProof, revalidateWorker, sourceHandoff }, connected, signal, assigned) => {
     const runOnDevice = !!(workers && workerProof && !reviewTarget);
     const session = runOnDevice ? undefined : monitor.begin({
       title: `GitHub #${number}`, task: "开发与测试", ticketId: `#${number}`, flowId, ...(planVersion ? { planVersion } : {}),
@@ -167,13 +183,15 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
       const workspace = join(target, "source");
       const { base, author, email } = await publisher.checkout(workspace, signal);
       const git = async (args: string[]) => (await exec("git", ["-C", workspace, "-c", "core.hooksPath=/dev/null", ...args],
-        { timeout: timeoutMs, signal })).stdout.trim();
+        { timeout: timeoutMs, signal, env: { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" } })).stdout.trim();
+      let handoff: SourceHandoff | undefined;
       if (reviewTarget) {
         if (!publisher.checkoutPublished || !spec.baseRevision || !/^[a-f0-9]{40}$/.test(spec.baseRevision)) throw new IssueDeliverySourcesChanged();
         await publisher.checkoutPublished(workspace, reviewTarget, signal);
         await git(["merge-base", "--is-ancestor", spec.baseRevision, "HEAD"]);
       } else {
-        await checkoutReviewedIssueBase(git, spec, upstream);
+        handoff = await checkoutReviewedIssueBase(git, spec, upstream,
+          sourceHandoff && (() => sourceHandoff.current(base, signal)));
       }
       const editable = new Map(await Promise.all(spec.files.map(async file => [file, await readEditableFile(workspace, file)] as const)));
       const revision = await git(["rev-parse", "HEAD"]);
@@ -181,10 +199,27 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
         ? await qualitySources(workspace, revision, spec.sourcePaths, signal)
         : {};
       if (spec.sourcePaths?.some(path => !Object.hasOwn(readOnlySources, path))) throw new IssueDeliverySourcesChanged();
+      const ensureCurrent = async (currentSignal: AbortSignal) => {
+        if (handoff && sourceHandoff && JSON.stringify(await sourceHandoff.current(base, currentSignal)) !== JSON.stringify(handoff.producers)) {
+          throw new IssueDeliverySourcesChanged();
+        }
+        await revalidateWorker?.(currentSignal);
+      };
+      if (handoff && sourceHandoff) {
+        try {
+          const sources = await qualitySources(workspace, revision, [...spec.files, ...(spec.sourcePaths ?? [])], signal);
+          await sourceHandoff.review(handoff, sources, signal);
+          await ensureCurrent(signal);
+        } catch {
+          signal.throwIfAborted();
+          throw new IssueDeliverySourcesChanged();
+        }
+      }
       signal.throwIfAborted();
+      sourceHandoff?.ready();
       const untrustedContext = JSON.stringify({ editableFiles: [...editable].map(([path, file]) => ({
         path, text: scrubAuditText(file.content),
-      })), readOnlySources });
+      })), readOnlySources, ...(handoff ? { sourceHandoff: handoff } : {}) });
       let remotePatch: string | undefined;
       async function remoteProposal() {
         if (!workers || !workerProof || !revalidateWorker) throw Error("缺少代码设备或已核对的工单授权。");
@@ -194,7 +229,7 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
           files: [...editable].map(([path, file]) => ({ path, sha256: contentDigest(file.content), bytes: Buffer.byteLength(file.content) })),
           instructions: [spec.instructions, acceptanceTestInstruction, ...(previousFailure ? [retryInstruction[previousFailure.reason]] : [])].join("\n"),
           context: untrustedContext,
-        }, signal, timeoutMs, connected, revalidateWorker);
+        }, signal, timeoutMs, connected, ensureCurrent);
         if (result.phase !== "tested") throw new IssueVerificationUncertain("needs-reconciliation");
         remotePatch = result.patch;
         stage = "patch";
@@ -210,9 +245,10 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
         session?.assignAccount(account);
       }, accountOptions => prepareCodeProposal(target, editable, async diagnostic => {
         signal.throwIfAborted();
+        if (handoff) await ensureCurrent(signal);
         stage = "codex";
         let overflowBytes: number | undefined;
-        const attempt = startCodexReadOnlyTask({
+        const attempt = startTask({
           ...accountOptions,
           workspace, ...(model ? { model } : {}), localLoginOnly: true, outputSchema: codeResultSchema,
           outputMaxBytes: maxCodeProposalBytes,
@@ -261,7 +297,7 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
         "commit", "-m", reviewTarget ? `fix(issue): address review feedback for #${number}` : `feat(issue): deliver GitHub issue #${number}`]);
       const head = await git(["rev-parse", "HEAD"]);
       session?.finish("completed");
-      return { workspace, base: reviewTarget?.base ?? base, branch, head, checked: { head, passingTests } };
+      return { workspace, base: reviewTarget?.base ?? base, executionRevision: revision, branch, head, checked: { head, passingTests } };
     } catch (error) {
       session?.finish(signal.aborted || error instanceof IssueVerificationUncertain ? "interrupted" : "failed");
       if (signal.aborted || error instanceof IssueVerificationUncertain || error instanceof IssueDeliverySourcesChanged || error instanceof IssueDeliveryFailed) throw error;

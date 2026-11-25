@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Checkpoint } from "../audit/activity-store.mts";
 import { issueRevision } from "../connections/issue-tracker.mts";
+import { IssueDeliverySourcesChanged, type SourceHandoff } from "../execution/dependency-source-handoff.mts";
 import type { DeliverySpec } from "../execution/issue-delivery.mts";
 import { currentDevelopmentPlan, type Flow } from "../planning/conversation-flow.mts";
 import type { DeliveryReviewScope } from "../planning/delivery-review.mts";
@@ -20,6 +21,7 @@ export type IssueProposal = {
   drafts?: QualityTicket[];
   batchAcceptance?: BatchAcceptance[];
   sourceReviewRequired?: boolean;
+  sourceHandoff?: boolean;
   sourceFindings?: TicketSourceFinding[];
   sourceError?: string;
   corrected?: boolean;
@@ -35,8 +37,13 @@ const valid = (p: IssueProposal, flow: Flow | undefined) => {
   return plan?.id === p.planId && plan.version === p.version;
 };
 const reviewedSelection = (p: IssueProposal) => ({ id: p.id, base: p.base, items: p.drafts ?? p.items,
+  ...(p.sourceHandoff ? { sourceHandoff: true } : {}),
   ...(p.batchAcceptance?.length ? { batchAcceptance: p.batchAcceptance } : {}) });
 const ticketPaths = (ticket: QualityTicket) => [...new Set([...ticket.paths, ...(ticket.sources ?? [])])];
+const sourceProducers = (p: IssueProposal, ticket: QualityTicket) => p.sourceHandoff
+  ? (p.drafts ?? []).filter(parent => ticket.dependsOn.includes(parent.id)).flatMap(parent =>
+    (ticket.sources ?? []).filter(path => parent.paths.includes(path)).map(path => ({ path, parent: parent.id })))
+  : [];
 const validated = (p: IssueProposal, flow: Flow | undefined) => valid(p, flow)
   && qualityCurrent(p.quality, flow, reviewedSelection(p))
   && (!p.drafts?.some(ticket => ticket.delivery)
@@ -69,11 +76,22 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
       ...(p.drafts ? { drafts: p.drafts.map(({ id, dependsOn, paths, delivery }) => ({ id, dependsOn, paths, delivery })), published: p.published } : {}),
       ...(p.batchAcceptance?.length ? { batchAcceptance: p.batchAcceptance } : {}),
       ...(p.corrected ? { corrected: true } : {}),
+      ...(p.sourceHandoff ? { sourceHandoff: true } : {}),
       ...(p.sourceFindings?.length ? { sourceFindings: p.sourceFindings } : {}),
       ...(p.sourceError ? { sourceError: p.sourceError } : {}),
     } })) return false;
     proposals.set(p.id, p);
     return true;
+  }
+  function boundProposal(claim: Pick<Claim, "requestId" | "claimedBy" | "approval">, flow: Flow | undefined) {
+    const p = proposals.get(claim.requestId);
+    const bound = claim.approval;
+    const receipt = p?.quality;
+    if (!p || p.approvedAt === undefined || p.actor !== claim.claimedBy || !bound?.quality || !flow || !receipt
+      || p.flowId !== bound.flowId || p.flowId !== flow.id || p.planId !== bound.planId || p.version !== bound.version
+      || bound.quality.policy !== receipt.policy || bound.quality.flowDigest !== receipt.flowDigest
+      || bound.quality.batchDigest !== receipt.batchDigest || !validated(p, flow)) return;
+    return p;
   }
   for (const p of store.load()) {
     const gap = p.status === "uncertain" && p.approvedAt === undefined && IssueCoverageGap.fromLegacy(p.error);
@@ -173,7 +191,7 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
           return;
         }
         const sourceReview = drafts && planned?.sourceReview;
-        draft = { ...p, items, ...(drafts ? { drafts } : {}), ...(sourceReview ? { sourceReviewRequired: true } : {}),
+        draft = { ...p, items, ...(drafts ? { drafts } : {}), ...(sourceReview ? { sourceReviewRequired: true, sourceHandoff: true } : {}),
           ...(batchAcceptance?.length ? { batchAcceptance } : {}), status: "reviewing" };
         if (drafts) {
           const connection = planned?.connection(actor);
@@ -228,10 +246,11 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
   const draftInstructions = (draft: QualityTicket) => [
     ...(draft.delivery ? ticketDeliveryLines(draft.delivery) : []), draft.instructions,
   ].join("\n");
-  const draftText = (draft: QualityTicket) => [draftInstructions(draft), "", `允许修改：${draft.paths.join("、")}`,
+  const draftText = (p: IssueProposal, draft: QualityTicket) => [draftInstructions(draft), "", `允许修改：${draft.paths.join("、")}`,
+    ...sourceProducers(p, draft).map(({ path, parent }) => `只读交接：${parent} 合并后重新核对 ${path}`),
     ...verificationText(draft.validation)].join("\n");
   const publicationBatch = (proposal: IssueProposal, drafts: readonly QualityTicket[]): PlannedIssueBatch => ({
-    ...proposal, drafts: drafts.map(draft => ({ id: draft.id, title: draft.title, body: draftText(draft), dependsOn: draft.dependsOn })),
+    ...proposal, drafts: drafts.map(draft => ({ id: draft.id, title: draft.title, body: draftText(proposal, draft), dependsOn: draft.dependsOn })),
   });
 
   async function deliver(p: IssueProposal, flow: Flow | undefined, actor: string) {
@@ -241,6 +260,7 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
     let publication = p;
     try {
       let items = p.items;
+      const handoffs = new Map<number, NonNullable<DeliverySpec["sourceFrom"]>>();
       if (p.drafts) {
         const connection = planned?.connection(actor);
         if (!connection || !planned) throw Error("当前成员未连接可用于建单的 GitHub 账号。");
@@ -253,6 +273,8 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
         items = p.drafts.map(draft => {
           const issue = issued.get(draft.id);
           if (!issue) throw Error("已审核的工单缺少创建回执。");
+          const sourceFrom = sourceProducers(p, draft).map(({ path, parent }) => ({ path, issue: numberFor(parent) }));
+          if (sourceFrom.length) handoffs.set(issue.number, sourceFrom);
           return { number: issue.number, title: issue.title, reason: "", revision: issueRevision(issue),
             files: [...draft.paths], instructions: draftInstructions(draft), dependsOn: draft.dependsOn.map(numberFor),
             criteria: [...draft.criteria], validation: [...draft.validation], issueText: issue.body,
@@ -261,10 +283,13 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
         publication = { ...p, published: items.map(item => item.number) };
         if (!save(publication, actor)) throw Error("无法保存本轮创建的 Issue。");
       }
-      const specs = new Map(items.map(({ number, instructions, files, dependsOn, revision, validation, sourcePaths }): [number, DeliverySpec & { issueRevision: string }] =>
-        [number, { instructions: [instructions, ...verificationText(validation)].join("\n"),
+      const specs = new Map(items.map(({ number, instructions, files, dependsOn, revision, validation, sourcePaths }): [number, DeliverySpec & { issueRevision: string }] => {
+        const sourceFrom = handoffs.get(number);
+        return [number, { instructions: [instructions, ...verificationText(validation)].join("\n"),
           files, dependsOn, baseRevision: p.base, ...(basePlanPath ? { basePlanPath } : {}),
-          ...(sourcePaths?.length ? { sourcePaths } : {}), issueRevision: revision }]));
+          ...(sourceFrom ? { sourceFrom } : {}),
+          ...(sourcePaths?.length ? { sourcePaths } : {}), issueRevision: revision }];
+      }));
       abort.signal.throwIfAborted();
       await github.claimApproved(p.id, actor, specs, { flowId: p.flowId, planId: p.planId, version: p.version,
         quality: { policy: quality.policy, flowDigest: quality.flowDigest, batchDigest: quality.batchDigest } }, !!p.drafts);
@@ -291,7 +316,7 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
         id: p.id, kind: "github-authorization", flowId: p.flowId, title: "授权 GitHub 工单交付",
         session: `开发计划 v${p.version} · ${p.base.slice(0, 8)}`, status: "pending",
         prompt: p.drafts ? [...p.drafts.map(draft => [`${draft.id} · ${draft.title}`,
-          `依赖：${draft.dependsOn.join("、") || "无"}`, draftText(draft)].join("\n")),
+          `依赖：${draft.dependsOn.join("、") || "无"}`, draftText(p, draft)].join("\n")),
           ...(p.batchAcceptance?.length ? [["另行待验收（不建 Issue）", ...p.batchAcceptance.map(acceptanceText)].join("\n")] : [])].join("\n\n") : p.items.map(item => [
           `#${item.number} ${item.title}`, `依据：${item.reason}`,
           `范围：${item.files.join("、")}`, `依赖：${item.dependsOn.map(n => `#${n}`).join("、") || "无"}`,
@@ -321,14 +346,9 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
     },
     has(id: string) { return proposals.has(id); },
     reviewScope(claim: Pick<Claim, "number" | "requestId" | "claimedBy" | "approval">, flow: Flow | undefined): DeliveryReviewScope | undefined {
-      const p = proposals.get(claim.requestId);
-      const bound = claim.approval;
-      const receipt = p?.quality;
-      if (!p || p.approvedAt === undefined || p.actor !== claim.claimedBy || !bound?.quality || !flow || !receipt
-        || p.flowId !== bound.flowId || p.flowId !== flow.id || p.planId !== bound.planId || p.version !== bound.version
-        || bound.quality.policy !== receipt.policy || bound.quality.flowDigest !== receipt.flowDigest
-        || bound.quality.batchDigest !== receipt.batchDigest || !validated(p, flow)) return;
-      const selected = p.items.find(issue => issue.number === claim.number && issue.revision === bound.issueRevision);
+      const p = boundProposal(claim, flow);
+      if (!p || !flow) return;
+      const selected = p.items.find(issue => issue.number === claim.number && issue.revision === claim.approval?.issueRevision);
       const draft = p.drafts && p.published ? p.drafts[p.published.indexOf(claim.number)] : undefined;
       const issue = draft ?? selected;
       if (!issue) return;
@@ -339,6 +359,21 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
       });
       if (!mapped.length || mapped.length !== issue.validation.length) return;
       return { request: flow.prompt, criteria: mapped, files: draft?.paths ?? selected?.files ?? [] };
+    },
+    async reviewHandoff(claim: Claim, flow: Flow | undefined, proof: SourceHandoff, sources: Record<string, string>, signal: AbortSignal) {
+      const p = boundProposal(claim, flow);
+      const reviewer = planned?.sourceReview?.reviewer;
+      const draft = p?.published ? p.drafts?.[p.published.indexOf(claim.number)] : undefined;
+      if (!p?.sourceHandoff || !p.drafts || !p.published || p.status !== "submitted" || !flow || !reviewer || !draft
+        || proof.original !== p.base) throw new IssueDeliverySourcesChanged();
+      const expected = sourceProducers(p, draft).map(({ path, parent }) =>
+        `${p.published?.[p.drafts?.findIndex(ticket => ticket.id === parent) ?? -1]}:${path}`).sort();
+      const actual = proof.producers.flatMap(producer => producer.sources.map(path => `${producer.issue}:${path}`)).sort();
+      if (!proof.changedPaths.length || !expected.length || JSON.stringify(expected) !== JSON.stringify(actual)
+        || proof.changedPaths.some(path => !proof.producers.some(producer => producer.sources.includes(path)))) throw new IssueDeliverySourcesChanged();
+      const packet = qualityPacket(flow, p.base, p.id, p.drafts, {}, p.batchAcceptance);
+      return reviewTicketSources({ ...packet, revision: proof.execution }, draft, sources, reviewer, signal,
+        { original: p.base, changedPaths: proof.changedPaths });
     },
     publicationNeedsCheck(id: string, actor: string) {
       const p = proposals.get(id);
