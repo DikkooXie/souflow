@@ -406,6 +406,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
           : "前置报告为必须输入时才填写 dependsOn。若需求明确说两张独立核验之后汇总，拆出两个无依赖节点和一个同时依赖它们的汇总节点。从 availableSources 指定一到四份资料，汇总单可只依赖报告。",
         "复用计划范围，必须覆盖每个固定验收 ID。每项 instructions 写明交付目标、参考资料及验收方法。工单 ID 用大写字母开头，仅含大写字母、数字和连字符。",
         "工单数量由批准计划和独立验收边界决定。一次返回完整工单和依赖，不因可同时执行的槽位数合并工单。",
+        "每单列出安全开工确实需要的权限、接口或上游产物。由本工单实现的测试环境、日志及交付回执应进入验证步骤和预期；真实联调条件尚缺时记录缺口和取得步骤，不能推断它已经满足。",
         ...(github ? [
           "结合冻结的候选 Issue 和只读关联 Issue 正文，区分已安排交付与尚缺的用户结果。新工单不能重复实现已有 Issue 的交付；如需核对已安排的能力，在验证步骤写明如何沿用并取得实际回执。",
           "每个固定验收 ID 必须归到能兑现它的新工单或 batchAcceptance。每张新工单至少引用一个 ID，多个工单可各验证同一验收的不同部分。新工单只写能在本单范围独立开发和验证的验收。依赖多个交付或调度动作才能验证的验收写入 batchAcceptance，owner 填 batch、issue 填 null。已有 Issue 正文承接的验收写入 batchAcceptance，owner 填 related-issue，issue 填 relatedIssues 中已读的原编号。",

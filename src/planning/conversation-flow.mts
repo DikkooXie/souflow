@@ -15,7 +15,10 @@ const steps = [
   { title: "调研", artifacts: ["research"], instruction: "归纳可核实的现状、用户场景和相关方案。说明证据来源，缺少依据的事项明确列为待核实。" },
   { title: "需求澄清", artifacts: ["requirements"], instruction: "判断还有哪些产品决定会实质影响范围或验收；有必要时使用 request_user_input 收集答案。形成包含使用者、场景、范围和编号验收条件的结构化需求。" },
   { title: "技术选型", artifacts: ["technology"], instruction: "比较满足需求的技术方案与约束。影响交付的重大选择使用 request_user_input 确认；保留必要的假设。" },
-  { title: "开发文档", artifacts: ["prd", "development-plan"], instruction: "分别生成可审阅的 PRD 和开发计划。开发计划基于本阶段生成的 PRD 和已记录的技术选型，引用需求验收条件并说明实现顺序和验证方法。" },
+  { title: "开发文档", artifacts: ["prd", "development-plan"], instruction: [
+    "分别生成可审阅的 PRD 和开发计划。开发计划基于本阶段生成的 PRD 和已记录的技术选型，引用需求验收条件并说明实现顺序和验证方法。",
+    "区分开工条件和交付证据。开工条件要说明缺了什么就无法在授权范围内安全实现，例如未定的权限边界、必须用的外部接口或缺失的上游契约。由本工单建立的测试环境和实现后才有的请求、审计或交付回执，写成验收步骤和预期结果。需要其他人提供的真实联调资源，应写清何时需要及由谁准备，不能记作已验证。",
+  ].join(" ") },
   { title: "拆单", artifacts: ["ticket-drafts"], instruction: "根据开发计划起草独立可验证的工单，列出对应验收条件、依赖和验证方式。保持为待审阅的草稿。" },
 ] as const;
 
@@ -310,6 +313,7 @@ export function makePhasePrompt(flow: Flow, phase: Phase, targets: readonly Phas
     ] : []),
     ...(flow.replan ? [
       "这是对被拦截批次的重新规划。复核意见是待核对的依据。按新版本项目资料重新核对，不重复安排已完成的改动。保留原需求的验收条件，补齐遗漏的前置、编辑范围与验证。缺少待开发能力时写清实施路径，不能把它当成已实现。",
+      "若上一版把本单实现后才会产生的验收证据列为开工条件，按原有验收要求修订取得证据的顺序。真实权限、外部访问限制和必须先合入的依赖继续核查。",
       "若现有 Issue 只覆盖部分验收项，逐项标出已有可核实的结果、已有工单的范围，以及仍需拆单的缺口。已有实现保留回读或回归验证。不能为了匹配候选 Issue 删除验收项，也不能把同范围已有工单再次作为新 Issue 提交。",
       `前次复核：${JSON.stringify(flow.replan)}`,
       ...(previousRequirements ? [`上一版需求说明与验收：${JSON.stringify(previousRequirements)}`] : []),

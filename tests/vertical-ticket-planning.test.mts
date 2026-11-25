@@ -110,3 +110,28 @@ test("逐单复核通过真实适配器协议完整接收超过旧上限的有�
   assert.equal(receipt.breakdown?.length, tickets.length);
   assert.equal(qualityBlock(receipt), "");
 });
+
+test("本地和 GitHub 工单复核都核对开工条件与未执行的验收", async () => {
+  const fixture = await deviceTicketPlan();
+  const variants = [fixture.tickets.map(({ delivery: _delivery, ...ticket }) => ticket), fixture.tickets];
+  for (const [index, tickets] of variants.entries()) {
+    const packet = fixture.packet(tickets);
+    const reviewer = createCodexQualityReviewer(process.cwd(), undefined, 5000, ({ prompt, outputSchema }) => {
+      assert.match(prompt, /验收回执待实际运行后取得/);
+      assert.match(prompt, /确实必需的权限、外部资源或上游契约缺失时，应引用阻塞依据/);
+      assert.equal(JSON.stringify(outputSchema).includes('"breakdown"'), index === 1);
+      return { finished: Promise.resolve("completed"), close() {}, output: () => JSON.stringify(qualityReviewOutput(packet)) };
+    });
+    const receipt = await reviewQuality(packet, tickets, reviewer, new AbortController().signal);
+    assert.equal(qualityBlock(receipt), "");
+    const denied = createCodexQualityReviewer(process.cwd(), undefined, 5000, () => {
+      const review = qualityReviewOutput(packet);
+      return { finished: Promise.resolve("completed"), close() {}, output: () => JSON.stringify({
+        ...review, evidence: { ...review.evidence, status: "block", summary: "缺少可信成员身份和读取授权" },
+      }) };
+    });
+    const blocked = await reviewQuality(packet, tickets, denied, new AbortController().signal);
+    assert.match(qualityBlock(blocked), /缺少可信成员身份和读取授权/);
+    assert.equal(qualityCurrent(blocked, fixture.flow, tickets), false);
+  }
+});

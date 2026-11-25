@@ -88,6 +88,7 @@ test("GitHub 拆单按固定提交校验来源与编辑范围，草稿错误只�
     new Set([guide, editable, secondEditable, large, ...additional]));
   assert.equal(new Map(snapshot.availableSources).get(large), largeBytes);
   assert.equal(snapshot.sourceBudgetBytes, sourceInputMaxBytes);
+  assert.match(prompts[0] ?? "", /由本工单实现的测试环境、日志及交付回执应进入验证步骤和预期/);
   assert.deepEqual(snapshot.availableEditPaths, [editable, secondEditable]);
   assert.ok(prompts[1]?.startsWith(prompts[0] ?? ""));
   assert.match(prompts[1] ?? "", /T1 的 sources/);

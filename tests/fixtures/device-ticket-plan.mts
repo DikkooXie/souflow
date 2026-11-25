@@ -1,5 +1,5 @@
 import { createConversationFlows } from "../../src/planning/conversation-flow.mts";
-import { type PlannedTicket, qualityPacket } from "../../src/planning/dispatch-quality.mts";
+import { type PlannedTicket, type QualityTicket, qualityPacket } from "../../src/planning/dispatch-quality.mts";
 
 export async function deviceTicketPlan() {
   const prompt = "让新成员从个人主页查看自己的设备，并能撤销自己的设备连接。先交付设备列表，再交付撤销操作。两项都可以从已有登录入口独立验证。";
@@ -37,5 +37,5 @@ export async function deviceTicketPlan() {
     "tests/device-list.test.mts": "现有测试夹具支持分别登录两个成员，为每个成员登记设备并读取个人主页。",
     "tests/device-revoke.test.mts": "现有测试夹具可使用成员身份打开设备详情，提交撤销并验证设备重连。",
   };
-  return { flow, tickets, packet: (items: readonly PlannedTicket[]) => qualityPacket(flow, "a".repeat(40), "fixture", items, sources) };
+  return { flow, tickets, packet: (items: readonly QualityTicket[]) => qualityPacket(flow, "a".repeat(40), "fixture", items, sources) };
 }
