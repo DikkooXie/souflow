@@ -369,9 +369,11 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
       const expected = sourceProducers(p, draft).map(({ path, parent }) =>
         `${p.published?.[p.drafts?.findIndex(ticket => ticket.id === parent) ?? -1]}:${path}`).sort();
       const actual = proof.producers.flatMap(producer => producer.sources.map(path => `${producer.issue}:${path}`)).sort();
-      if (!expected.length || JSON.stringify(expected) !== JSON.stringify(actual)) throw new IssueDeliverySourcesChanged();
+      if (!proof.changedPaths.length || !expected.length || JSON.stringify(expected) !== JSON.stringify(actual)
+        || proof.changedPaths.some(path => !proof.producers.some(producer => producer.sources.includes(path)))) throw new IssueDeliverySourcesChanged();
       const packet = qualityPacket(flow, p.base, p.id, p.drafts, {}, p.batchAcceptance);
-      return reviewTicketSources({ ...packet, revision: proof.execution }, draft, sources, reviewer, signal, { original: p.base });
+      return reviewTicketSources({ ...packet, revision: proof.execution }, draft, sources, reviewer, signal,
+        { original: p.base, changedPaths: proof.changedPaths });
     },
     publicationNeedsCheck(id: string, actor: string) {
       const p = proposals.get(id);

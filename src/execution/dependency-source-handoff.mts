@@ -6,6 +6,7 @@ export type SourceProducer = {
 };
 export type SourceHandoff = {
   original: string; execution: string; producers: readonly SourceProducer[];
+  changedPaths: string[];
   blobs: { path: string; mode: string; sha: string }[];
 };
 
@@ -63,5 +64,5 @@ export async function proveSourceHandoff(git: Git, original: string, execution: 
     return { path: match[3], mode: match[1], sha: match[2] };
   });
   if (new Set(blobs.map(blob => blob.path)).size !== new Set(relevant).size) throw changed();
-  return { original, execution, producers, blobs };
+  return { original, execution, producers, changedPaths: [...touched], blobs };
 }

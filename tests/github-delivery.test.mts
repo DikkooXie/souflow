@@ -10,7 +10,8 @@ import { openActivityStore } from "../src/audit/activity-store.mts";
 import { createGitHubDelivery, githubPull } from "../src/connections/github-delivery.mts";
 import { type DeliveryTracker, issueRevision, type IssueDetail, type IssuePull } from "../src/connections/issue-tracker.mts";
 import { qualitySources } from "../src/execution/codex-quality-review.mts";
-import { checkoutReviewedIssueBase, type DeliveryFailure, isolatedCheckFailed, IssueDeliveryFailed, IssueDeliverySourcesChanged, parseDeliveryPlan,
+import { createDispatchMonitor } from "../src/execution/dispatch-monitor.mts";
+import { checkoutReviewedIssueBase, createIssueDeveloper, type DeliveryFailure, isolatedCheckFailed, IssueDeliveryFailed, IssueDeliverySourcesChanged, parseDeliveryPlan,
   passingAcceptanceTests } from "../src/execution/issue-delivery.mts";
 import { type Claim, createIssueDispatch } from "../src/workbench/issue-dispatch.mts";
 import { createPlannedIssuePublication, type IssuePublication } from "../src/workbench/planned-issue-publication.mts";
@@ -101,6 +102,34 @@ test("只接受直接上游合并改变的只读资料并固定实际 Git 对象
     assert.equal(git("rev-parse", "HEAD"), merge);
     git("switch", "--detach", latest);
     await assert.rejects(checkoutReviewedIssueBase(runGit, delivery, [latest], async () => [producer]), IssueDeliverySourcesChanged);
+    if (mode === "--squash") {
+      let accountAcquired = false;
+      const prepare = createIssueDeveloper(createDispatchMonitor("fixture"), {
+        root: join(repo, "artifacts"), image: "unused", timeoutMs: 5000,
+        codexAccounts: { async run(_signal, _assigned, execute) {
+          accountAcquired = true;
+          return execute({});
+        } },
+        startTask: () => assert.fail("等待账号时上游变更，不能启动 Codex"),
+      });
+      await assert.rejects(prepare({
+        number: 2, branch: "feat/2-test", spec: delivery, upstream: [merge],
+        publisher: {
+          async checkout(target) {
+            git("clone", "-q", "--branch", "main", "--", repo, target);
+            return { base: "main", author: "Fixture", email: "fixture@example.invalid" };
+          },
+          find: async () => assert.fail("已有父工单凭据"),
+          publish: async () => assert.fail("失效交接不得发布"),
+        },
+        sourceHandoff: {
+          current: async () => [accountAcquired ? { ...producer, head: original } : producer],
+          review: async proof => assert.deepEqual(proof.changedPaths, [source]),
+          ready() { assert.equal(accountAcquired, false); },
+        },
+      }, () => assert.fail("不得启动会话"), new AbortController().signal), IssueDeliverySourcesChanged);
+      assert.equal(accountAcquired, true);
+    }
     git("switch", "-C", "main", original);
     await change(source, "unrelated earlier change");
     const later = await change(source, "merged source");

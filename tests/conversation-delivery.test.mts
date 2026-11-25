@@ -677,7 +677,7 @@ test("从新需求复核和授权，创建 Issue 后认领派发，重启后能�
           const producers = await sourceHandoff.current("main", signal).catch(error => { sourceFailure = error; throw error; });
           assert.deepEqual(producers.map(item => [item.issue, item.pull, item.merge]), [[10, 110, merge]]);
           const paths = [...down.files, ...up.files];
-          await sourceHandoff.review({ original: "a".repeat(40), execution: merge, producers,
+          await sourceHandoff.review({ original: "a".repeat(40), execution: merge, producers, changedPaths: up.files,
             blobs: paths.map(path => ({ path, mode: "100644", sha: "d".repeat(40) })) },
           Object.fromEntries(paths.map(path => [path, "合并后的真实接口夹具"])), signal).catch(error => { sourceFailure = error; throw error; });
           assert.equal(claims.get("11")?.sourceHandoff?.finding.status, "pass");
@@ -690,13 +690,18 @@ test("从新需求复核和授权，创建 Issue 后认领派发，重启后能�
     });
   const makeService = () => createConversationDelivery(github, store(proposals), async () => "new", passingQualityReview,
     async (_revision, paths) => Object.fromEntries(paths.map(path => [path, "冻结的源码"])), {
-      sourceReview: { concurrency: 2, async reviewer(packet) {
+      sourceReview: { concurrency: 2, async reviewer(packet, _signal, correction) {
         const [ref, quote] = Object.entries(packet.references)[0] ?? [];
         assert.ok(ref && quote);
         if (packet.handoff) {
           assert.equal(packet.handoff.original, "a".repeat(40));
           assert.equal(quote, "合并后的真实接口夹具");
           reviewedRevisions.push(packet.revision);
+          assert.deepEqual(packet.handoff.changedPaths, up.files);
+          if (!correction) return JSON.stringify({ status: "pass", summary: "漏引了实际改变的路径", evidence: [{ ref, quote }] });
+          assert.match(correction, /缺少已变更交接路径的逐字依据/);
+          return JSON.stringify({ status: "pass", summary: "按固定资料核对实际接口",
+            evidence: up.files.map(path => ({ ref: `repo:${path}`, quote })) });
         }
         return JSON.stringify({ status: "pass", summary: "按固定资料核对接口", evidence: [{ ref, quote }] });
       } },
@@ -760,7 +765,7 @@ test("从新需求复核和授权，创建 Issue 后认领派发，重启后能�
     assert.ifError(sourceFailure);
     assert.deepEqual(writes.slice(-2), ["开发 10", "开发 11"]);
     assert.equal(claims.get("11")?.pull?.number, 111);
-    assert.deepEqual(reviewedRevisions, [merge]);
+    assert.deepEqual(reviewedRevisions, [merge, merge]);
     await github.refresh();
     assert.equal(writes.filter(write => write === "开发 11").length, 1);
   } finally {

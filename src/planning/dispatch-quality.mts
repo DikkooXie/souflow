@@ -193,7 +193,7 @@ export type TicketSourcePacket = {
   plan: QualityPacket["planning"]["documents"][number] | undefined;
   upstream: readonly QualityTicket[];
   references: Record<string, string>;
-  handoff?: { original: string };
+  handoff?: { original: string; changedPaths: readonly string[] };
 };
 export type TicketSourceFinding = Finding & { ticket: string; revision: string; paths: string[]; sourceDigest: string };
 export type TicketSourceReviewer = (packet: TicketSourcePacket, signal: AbortSignal, correction?: string) => Promise<string | undefined>;
@@ -278,7 +278,12 @@ export async function reviewTicketSources(batch: QualityPacket, ticket: QualityT
     let value: unknown;
     try { value = JSON.parse(raw ?? "null"); }
     catch { throw new ReviewFindingFormatError("质量复核未返回可解析的 JSON 结论，可以重试。"); }
-    return readFinding(value, packet, qualityReviewLimits.breakdownReferences);
+    const changed = handoff?.changedPaths ?? [];
+    const finding = readFinding(value, packet, Math.max(qualityReviewLimits.breakdownReferences, changed.length));
+    if (finding.status === "pass" && changed.some(path => !finding.evidence.some(({ ref }) => ref === `repo:${path}`))) {
+      throw new ReviewFindingFormatError("质量复核缺少已变更交接路径的逐字依据。每条变更路径至少引用一次，可以重试。");
+    }
+    return finding;
   }, error => error instanceof ReviewFindingFormatError ? error.message : undefined);
   return { ...finding, ticket: ticket.id, revision: batch.revision, paths, sourceDigest: hash(references) };
 }

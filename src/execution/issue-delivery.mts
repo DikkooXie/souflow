@@ -167,8 +167,9 @@ export async function isolatedIssueCheck(workspace: string, image: string, timeo
 
 export function createIssueDeveloper(monitor: DispatchMonitor, options: {
   root: string; image: string; model?: string; timeoutMs: number; codexAccounts?: CodexAccountDispatch; workers?: CodeWorkerPool;
+  startTask?: typeof startCodexReadOnlyTask;
 }): PrepareIssue {
-  const { root, image, model, timeoutMs, codexAccounts, workers } = options;
+  const { root, image, model, timeoutMs, codexAccounts, workers, startTask = startCodexReadOnlyTask } = options;
   return async ({ number, flowId, planVersion, spec, branch, upstream, publisher, previousFailure,
     reviewTarget, repairing, workerProof, revalidateWorker, sourceHandoff }, connected, signal, assigned) => {
     const runOnDevice = !!(workers && workerProof && !reviewTarget);
@@ -244,9 +245,10 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
         session?.assignAccount(account);
       }, accountOptions => prepareCodeProposal(target, editable, async diagnostic => {
         signal.throwIfAborted();
+        if (handoff) await ensureCurrent(signal);
         stage = "codex";
         let overflowBytes: number | undefined;
-        const attempt = startCodexReadOnlyTask({
+        const attempt = startTask({
           ...accountOptions,
           workspace, ...(model ? { model } : {}), localLoginOnly: true, outputSchema: codeResultSchema,
           outputMaxBytes: maxCodeProposalBytes,
