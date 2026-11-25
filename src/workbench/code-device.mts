@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { openActivityStore } from "../audit/activity-store.mts";
-import { type CodeWorkerConfig, loadLocalEnv, readCodeWorkerConfig, runtimeInteger, runtimeSetting } from "../config/runtime.mts";
+import { codeEditFileBytes, type CodeWorkerConfig, loadLocalEnv, readCodeWorkerConfig, runtimeInteger, runtimeSetting } from "../config/runtime.mts";
 import { startCodexReadOnlyTask } from "../execution/codex-command-attempt.mts";
 import { contentDigest, readCodeOffer, readWorkerCapacity, workerDigest, workerId,
   workerProtocolVersion, type CodeOffer, type CodeReceipt } from "../execution/code-worker-protocol.mts";
@@ -69,9 +69,11 @@ async function doWork(offer: CodeOffer, root: string, image: string, timeoutMs: 
     await git("fetch", "--no-tags", "--no-recurse-submodules", "--depth=1", `https://github.com/${work.repo}.git`, work.revision);
     await git("switch", "--detach", "FETCH_HEAD");
     if (await git("rev-parse", "HEAD") !== work.revision) throw Error("设备签出的提交与工单不同。");
-    const sources = new Map(await Promise.all(work.files.map(async ({ path, sha256 }) => {
+    const sources = new Map(await Promise.all(work.files.map(async ({ path, sha256, bytes }) => {
       const source = await readEditableFile(workspace, path);
-      if (contentDigest(source.content) !== sha256) throw Error("设备签出的文件与工单不同。");
+      if (contentDigest(source.content) !== sha256 || (bytes !== undefined && Buffer.byteLength(source.content) !== bytes)) {
+        throw Error("设备签出的文件与工单不同。");
+      }
       return [path, source] as const;
     })));
     let output: string | undefined;
@@ -132,7 +134,8 @@ async function main() {
   const image = process.env.SOULFLOW_GITHUB_CHECK_IMAGE?.trim();
   const slots = runtimeInteger("SOULFLOW_CODE_WORKER_SLOTS", 1, limits.maxSlots);
   const timeoutMs = runtimeInteger("SOULFLOW_GITHUB_DELIVERY_TIMEOUT_MS", 1000, 3_600_000);
-  const capacity = readWorkerCapacity({ version: workerProtocolVersion, instance: randomUUID(), repo, slots, ready: true }, limits.maxSlots);
+  const capacity = readWorkerCapacity({ version: workerProtocolVersion, instance: randomUUID(), repo, slots, ready: true,
+    editFileBytes: codeEditFileBytes() }, limits.maxSlots);
   const workspaceRoot = runtimeSetting("SOULFLOW_CODE_WORKER_ROOT");
   if (!capacity || !image || !workspaceRoot) {
     throw Error("设备需配置仓库、隔离检查镜像及有效并发设置。");

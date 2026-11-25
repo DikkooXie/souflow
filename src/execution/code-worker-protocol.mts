@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { type CodeWorkerConfig, readCodeWorkerConfig } from "../config/runtime.mts";
+import { codeEditFileHardLimit, type CodeWorkerConfig, readCodeWorkerConfig } from "../config/runtime.mts";
 import { deliveryPath, maxCodeProposalBytes } from "./local-code-changes.mts";
 
 export const workerProtocolVersion = 1;
@@ -15,7 +15,7 @@ export type CodeWork = {
   revision: string;
   upstream: string[];
   plan: { flowId: string; version: number; flowDigest: string; batchDigest: string };
-  files: { path: string; sha256: string }[];
+  files: { path: string; sha256: string; bytes?: number }[];
   instructions: string;
   context: string;
 };
@@ -40,7 +40,10 @@ export function readWorkerCapacity(input: unknown, maxSlots: number) {
   const value = object(input);
   if (!value || value.version !== workerProtocolVersion || !matches(value.instance, workerId)
       || !matches(value.repo, repoPattern) || !positive(value.slots) || value.slots > maxSlots || typeof value.ready !== "boolean") return;
-  return { instance: value.instance, repo: value.repo.toLowerCase(), slots: value.slots, ready: value.ready };
+  const bytes = value.editFileBytes;
+  if (bytes !== undefined && (!positive(bytes) || bytes > codeEditFileHardLimit)) return;
+  return { instance: value.instance, repo: value.repo.toLowerCase(), slots: value.slots, ready: value.ready,
+    ...(bytes === undefined ? {} : { editFileBytes: bytes }) };
 }
 
 export function validCodeWork(input: unknown, config: CodeWorkerConfig): input is CodeWork {
@@ -57,6 +60,8 @@ export function validCodeWork(input: unknown, config: CodeWorkerConfig): input i
   for (const inputFile of work.files) {
     const file = object(inputFile);
     if (!file || !matches(file.path, deliveryPath) || !matches(file.sha256, workerDigest) || paths.has(file.path.toLowerCase())) return false;
+    const bytes = file.bytes;
+    if (bytes !== undefined && (typeof bytes !== "number" || !Number.isSafeInteger(bytes) || bytes < 0 || bytes > codeEditFileHardLimit)) return false;
     paths.add(file.path.toLowerCase());
   }
   return true;

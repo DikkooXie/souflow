@@ -30,6 +30,12 @@ export const dispatchTicketOutputBytes = (env?: NodeJS.ProcessEnv) =>
 export const qualitySourceInputBytes = (env?: NodeJS.ProcessEnv) =>
   runtimeInteger("SOULFLOW_QUALITY_SOURCE_INPUT_MAX_BYTES", 1, 512 * 1024, env);
 
+// 编辑范围的单文件上限与复核可读取的最大普通文件保持一致。
+export const codeEditFileHardLimit = 65_536;
+export const legacyCodeEditFileBytes = 36_000;
+export const codeEditFileBytes = (env?: NodeJS.ProcessEnv) =>
+  runtimeInteger("SOULFLOW_CODE_EDIT_FILE_MAX_BYTES", 1, codeEditFileHardLimit, env);
+
 export function readCodeWorkerConfig(env?: NodeJS.ProcessEnv) {
   const waitMs = runtimeInteger("SOULFLOW_CODE_WORKER_WAIT_MS", 100, 300_000, env);
   const httpTimeoutMs = runtimeInteger("SOULFLOW_CODE_WORKER_HTTP_TIMEOUT_MS", waitMs + 1, 600_000, env);

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Checkpoint, RecordBusiness } from "../audit/activity-store.mts";
-import { readCodeWorkerConfig } from "../config/runtime.mts";
+import { legacyCodeEditFileBytes, readCodeWorkerConfig } from "../config/runtime.mts";
 import { contentDigest, type CodeOffer, type CodeReceipt, type CodeWork, validCodeWork,
   workerProtocolVersion } from "./code-worker-protocol.mts";
 import { IssueVerificationUncertain } from "./issue-verification.mts";
@@ -12,10 +12,12 @@ export type WorkerAttempt = {
   plan: CodeWork["plan"]; weight: number; slots: number; assignedLoad: number;
   receipt?: { digest: string; at: number; thread?: string; patch?: string };
 };
-type Device = { id: string; name: string; instance: string; repo: string; slots: number; ready: boolean; local?: boolean };
+type Device = { id: string; name: string; instance: string; repo: string; slots: number; ready: boolean; local?: boolean; editFileBytes?: number };
 type Ready = { device: Device; send: (offer?: CodeOffer) => void };
 type Running = { offer: CodeOffer; settled: (receipt: CodeReceipt) => void; started: (thread: string) => void; interrupt: () => void };
 const unfinished = (state: State) => state === "offered" || state === "accepted" || state === "started";
+const supportsFiles = (device: Device, work: CodeWork) =>
+  work.files.every(file => (file.bytes ?? 0) <= (device.editFileBytes ?? legacyCodeEditFileBytes));
 
 export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: ReadonlySet<string>,
   config = readCodeWorkerConfig(), now = Date.now, record?: RecordBusiness) {
@@ -79,7 +81,7 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
       const offered = [...attempts.values()].find(row => row.device === device.id && row.instance === device.instance
         && row.repo === device.repo && row.state === "offered");
       const replay = offered && running.get(offered.id);
-      if (replay && device.ready) return { status: 200, offer: replay.offer } as const;
+      if (replay && device.ready && supportsFiles(device, replay.offer.work)) return { status: 200, offer: replay.offer } as const;
       const offer = await new Promise<CodeOffer | undefined>(resolve => {
         const settle = (offer?: CodeOffer) => {
           clearTimeout(timer);
@@ -128,7 +130,8 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
       const deadline = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
       const weight = work.files.length;
       const pickTarget = () => [...waiters.values()]
-          .filter(entry => entry.device.ready && entry.device.repo === work.repo.toLowerCase())
+          .filter(entry => entry.device.ready && entry.device.repo === work.repo.toLowerCase()
+            && supportsFiles(entry.device, work))
           .map(entry => ({ ...entry, ...capacity(entry.device) }))
           .filter(entry => entry.count < entry.device.slots)
           .sort((a, b) => (a.load + weight) / a.device.slots - (b.load + weight) / b.device.slots

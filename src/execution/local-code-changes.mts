@@ -4,10 +4,10 @@ import { constants } from "node:fs";
 import { lstat, mkdir, mkdtemp, open, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { promisify } from "node:util";
+import { codeEditFileBytes } from "../config/runtime.mts";
 
 const exec = promisify(execFile);
 export const maxEdits = 16;
-export const maxSourceBytes = 36_000;
 export const deliveryPath = /^(src|tests)\/(?:[a-z\d_-]+\/)*[a-z\d_.-]+\.(?:mjs|mts|ts|js|css|html)$/i;
 const maxPatchBytes = 160_000;
 // JSON 同时携带替换前后文本和转义，按独立的传输体积限制接收。
@@ -67,7 +67,7 @@ export async function readEditableFile(workspace: string, path: string) {
   const file = join(root, path);
   const info = await lstat(file);
   // 只允许批准的快照普通文件。路径内的链接也可能把写入导向其他工作区。
-  if (!info.isFile() || info.size > maxSourceBytes || relative(root, await realpath(file)) !== path) {
+  if (!info.isFile() || info.size > codeEditFileBytes() || relative(root, await realpath(file)) !== path) {
     throw Error("编辑目标必须是工作目录内的普通文本文件。");
   }
   const bytes = await readFile(file);
@@ -117,7 +117,7 @@ function checkEdits(sources: EditableSources, edits: unknown, strict = false) {
     // 无效果的替换须先经过相同范围和锚点检查，丢弃后不会改变源码。
     if (before === after) continue;
     const next = previous.slice(0, start) + after + previous.slice(start + before.length);
-    if (!next.trim() || Buffer.byteLength(next) > maxSourceBytes) {
+    if (!next.trim() || Buffer.byteLength(next) > codeEditFileBytes()) {
       throw new PatchRejection("size", { code: "file-size", edit: ordinal }, "改动后的文件为空或过长。");
     }
     proposed.set(path, next);

@@ -6,13 +6,12 @@ import { join } from "node:path";
 import { setImmediate, setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { promisify } from "node:util";
-import { dispatchTicketOutputBytes, qualitySourceInputBytes } from "../src/config/runtime.mts";
+import { codeEditFileBytes, dispatchTicketOutputBytes, legacyCodeEditFileBytes, qualitySourceInputBytes } from "../src/config/runtime.mts";
 import { createLocalDispatch, readDispatchTickets, runLocalJobs } from "../src/execution/local-dispatch.mts";
 import { applyLocalCodeChanges, readEditableFile, replayLocalCodePatch } from "../src/execution/local-code-changes.mts";
 import type { Flow } from "../src/planning/conversation-flow.mts";
 import { createDispatchMonitor } from "../src/execution/dispatch-monitor.mts";
 import { qualitySourceFileBytes, qualitySources } from "../src/execution/codex-quality-review.mts";
-import { maxSourceBytes } from "../src/execution/local-code-changes.mts";
 import { passingQualityReview, readyQualityFlow, validation } from "./fixtures/planning-quality.mts";
 
 const exec = promisify(execFile);
@@ -36,7 +35,8 @@ test("GitHub 拆单从固定提交区分只读资料和编辑文件，来源错�
   await mkdir(join(repo, "src"));
   await writeFile(join(repo, guide), "Frozen guide");
   await writeFile(join(repo, editable), "export const enabled = true;");
-  await writeFile(join(repo, large), "a".repeat(maxSourceBytes + 1));
+  const largeBytes = codeEditFileBytes() + 1;
+  await writeFile(join(repo, large), "a".repeat(largeBytes));
   await Promise.all(additional.map(path => writeFile(join(repo, path), "a".repeat(qualitySourceFileBytes))));
   await writeFile(join(repo, "docs/oversize.md"), "a".repeat(qualitySourceFileBytes + 1));
   await writeFile(join(repo, "docs/.private.md"), "ignore hidden files");
@@ -75,7 +75,7 @@ test("GitHub 拆单从固定提交区分只读资料和编辑文件，来源错�
   assert.deepEqual(planned.tickets[0]?.paths, [editable]);
   const snapshot = JSON.parse(prompts[0]?.split("\n\n").at(-1) ?? "{}");
   assert.deepEqual(new Set(snapshot.availableSources.map(([path]: [string, number]) => path)), new Set([guide, editable, large, ...additional]));
-  assert.equal(new Map(snapshot.availableSources).get(large), maxSourceBytes + 1);
+  assert.equal(new Map(snapshot.availableSources).get(large), largeBytes);
   assert.equal(snapshot.sourceBudgetBytes, sourceInputMaxBytes);
   assert.deepEqual(snapshot.availableEditPaths, [editable]);
   assert.ok(prompts[1]?.startsWith(prompts[0] ?? ""));
@@ -180,6 +180,24 @@ test("the process reads local .env and inherited settings take precedence", asyn
   assert.deepEqual(JSON.parse((await exec(process.execPath, args, {
     cwd: dir, env: { ...env, SOULFLOW_DISPATCH_TICKET_OUTPUT_MAX_BYTES: "2856", SOULFLOW_QUALITY_SOURCE_INPUT_MAX_BYTES: "280000" },
   })).stdout), [2856, 280000]);
+});
+
+test("编辑器按配置处理超过旧限制的普通文件", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "souflow-edit-file-limit-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = "source.mts";
+  const content = "a".repeat(legacyCodeEditFileBytes + 1);
+  await writeFile(join(dir, path), content);
+  const module = new URL("../src/execution/local-code-changes.mts", import.meta.url).href;
+  const args = ["--experimental-strip-types", "--input-type=module", "--eval", `
+    import { readEditableFile } from ${JSON.stringify(module)};
+    const file = await readEditableFile(process.cwd(), ${JSON.stringify(path)});
+    process.stdout.write(String(Buffer.byteLength(file.content)));
+  `];
+  const enabled = { ...process.env, SOULFLOW_CODE_EDIT_FILE_MAX_BYTES: String(Buffer.byteLength(content)) };
+  assert.equal((await exec(process.execPath, args, { cwd: dir, env: enabled })).stdout, String(Buffer.byteLength(content)));
+  await assert.rejects(exec(process.execPath, args, { cwd: dir,
+    env: { ...enabled, SOULFLOW_CODE_EDIT_FILE_MAX_BYTES: String(legacyCodeEditFileBytes) } }), /普通文本文件/);
 });
 
 test("code edits validate every path and anchor before changing a snapshot and emit an applicable patch", async t => {

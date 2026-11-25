@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { type BusinessEvent, type Checkpoint, scrubAuditText } from "../audit/activity-store.mts";
-import { dispatchTicketOutputBytes, qualitySourceInputBytes } from "../config/runtime.mts";
+import { codeEditFileBytes, dispatchTicketOutputBytes, qualitySourceInputBytes } from "../config/runtime.mts";
 import { currentDevelopmentPlan, type Flow } from "../planning/conversation-flow.mts";
 import { acceptanceCriteria, batchAcceptanceSchema, planningDigest, prepareVerifiedDraft, qualityBlock, qualityCurrent, qualityPacket,
   readBatchAcceptance, readVerification, reviewQuality, verificationSchema, type DraftCorrection, type PlannedTicketBatch, type QualityReceipt, type QualityReviewer,
@@ -16,7 +16,7 @@ import { startCodexQuestionAttempt, startCodexReadOnlyTask } from "./codex-comma
 import { type AccountAssignment, type CodexAccountDispatch, withCodexAccount } from "./codex-account-dispatch.mts";
 import type { DispatchMonitor } from "./dispatch-monitor.mts";
 import { qualitySourceFileBytes, qualitySourcePath, qualitySources } from "./codex-quality-review.mts";
-import { applyLocalCodeChanges, codeResultSchema, deliveryPath, maxSourceBytes, type LocalCodePatch, readEditableFile, readLocalCodePatch, replayLocalCodePatch } from "./local-code-changes.mts";
+import { applyLocalCodeChanges, codeResultSchema, deliveryPath, type LocalCodePatch, readEditableFile, readLocalCodePatch, replayLocalCodePatch } from "./local-code-changes.mts";
 
 const exec = promisify(execFile);
 const maxReportLength = 8000;
@@ -264,6 +264,7 @@ async function evidenceCatalog(workspace: string, revision: string, github = fal
   const entries = (await exec("git", ["-C", workspace, "ls-tree", "-r", "-z", "-l", revision, "--", "docs", "src", "tests"],
     { env: { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" } })).stdout;
   const catalog = new Map<string, { blob: string; bytes: number; editable: boolean }>();
+  const editLimit = codeEditFileBytes();
   for (const entry of entries.split("\0")) {
     const match = /^100(?:644|755) blob ([a-f0-9]{40,64}) +([0-9]+)\t(.+)$/.exec(entry);
     if (!match?.[1] || !match[3]) continue;
@@ -272,7 +273,7 @@ async function evidenceCatalog(workspace: string, revision: string, github = fal
     const localPath = /^(?:src|docs|tests)\/[a-zA-Z0-9._/-]+\.(?:md|mts|mjs|html|css)$/.test(path);
     if (github ? qualitySourcePath(path) && bytes <= qualitySourceFileBytes : localPath) {
       // 复核可以读项目文档和较大的源码，编辑仍限于原有 GitHub 可交付文件。
-      catalog.set(path, { blob, bytes, editable: localPath && (!github || (deliveryPath.test(path) && bytes <= maxSourceBytes)) });
+      catalog.set(path, { blob, bytes, editable: localPath && (!github || (deliveryPath.test(path) && bytes <= editLimit)) });
     }
   }
   return catalog;

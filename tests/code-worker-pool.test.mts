@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 import type { BusinessEvent, Checkpoint } from "../src/audit/activity-store.mts";
-import { readCodeWorkerConfig } from "../src/config/runtime.mts";
+import { codeEditFileBytes, legacyCodeEditFileBytes, readCodeWorkerConfig } from "../src/config/runtime.mts";
 import { createCodeWorkerPool, type WorkerAttempt } from "../src/execution/code-worker-pool.mts";
 import { contentDigest, readCodeOffer, readWorkerCapacity, type CodeOffer, type CodeWork } from "../src/execution/code-worker-protocol.mts";
 
@@ -116,6 +116,33 @@ test("设备就绪时重新检查授权，工单改动后不会发给设备", as
   assert.deepEqual(pool.snapshot().attempts, []);
   controller.abort();
   assert.deepEqual(await waiting, { status: 200, offer: null });
+});
+
+test("需要较大文件的工单只派给能力足够的设备，已有连接保持兼容", async t => {
+  const pool = createCodeWorkerPool(database().checkpoint, new Set([first.id, second.id]));
+  t.after(pool.close);
+  const signal = new AbortController();
+  const older = pool.poll(first, signal.signal);
+  const capacity = readWorkerCapacity({ ...second, version: 1, editFileBytes: codeEditFileBytes({}) }, pool.config.maxSlots);
+  assert.ok(capacity);
+  const newer = pool.poll({ ...second, ...capacity }, signal.signal);
+  const delivered = pool.execute({ ...work, files: [{ path: "src/worker.mts", sha256: digest, bytes: legacyCodeEditFileBytes + 1 }] },
+    signal.signal, 1000, () => {}, revalidate);
+  const result = await newer;
+  assert.ok(result.status === 200 && result.offer);
+  assert.equal(pool.snapshot().attempts[0]?.device, second.id);
+  assert.equal(readCodeOffer(result.offer)?.work.files[0]?.bytes, legacyCodeEditFileBytes + 1);
+  assert.equal(readCodeOffer({ ...result.offer, work: { ...work,
+    files: [{ path: "src/worker.mts", sha256: digest, bytes: legacyCodeEditFileBytes }] } }), undefined);
+  const lowered = new AbortController();
+  const uninterrupted = pool.poll({ ...second, editFileBytes: legacyCodeEditFileBytes }, lowered.signal);
+  lowered.abort();
+  assert.deepEqual(await uninterrupted, { status: 200, offer: null });
+  assert.equal(pool.snapshot().attempts.length, 1);
+  assert.equal(pool.receipt(second, { id: result.offer.id, digest: result.offer.digest, at: 100, phase: "declined" }), 200);
+  assert.equal((await delivered).phase, "declined");
+  signal.abort();
+  assert.deepEqual(await older, { status: 200, offer: null });
 });
 
 test("双机通信使用注入的离线时间、执行位和上下文限制", async t => {
