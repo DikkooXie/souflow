@@ -11,6 +11,9 @@ import { createLocalDispatch, readDispatchTickets, runLocalJobs } from "../src/e
 import { applyLocalCodeChanges, readEditableFile, replayLocalCodePatch } from "../src/execution/local-code-changes.mts";
 import type { Flow } from "../src/planning/conversation-flow.mts";
 import { createDispatchMonitor } from "../src/execution/dispatch-monitor.mts";
+import { qualitySourceFileBytes } from "../src/execution/codex-quality-review.mts";
+import { maxSourceBytes } from "../src/execution/local-code-changes.mts";
+import { passingQualityReview, readyQualityFlow, validation } from "./fixtures/planning-quality.mts";
 
 const exec = promisify(execFile);
 const guide = "docs/guide.md";
@@ -20,6 +23,64 @@ const draft = [
   { id: "T3", title: "汇总规则", instructions: "汇总前置报告", criteria: ["AC-3"], dependsOn: ["T1", "T2"], sources: [] },
 ];
 const criteria = ["AC-1", "AC-2", "AC-3"];
+
+test("GitHub 拆单从固定提交区分只读资料和编辑文件，来源错误只重试一次", async t => {
+  const repo = await mkdtemp(join(tmpdir(), "souflow-github-readonly-"));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const git = async (...args: string[]) => (await exec("git", ["-C", repo, ...args])).stdout.trim();
+  const editable = "src/feature.mts";
+  const large = "src/reader.mts";
+  await git("init", "-q");
+  await mkdir(join(repo, "docs"));
+  await mkdir(join(repo, "src"));
+  await writeFile(join(repo, guide), "Frozen guide");
+  await writeFile(join(repo, editable), "export const enabled = true;");
+  await writeFile(join(repo, large), "a".repeat(maxSourceBytes + 1));
+  await writeFile(join(repo, "docs/oversize.md"), "a".repeat(qualitySourceFileBytes + 1));
+  await writeFile(join(repo, "docs/.private.md"), "ignore hidden files");
+  await symlink("guide.md", join(repo, "docs/linked.md"));
+  await git("add", ".");
+  await git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--no-gpg-sign", "-qm", "freeze");
+  const revision = await git("rev-parse", "HEAD");
+  const flow = await readyQualityFlow();
+  flow.project = { plan: { status: "read", path: guide }, repository: { revision, commits: [] },
+    github: { status: "read", repo: "owner/repo" } };
+  await writeFile(join(repo, "docs/later.md"), "not in the frozen snapshot");
+  await git("add", ".");
+  await git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--no-gpg-sign", "-qm", "advance");
+
+  const ticket = { ...draft[0], sources: [guide, large], editPaths: [editable], validation,
+    delivery: { outcome: "用户确认纪要后收到一条待办", priorityReason: "独立交付确认行为", prerequisites: [] } };
+  const prompts: string[] = [];
+  let responses = [{ ...ticket, sources: ["docs/later.md"] }, ticket];
+  const dispatch = createLocalDispatch(repo, 2, {
+    split({ prompt }) {
+      prompts.push(prompt);
+      const response = responses.shift();
+      assert.ok(response);
+      return { finished: Promise.resolve("completed"), close() {}, answerQuestions: () => false,
+        output: () => JSON.stringify({ tickets: [response] }) };
+    },
+    qualityReviewer: passingQualityReview,
+    execute: () => assert.fail("拆单阶段不能执行代码工单"),
+  });
+  const planned = await dispatch.planGitHub(flow, "trial");
+  assert.deepEqual(planned[0]?.sources, [guide, large]);
+  assert.deepEqual(planned[0]?.paths, [editable]);
+  const snapshot = JSON.parse(prompts[0]?.split("\n\n").at(-1) ?? "{}");
+  assert.deepEqual(snapshot.availableSources, [guide, editable, large]);
+  assert.deepEqual(snapshot.availableEditPaths, [editable]);
+  assert.ok(prompts[1]?.startsWith(prompts[0] ?? ""));
+  assert.match(prompts[1] ?? "", /T1 的 sources/);
+  assert.equal(prompts.length, 2);
+
+  responses = [{ ...ticket, sources: [guide, guide] }, { ...ticket, sources: ["docs/linked.md"] }];
+  await assert.rejects(dispatch.planGitHub(flow, "invalid-sources"), /T1 的 sources/);
+  assert.equal(prompts.length, 4);
+  responses = [{ ...ticket, editPaths: [guide] }];
+  await assert.rejects(dispatch.planGitHub(flow, "unauthorized-edit"), /编辑文件/);
+  assert.equal(prompts.length, 5);
+});
 
 test("local dispatch requires criterion coverage, an acyclic graph and approved evidence", () => {
   const allowed = new Set([guide]);
