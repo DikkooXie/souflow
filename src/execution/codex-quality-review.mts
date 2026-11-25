@@ -10,7 +10,7 @@ const exec = promisify(execFile);
 const sourceLimit = 12;
 export const qualitySourceFileBytes = 65_536;
 const sourceBudgetBytes = 128 * 1024;
-const regularPath = /^(?:docs|src|tests)\/[a-zA-Z0-9._/-]+\.(?:md|mts|mjs|html|css)$/;
+const regularPath = /^(?:(?:docs|src|tests)\/[a-zA-Z0-9._/-]+\.(?:md|mts|mjs|html|css)|AGENTS\.md)$/;
 
 export function qualitySourcePath(path: string) {
   return (regularPath.test(path) || deliveryPath.test(path)) && !path.split("/").some(part => part.startsWith("."));

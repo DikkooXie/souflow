@@ -5,11 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
+import { pathToFileURL } from "node:url";
 import { openActivityStore } from "../src/audit/activity-store.mts";
-import { githubPull } from "../src/connections/github-delivery.mts";
+import { createGitHubDelivery, githubPull } from "../src/connections/github-delivery.mts";
 import { type DeliveryTracker, issueRevision, type IssueDetail, type IssuePull } from "../src/connections/issue-tracker.mts";
 import { qualitySources } from "../src/execution/codex-quality-review.mts";
-import { checkoutReviewedIssueBase, type DeliveryFailure, isolatedCheckFailed, IssueDeliveryFailed, IssueDeliverySourcesChanged, parseDeliveryPlan } from "../src/execution/issue-delivery.mts";
+import { checkoutReviewedIssueBase, type DeliveryFailure, isolatedCheckFailed, IssueDeliveryFailed, IssueDeliverySourcesChanged, parseDeliveryPlan,
+  passingAcceptanceTests } from "../src/execution/issue-delivery.mts";
 import { type Claim, createIssueDispatch } from "../src/workbench/issue-dispatch.mts";
 
 const spec = { files: ["src/main.mts"], instructions: "修改校验逻辑。", dependsOn: [] };
@@ -77,6 +79,202 @@ test("只展示 PR 当前提交的 CI，合并 SHA 独立记录", () => {
   commit.oid = "current";
   assert.equal(githubPull("a/b", pull).ci, "SUCCESS");
   assert.equal(githubPull("a/b", pull).mergeCommit, "merged");
+});
+
+test("同一个 PR 合并后仍能复核合并前的差异", async t => {
+  const workspace = await mkdtemp(join(tmpdir(), "souflow-pr-comparison-"));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const git = (...args: string[]) => execFileSync("git", ["-C", workspace, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+    "-c", "commit.gpgsign=false", ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git("init", "-q", "--template=", "--initial-branch=main");
+  await writeFile(join(workspace, "file.txt"), "开始\n");
+  git("add", "file.txt");
+  git("commit", "-qm", "baseline");
+  const initial = git("rev-parse", "HEAD");
+  git("switch", "-qc", "feat/review");
+  await writeFile(join(workspace, "file.txt"), "本批交付\n");
+  git("commit", "-qam", "implement feature");
+  const head = git("rev-parse", "HEAD");
+  git("update-ref", "refs/pull/2/head", head);
+  git("switch", "-q", "main");
+  await writeFile(join(workspace, "unrelated.txt"), "独立改动\n");
+  git("add", "unrelated.txt");
+  git("commit", "-qm", "advance target branch");
+  let base = git("rev-parse", "HEAD");
+  let merge: string | null = null;
+  const repo = "example/repo";
+  const publisher = createGitHubDelivery(repo, async ([endpoint]) => {
+    assert.equal(endpoint, `repos/${repo}/pulls/2`);
+    return JSON.stringify({ head: { sha: head, repo: { full_name: repo } }, base: { sha: base, repo: { full_name: repo } },
+      merged: merge !== null, merge_commit_sha: merge });
+  }, async () => ({ ...process.env, GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: `url.${pathToFileURL(workspace)}.insteadOf`,
+    GIT_CONFIG_VALUE_0: `https://github.com/${repo}.git`, GIT_CONFIG_KEY_1: "protocol.file.allow", GIT_CONFIG_VALUE_1: "always" }));
+  const pull = { number: 2, state: "OPEN", head, url: `https://github.com/${repo}/pull/2` };
+  assert.ok(publisher.reviewChanges);
+  const signal = AbortSignal.timeout(10_000);
+  const before = await publisher.reviewChanges(pull, signal);
+  assert.equal(before.mergeBase, initial);
+  assert.deepEqual(before.files.map(file => file.path), ["file.txt"]);
+  git("merge", "--no-ff", "--no-edit", "feat/review");
+  merge = git("rev-parse", "HEAD");
+  git("commit", "--allow-empty", "-qm", "advance after merge");
+  base = git("rev-parse", "HEAD");
+  await assert.rejects(publisher.reviewChanges(pull, signal), /PR 提交或关联仓库已变化/);
+  assert.deepEqual(await publisher.reviewChanges({ ...pull, state: "MERGED", mergeCommit: merge }, signal), before);
+});
+
+test("实际通过的验收测试回执去重，排除跳过的用例和汇总行", async t => {
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const output = execFileSync(process.execPath, ["--test-reporter=tap", "--input-type=module", "-e", `
+    import { describe, it, test } from "node:test";
+    test("[AC-1] 撤销后重连被拒绝", () => {});
+    test("[AC-1] 撤销后重连被拒绝", () => {});
+    test.skip("[AC-2] 同一工单只创建一次", () => {});
+    test.todo("[AC-3] 返回版本");
+    test("普通测试", () => {});
+    describe("[AC-4] 套件没有通过的子用例", () => {
+      it.skip("[AC-5] 未验证的子用例", () => {});
+    });
+    describe("[AC-6] 套件名不能给无关用例赋予编号", () => {
+      describe("嵌套套件", () => {
+        it("[AC-7] 嵌套验收检查已通过", () => {});
+        it("无关用例", () => {});
+      });
+    });
+    test("[AC-8] 父测试没有通过的子用例", async t => {
+      await t.test("跳过的子用例", { skip: true }, () => {});
+    });
+  `], { encoding: "utf8", env });
+  assert.match(output, /ok \d+ - \[AC-4\] 套件没有通过的子用例/);
+  assert.match(output, /ok \d+ - \[AC-8\] 父测试没有通过的子用例/);
+  assert.deepEqual(passingAcceptanceTests(output), ["[AC-1] 撤销后重连被拒绝", "[AC-7] 嵌套验收检查已通过"]);
+  const directory = await mkdtemp(join(tmpdir(), "souflow-test-receipt-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const empty = join(directory, "AC-9-empty.test.mjs");
+  await writeFile(empty, "export const noTests = true;");
+  const fileSummary = execFileSync(process.execPath, ["--test", "--test-reporter=tap", empty], { encoding: "utf8", env });
+  assert.match(fileSummary, /ok \d+ - .*AC-9-empty\.test\.mjs/);
+  assert.deepEqual(passingAcceptanceTests(fileSummary), []);
+});
+
+test("交付复核按当前头和工单版本保存，旧提交回执保留为历史", async () => {
+  const originalHead = "a".repeat(40);
+  const nextHead = "b".repeat(40);
+  const hash = "c".repeat(64);
+  const mergeBase = "d".repeat(40);
+  const quality = { policy: 1, flowDigest: hash, batchDigest: hash };
+  const initialPull: IssuePull = { number: 53, url: "https://github.com/a/b/pull/53", state: "OPEN", head: originalHead, baseName: "main" };
+  const issue: IssueDetail = { number: 47, title: "核对重连", body: "保存重连状态", url: "https://github.com/a/b/issues/47",
+    state: "OPEN", assignees: ["member"], pulls: [initialPull] };
+  let remotePull = initialPull;
+  let body = issue.body;
+  let linked = true;
+  let scopeCurrent = true;
+  let networkFailure = false;
+  let stored: Claim = { ...issue, pull: initialPull, target: { branch: "feat/47-123456789abc", head: originalHead },
+    requestId: "approved", claimedBy: "member", account: "member", phase: "submitted", syncedAt: 0,
+    approval: { flowId: "flow", planId: "plan", version: 1, issueRevision: issueRevision(issue), quality } };
+  const tracker: DeliveryTracker = {
+    repo: "a/b", candidates: async () => [], account: async () => "member", assign: async () => assert.fail(),
+    read: async () => ({ ...issue, body, pulls: linked ? [remotePull] : [] }),
+    delivery: { checkout: async () => assert.fail(), publish: async () => assert.fail(), find: async () => remotePull,
+      reviewChanges: async () => assert.fail("测试只替换复核器") },
+  };
+  const seen: string[] = [];
+  const open = () => createIssueDispatch(tracker, { load: () => [stored], save(_id, item) { stored = structuredClone(item); return true; } },
+    async () => assert.fail(), () => true, 1, new Map(), {
+      specs: new Map(), conversation: true, pollMs: 60_000, prepare: async () => assert.fail(),
+      reviewScopeCurrent: () => scopeCurrent,
+      async review(claim) {
+        const head = claim.pull?.head;
+        assert.ok(head);
+        seen.push(head);
+        if (networkFailure) throw Error("临时网络失败");
+        return { packetId: head, key: { repo: tracker.repo, issue: issue.number, issueRevision: issueRevision(issue), pull: initialPull.number,
+          head, mergeBase, plan: { id: "plan", version: 1, quality } }, ...(head === originalHead ? {
+          status: "block" as const, implementation: { status: "block" as const, summary: "缺少失败测试", evidence: [] },
+          requirements: { criteria: [] },
+        } : { status: "incomplete" as const }) };
+      },
+    });
+  const run = async (service: ReturnType<typeof open>) => {
+    await service.refresh();
+    await setImmediate();
+    assert.deepEqual(service.reviewStatus("flow", "other"), []);
+    return service.reviewStatus("flow", "member")[0];
+  };
+  const first = open();
+  try { assert.deepEqual((await run(first))?.reviews.map(item => [item.status, item.current]), [["block", true]]); }
+  finally { await first.close(); }
+  const restored = open();
+  try {
+    await run(restored);
+    assert.deepEqual(seen, [originalHead]);
+    scopeCurrent = false;
+    assert.equal(restored.reviewStatus("flow", "member")[0]?.reviews[0]?.current, false);
+    scopeCurrent = true;
+    linked = false;
+    assert.equal((await run(restored))?.reviews[0]?.current, false);
+    linked = true;
+    remotePull = { ...initialPull, head: nextHead };
+    networkFailure = true;
+    assert.equal((await run(restored))?.unavailable, true);
+    networkFailure = false;
+    assert.deepEqual((await run(restored))?.reviews.map(item => [item.status, item.current]), [["block", false], ["incomplete", true]]);
+    body = "已经修改过的工单";
+    const updated = await run(restored);
+    assert.equal(updated?.unavailable, true);
+    assert.equal(updated?.reviews.some(item => item.current), false);
+    assert.deepEqual(seen, [originalHead, nextHead, nextHead]);
+  } finally { await restored.close(); }
+});
+
+test("复核执行位释放后继续检查已合并的工单", async () => {
+  const head = "a".repeat(40);
+  const hash = "b".repeat(64);
+  const quality = { policy: 1, flowDigest: hash, batchDigest: hash };
+  const claims = [47, 48].map(number => {
+    const pull: IssuePull = { number: number + 10, url: `https://github.com/a/b/pull/${number + 10}`, state: "MERGED", ci: "SUCCESS", head };
+    const issue: IssueDetail = { number, title: `工单 ${number}`, body: "已完成", url: `https://github.com/a/b/issues/${number}`,
+      assignees: ["member"], pulls: [pull], state: "CLOSED" };
+    const claim: Claim = { ...issue, pull, requestId: "approved", claimedBy: "member", account: "member", phase: "submitted", syncedAt: 0,
+      target: { branch: `feat/${number}-123456789abc`, head },
+      approval: { flowId: "flow", planId: "plan", version: 1, issueRevision: issueRevision(issue), quality } };
+    return { issue, pull, claim };
+  });
+  let releaseFirst = () => {};
+  const firstSlot = new Promise<void>(resolve => { releaseFirst = resolve; });
+  const reviewed: number[] = [];
+  const tracker: DeliveryTracker = { repo: "a/b", candidates: async () => [], account: async () => "member", assign: async () => assert.fail(),
+    async read(number) {
+      const item = claims.find(input => input.issue.number === number);
+      assert.ok(item);
+      return item.issue;
+    }, delivery: { checkout: async () => assert.fail(), publish: async () => assert.fail(),
+      find: async (_branch, _head, pull) => claims.find(input => input.pull.number === pull)?.pull,
+      reviewChanges: async () => assert.fail() },
+  };
+  const service = createIssueDispatch(tracker, { load: () => claims.map(item => item.claim), save: () => true },
+    async () => assert.fail(), () => true, 1, new Map(), {
+      specs: new Map(), conversation: true, pollMs: 60_000, prepare: async () => assert.fail(),
+      async review(claim) {
+        reviewed.push(claim.number);
+        if (reviewed.length === 1) await firstSlot;
+        return { packetId: String(claim.number), key: { repo: tracker.repo, issue: claim.number,
+          issueRevision: claim.approval?.issueRevision ?? "", pull: claim.pull?.number ?? 0, head, mergeBase: head,
+          plan: { id: "plan", version: 1, quality } }, status: "block", implementation: { status: "block", summary: "待补", evidence: [] },
+          requirements: { criteria: [] } };
+      },
+    });
+  try {
+    await service.refresh();
+    assert.deepEqual(reviewed, [47]);
+    releaseFirst();
+    await setImmediate();
+    await service.refresh();
+    assert.deepEqual(reviewed, [47, 48]);
+  } finally { releaseFirst(); await service.close(); }
 });
 
 test("续修沿用批准范围和现有 PR，推送响应丢失时只回读", async t => {

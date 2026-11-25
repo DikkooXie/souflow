@@ -4,12 +4,15 @@ import { createPlannedIssuePublication, type IssuePublication } from "./planned-
 import { readFile } from "node:fs/promises";
 import { X509Certificate } from "node:crypto";
 import { createIssueDeveloper } from "../execution/issue-delivery.mts";
+import { createCodexDeliveryReviewer } from "../execution/codex-delivery-review.mts";
 import { createCodexQualityReviewer, createCodexTicketSourceReviewer, qualitySources } from "../execution/codex-quality-review.mts";
+import type { DeliveryReviewScope } from "../planning/delivery-review.mts";
 import type { QualityReviewer, TicketSourceReviewer } from "../planning/dispatch-quality.mts";
 import { createGitHubIssues } from "../connections/github.mts";
 import type { IssueTracker } from "../connections/issue-tracker.mts";
 import { createIssueVerifier, type VerifyIssue } from "../execution/issue-verification.mts";
 import { createIssueDispatch, IssueActionError, type Claim, type IssueDeliveryOptions } from "./issue-dispatch.mts";
+import { createGitHubDeliveryReviewer } from "./github-delivery-review.mts";
 import { readApprovedReviewFix } from "./approved-review-fix.mts";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
@@ -161,6 +164,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       const acceptance = memberFor && createAcceptance(audit.record, recovery ? audit.checkpoint<StoredAcceptance>("acceptance") : undefined);
       if (issueTracker && (!recovery || !monitor)) throw Error("GitHub 认领需要持久化的 Codex 工作台。");
       if (issueDelivery && !issueDelivery.conversation) throw Error("GitHub 代码交付需要使用对话规划与派发前质量校验。");
+      let reviewScope: ((claim: Claim) => DeliveryReviewScope | undefined) | undefined;
       const github = issueTracker && monitor ? createIssueDispatch(issueTracker,
         audit.checkpoint<Claim>(`github-issues:${issueTracker.repo.toLowerCase()}`),
         verifyIssue ?? createIssueVerifier(monitor, codexAccounts ? { codexAccounts } : {}),
@@ -168,6 +172,9 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           specs: issueDelivery.specs, pollMs: issueDelivery.pollMs, conversation: true, requireQuality: true,
           ...(issueDelivery.recoverFailedIssue ? { recoverFailedIssue: issueDelivery.recoverFailedIssue } : {}),
           ...(issueDelivery.reviewFix ? { reviewFix: issueDelivery.reviewFix } : {}),
+          ...(live ? { review: issueDelivery.review ?? createGitHubDeliveryReviewer(live[0], claim => reviewScope?.(claim),
+            createCodexDeliveryReviewer(live[0], issueDelivery.timeoutMs, qualityModel ?? issueDelivery.planningModel)),
+            reviewScopeCurrent: issueDelivery.reviewScopeCurrent ?? (claim => !!reviewScope?.(claim)) } : {}),
           prepare: createIssueDeveloper(monitor, { ...issueDelivery, root: `${database}.artifacts/github`,
             ...(codexAccounts ? { codexAccounts } : {}), ...(remoteLink?.code ? { workers: remoteLink.code } : {}) }),
         }) : undefined;
@@ -201,6 +208,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
             return answer === undefined ? [] : [{ cardId: card.id, questionId: question.id, question: scrubAuditText(question.prompt), answer,
               ...(card.clarificationOrigin ? { origin: card.clarificationOrigin } : {}) }];
           }) : []) : undefined);
+      reviewScope = claim => issuePlanning?.reviewScope(claim, flows.list().find(flow => flow.id === claim.approval?.flowId));
       flows.reopenReady();
       return { codex, inbox, flows, dispatch, acceptance, github, issuePlanning };
     } catch (error) {
@@ -248,9 +256,14 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
     const state = inbox.snapshot();
     const actor = member?.login ?? member?.id ?? "personal";
     const issueCards = issuePlanning?.cards(conversations, actor) ?? [];
+    const deliveryReviews = github ? conversations.flatMap(flow => {
+      const reviews = github.reviewStatus(flow.id, actor, member?.id === "reviewer");
+      return reviews.length ? [{ flowId: flow.id, reviews }] : [];
+    }) : [];
     return {
       ...state, requests: [...state.requests, ...reviewCards, ...issueCards],
       ...(issuePlanning ? { issuePlans: issuePlanning.statuses(conversations, actor) } : {}),
+      ...(deliveryReviews.length ? { deliveryReviews } : {}),
       flows: conversations.map(flow => ({ ...flow, ...(replanFeedback(flow, actor, member) ? { canReplan: true } : {}) })),
       phases: phases.map(phase => phase.title), inputLimits,
       member, githubEnabled: !!github,

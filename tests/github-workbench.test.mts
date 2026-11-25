@@ -6,9 +6,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
+import { openActivityStore } from "../src/audit/activity-store.mts";
 import type { IssueDetail, IssueTracker } from "../src/connections/issue-tracker.mts";
 import type { VerifyIssue } from "../src/execution/issue-verification.mts";
+import { currentDevelopmentPlan, type StoredFlow } from "../src/planning/conversation-flow.mts";
 import { createWorkbenchServer } from "../src/workbench/demo-server.mts";
+import type { Claim } from "../src/workbench/issue-dispatch.mts";
+import { readyQualityFlow } from "./fixtures/planning-quality.mts";
 
 test("GitHub 工单通过成员权限、并发去重、持久化和刷新保持一致", { timeout: 15_000 }, async () => {
   const workspace = await mkdtemp(join(tmpdir(), "souflow-github-http-"));
@@ -156,5 +160,71 @@ test("GitHub 工单通过成员权限、并发去重、持久化和刷新保持�
     for (const resolve of finish.values()) resolve();
     await close();
     await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("验收成员可读共享双维度复核，其他实施成员仍不能读取该回执或替人派发", async t => {
+  const workspace = await mkdtemp(join(tmpdir(), "souflow-github-reviews-http-"));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const database = join(workspace, "audit.sqlite");
+  const flow = await readyQualityFlow();
+  flow.requestedBy = "implementer";
+  const plan = currentDevelopmentPlan(flow);
+  assert.ok(plan);
+  const head = "a".repeat(40);
+  const issueRevision = "b".repeat(64);
+  const quality = { policy: 1, flowDigest: "c".repeat(64), batchDigest: "d".repeat(64) };
+  const pull = { number: 2, url: "https://github.com/example/repo/pull/2", state: "OPEN", head };
+  const issue: IssueDetail = { number: 1, title: "交付复核", body: "核对验收", state: "OPEN", assignees: ["member"],
+    pulls: [pull], url: "https://github.com/example/repo/issues/1" };
+  const store = openActivityStore(database);
+  try {
+    assert.equal(store.checkpoint<StoredFlow>("flows").save(flow.id, { flow }), true);
+    assert.equal(store.checkpoint<Claim>("github-issues:example/repo").save("1", { ...issue, pull, syncedAt: 0,
+      requestId: "fixture", claimedBy: "implementer", account: "member", phase: "submitted",
+      approval: { flowId: flow.id, planId: plan.id, version: plan.version, issueRevision, quality },
+      deliveryReviews: [{ observed: "historical", receipt: { packetId: "example", status: "block",
+        key: { repo: "example/repo", issue: 1, issueRevision, pull: 2, head, mergeBase: head, plan: { id: plan.id, version: plan.version, quality } },
+        implementation: { status: "pass", summary: "代码核对", evidence: [{ ref: "change:src/main.mts", quote: "代码依据" }] },
+        requirements: { criteria: [{ criterion: "AC-1", status: "block", summary: "验收遗漏",
+          evidence: [{ ref: "criterion:AC-1", quote: "需求依据" }] }] },
+      } }],
+    }), true);
+  } finally { store.close(); }
+
+  const keys = { implementer: "e".repeat(32), reviewer: "f".repeat(32), second: "g".repeat(32) };
+  const auth = (name: keyof typeof keys) => `Basic ${Buffer.from(`${name}:${keys[name]}`).toString("base64")}`;
+  const server = createWorkbenchServer(0, [workspace], database, {
+    members: { implementer: keys.implementer, reviewer: keys.reviewer, additionalImplementers: { second: keys.second } },
+    issueTracker: { repo: "example/repo", account: async () => assert.fail("回读无需 GitHub 身份"), candidates: async () => [],
+      read: async () => issue, assign: async () => assert.fail("验收成员不能认领") },
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const url = `http://127.0.0.1:${address.port}`;
+    const route = `${url}/api/decisions`;
+    const snapshot = async (name: keyof typeof keys) => {
+      const response = await fetch(route, { headers: { authorization: auth(name) } });
+      assert.equal(response.status, 200);
+      return response.json();
+    };
+    assert.equal((await fetch(route)).status, 401);
+    const reviewer = await snapshot("reviewer");
+    const evidence = reviewer.deliveryReviews[0].reviews[0].reviews[0];
+    assert.equal(reviewer.deliveryReviews[0].flowId, flow.id);
+    assert.deepEqual(evidence.implementation.evidence, [{ ref: "change:src/main.mts", quote: "代码依据" }]);
+    assert.deepEqual(evidence.requirements.criteria[0].evidence, [{ ref: "criterion:AC-1", quote: "需求依据" }]);
+    assert.deepEqual((await snapshot("implementer")).deliveryReviews, reviewer.deliveryReviews);
+    assert.equal((await snapshot("second")).deliveryReviews, undefined);
+    assert.equal((await fetch(`${url}/api/github/issues/claim`, { method: "POST", headers: { origin: url,
+      "Content-Type": "application/json", authorization: auth("reviewer") }, body: JSON.stringify({ requestId: randomUUID() }) })).status, 403);
+  } finally {
+    const closed = once(server, "workbenchClosed");
+    server.close();
+    server.closeAllConnections();
+    await closed;
   }
 });

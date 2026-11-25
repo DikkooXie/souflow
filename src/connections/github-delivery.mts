@@ -1,9 +1,14 @@
 import { execFile } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import type { IssuePublisher, IssuePull } from "./issue-tracker.mts";
 
 const exec = promisify(execFile);
 const commandLimit = { timeout: 90_000, maxBuffer: 2 * 1024 * 1024 };
+const revision = /^[a-f0-9]{40}$/;
+const maxReviewDiffBytes = 160 * 1024;
 
 export const githubPullFields = "number state isDraft headRefOid baseRefName mergeCommit{oid} commits(last:1){nodes{commit{oid statusCheckRollup{state}}}}";
 type PullNode = {
@@ -23,11 +28,13 @@ export function createGitHubDelivery(repo: string, api: (args: string[]) => Prom
   credentialEnv: () => Promise<NodeJS.ProcessEnv>): IssuePublisher {
   const [owner, name] = repo.split("/");
   const url = `https://github.com/${repo}.git`;
-  async function git(args: string[], signal: AbortSignal) {
+  async function git(args: string[], signal: AbortSignal, env?: NodeJS.ProcessEnv) {
     // 凭据只进入固定 Git 命令。测试与 Codex 不使用此环境，也不读取全局 Git 助手。
     try {
       return (await exec("git", ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
-        "-c", "core.hooksPath=/dev/null", ...args], { ...commandLimit, env: await credentialEnv(), signal })).stdout.trim();
+        "-c", "core.hooksPath=/dev/null", ...args], {
+        ...commandLimit, env: { ...(env ?? await credentialEnv()), GIT_NO_REPLACE_OBJECTS: "1" }, signal,
+      })).stdout.trim();
     } catch { throw Error("GitHub 工作区操作失败。"); }
   }
   async function find(branch: string, head: string, knownPull?: number) {
@@ -42,6 +49,61 @@ export function createGitHubDelivery(repo: string, api: (args: string[]) => Prom
   }
   return {
     find,
+    async reviewChanges(pull, signal) {
+      if (!pull.head || !revision.test(pull.head) || !Number.isSafeInteger(pull.number) || pull.number < 1) {
+        throw Error("缺少可复核的 PR 提交。");
+      }
+      const merged = pull.state === "MERGED";
+      const merge = merged ? pull.mergeCommit : undefined;
+      if (merged && (!merge || !revision.test(merge))) throw Error("已合并 PR 缺少合并提交。");
+      const endpoint = `repos/${repo}/pulls/${pull.number}`;
+      type PullRefs = { head: { sha: string; repo: { full_name: string } | null }; base: { sha: string; repo: { full_name: string } };
+        merged: boolean; merge_commit_sha: string | null };
+      const read = async () => {
+        signal.throwIfAborted();
+        const detail = JSON.parse(await api([endpoint])) as PullRefs;
+        const { head, base } = detail;
+        if (head.sha !== pull.head || !revision.test(base.sha) || detail.merged !== merged || (merged && detail.merge_commit_sha !== merge)
+          || [head.repo, base.repo].some(item => item?.full_name.toLowerCase() !== repo.toLowerCase())) {
+          throw Error("PR 提交或关联仓库已变化。");
+        }
+        return base.sha;
+      };
+      const base = await read();
+      const workspace = await mkdtemp(join(tmpdir(), "souflow-pr-review-"));
+      try {
+        const env = await credentialEnv();
+        const run = (args: string[]) => git(["-C", workspace, ...args], signal, env);
+        // 只取 Git 对象，不检出或执行 PR 的文件、过滤器和钩子。
+        await run(["init", "--bare", "--template="]);
+        await run(["fetch", "--no-tags", url, `refs/pull/${pull.number}/head:refs/review/head`, `${base}:refs/review/base`,
+          ...(merge ? [`${merge}:refs/review/merge`] : [])]);
+        if (await run(["rev-parse", "refs/review/head"]) !== pull.head) throw Error("PR 提交已变化。");
+        let comparison = base;
+        if (merge) {
+          const [, first, second] = (await run(["rev-list", "--parents", "-n", "1", merge])).split(" ");
+          // 普通合并的第一父提交保留当时的目标分支。压缩合并也可以从其唯一父提交计算分叉点。
+          if (first && revision.test(first) && (second === pull.head || (!second && merge !== pull.head))) comparison = first;
+        }
+        const mergeBase = await run(["merge-base", comparison, pull.head]);
+        if (!revision.test(mergeBase) || mergeBase === pull.head) throw Error("无法固定 PR 的合并前比较起点。");
+        const diffArgs = ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames"];
+        const paths = (await run([...diffArgs, "--name-only", "-z", mergeBase, pull.head, "--"])).split("\0").filter(Boolean);
+        const files: { path: string; diff: string }[] = [];
+        let bytes = 0;
+        for (const path of paths) {
+          const diff = await run([...diffArgs, "--full-index", "--binary", mergeBase, pull.head, "--", path]);
+          bytes += Buffer.byteLength(path) + Buffer.byteLength(diff);
+          if (bytes > maxReviewDiffBytes) throw Error("PR 差异超出完整复核范围。");
+          if (!diff) throw Error("无法读取 PR 文件的完整差异。");
+          files.push({ path, diff });
+        }
+        if (await read() !== base && comparison === base) throw Error("PR 目标分支提交已变化。");
+        return { mergeBase, files };
+      } finally {
+        await rm(workspace, { recursive: true, force: true });
+      }
+    },
     async checkoutPublished(workspace, { branch, head }, signal) {
       if (!/^feat\/\d+-[a-f0-9]{12}$/.test(branch) || !/^[a-f0-9]{40}$/.test(head)) throw Error("续修目标无效。");
       const run = (args: string[]) => git(["-C", workspace, ...args], signal);

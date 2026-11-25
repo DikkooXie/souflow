@@ -85,6 +85,14 @@ GitHub 选单可引用同一提交中直接相关的只读源码，例如承接�
 
 隔离工作台用设备接入样例验证了 [Markdown 编辑与预览](acceptance/markdown-docs/01-edit-preview.jpg)、[保存并重开后读取新版](acceptance/markdown-docs/02-version-readback.jpg)和[旧计划待修订](acceptance/markdown-docs/03-stale-plan.jpg)。双成员保存冲突与重启回读由 HTTP 集成测试覆盖。
 
+### 从原对话查看交付复核
+
+工作台发现关联 PR 后，分别启动两个只读 Codex 会话，固定 Issue 正文版本、PR 头提交、比较起点和已批准的计划。代码质量结论引用该提交的代码或测试差异。需求结论逐项引用对应验收条件，判为通过时必须引用与该编号对应的实际测试回执。隔离检查使用固定 TAP 报告格式，只保存已运行通过的验收测试名称。跳过和待办测试不算证据。
+
+原对话的「交付复核」可展开两侧结论和引文。新 PR 提交进入新一轮复核，旧结果仍可回查。当前提交缺少验收回执时，界面保留阻塞或证据不足状态。复核可以为验收提供证据，GitHub 的 CI、评审、合并和成员验收按现有流程处理。关联修复工单与真实双机复验的进度见 [#70](https://github.com/DikkooXie/souflow/issues/70) 和 [#67](https://github.com/DikkooXie/souflow/issues/67)。
+
+[隔离样例截图](acceptance/delivery-review/01-two-axis-history.jpg)展示代码质量拦截、需求项通过及旧提交历史的回读界面。样例的复核材料使用固定测试数据。
+
 ### 首版双机单账号试用
 
 使用两台实体电脑和同一个已登录的 Codex 账号。选择同一个真实仓库里的两张不同工单，分别在各自机器的本地会话与独立 Git 工作区完成开发和测试，提交可追溯到对应 Issue 的 PR。至少验证一次通过 GitHub 的跨机交接：上游 PR 合并后，下游电脑从合并后的提交开始或继续其工单。保存两台电脑各自的执行或测试截图，以及关联 Issue、PR、提交和 CI，核对负责人和工单没有串单。此试用以各自机器本地启动执行，GitHub 承载协作和交接。
