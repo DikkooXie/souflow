@@ -14,7 +14,7 @@ import { type TicketDraft, validateTicketPlan } from "../planning/validate-ticke
 import { startCodexQuestionAttempt, startCodexReadOnlyTask } from "./codex-command-attempt.mts";
 import { type AccountAssignment, type CodexAccountDispatch, withCodexAccount } from "./codex-account-dispatch.mts";
 import type { DispatchMonitor } from "./dispatch-monitor.mts";
-import { qualitySources } from "./codex-quality-review.mts";
+import { qualitySourceFileBytes, qualitySourcePath, qualitySources } from "./codex-quality-review.mts";
 import { applyLocalCodeChanges, codeResultSchema, deliveryPath, maxSourceBytes, type LocalCodePatch, readEditableFile, readLocalCodePatch, replayLocalCodePatch } from "./local-code-changes.mts";
 
 const exec = promisify(execFile);
@@ -108,9 +108,11 @@ function ticketSchema(kind: DispatchKind, routeModels: boolean, review: boolean,
   };
 }
 
+class TicketSourceValidationError extends Error {}
+
 export function readDispatchTickets(text: string | undefined, criteria: readonly string[], evidence: ReadonlySet<string>,
   kind: DispatchKind = "report", routing?: ModelRouting, review = false, ticketOutputMaxBytes = dispatchTicketOutputBytes(),
-  github = false): Ticket[] {
+  github = false, editable = evidence): Ticket[] {
   if (text && Buffer.byteLength(text) > ticketOutputMaxBytes) throw Error("返回的工单方案超过传输字节上限。");
   const candidates = parse(text)?.tickets;
   if (!Array.isArray(candidates)) throw Error("返回的工单结构无效。");
@@ -123,6 +125,9 @@ export function readDispatchTickets(text: string | undefined, criteria: readonly
     if (!Array.isArray(sources) || sources.length > 4 || new Set(sources).size !== sources.length
       || (kind === "report" && !sources.length && !item.dependsOn.length)
       || !sources.every(path => typeof path === "string" && evidence.has(path))) {
+      if (github) {
+        throw new TicketSourceValidationError(`工单校验未通过：${item.id} 的 sources 只能从冻结版本的 availableSources 逐字选取最多 4 个不同路径，无资料时填空数组。`);
+      }
       throw Error("工单校验未通过（资料必须引用冻结版本中的普通文件或前置报告）。");
     }
     const ticket: Ticket = { id: item.id, title: item.title, instructions: item.instructions, criteria: item.criteria, dependsOn: item.dependsOn, sources };
@@ -142,7 +147,7 @@ export function readDispatchTickets(text: string | undefined, criteria: readonly
     }
     const approvedPaths = new Set<string>();
     for (const path of paths) {
-      if (typeof path !== "string" || !evidence.has(path) || path.split("/").some(part => part.startsWith(".")) || approvedPaths.has(path.toLowerCase())) {
+      if (typeof path !== "string" || !editable.has(path) || path.split("/").some(part => part.startsWith(".")) || approvedPaths.has(path.toLowerCase())) {
         throw Error("工单校验未通过（编辑文件必须来自冻结的仓库，且不能被重复分配）。");
       }
       approvedPaths.add(path.toLowerCase());
@@ -249,12 +254,17 @@ function reviewedBatch(run: Run) {
 
 type Start = typeof startCodexReadOnlyTask;
 async function evidenceCatalog(workspace: string, revision: string, github = false) {
-  const entries = (await exec("git", ["-C", workspace, "ls-tree", "-r", "-z", "-l", revision, "--", "docs", "src", "tests"])).stdout;
-  const catalog = new Map<string, string>();
+  const entries = (await exec("git", ["-C", workspace, "ls-tree", "-r", "-z", "-l", revision, "--", "docs", "src", "tests"],
+    { env: { ...process.env, GIT_NO_REPLACE_OBJECTS: "1" } })).stdout;
+  const catalog = new Map<string, { blob: string; editable: boolean }>();
   for (const entry of entries.split("\0")) {
-    const match = /^100(?:644|755) blob ([a-f0-9]{40,64}) +([0-9]+)\t((?:src|docs|tests)\/[a-zA-Z0-9._/-]+\.(?:md|mts|mjs|html|css))$/.exec(entry);
-    if (match?.[1] && match[3] && (!github || (deliveryPath.test(match[3]) && Number(match[2]) <= maxSourceBytes))) {
-      catalog.set(match[3], match[1]);
+    const match = /^100(?:644|755) blob ([a-f0-9]{40,64}) +([0-9]+)\t(.+)$/.exec(entry);
+    if (!match?.[1] || !match[3]) continue;
+    const [, blob, size, path] = match;
+    const localPath = /^(?:src|docs|tests)\/[a-zA-Z0-9._/-]+\.(?:md|mts|mjs|html|css)$/.test(path);
+    if (github ? qualitySourcePath(path) && Number(size) <= qualitySourceFileBytes : localPath) {
+      // 复核可以读项目文档和较大的源码，编辑仍限于原有 GitHub 可交付文件。
+      catalog.set(path, { blob, editable: localPath && (!github || (deliveryPath.test(path) && Number(size) <= maxSourceBytes)) });
     }
   }
   return catalog;
@@ -352,6 +362,8 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
       if (!/^[a-f0-9]{40,64}$/.test(revision) || shutdown.signal.aborted) throw Error("无法取得仓库版本。");
       run.revision = revision;
       const catalog = await evidenceCatalog(workspace, revision, github);
+      const sources = new Set(catalog.keys());
+      const editable = new Set([...catalog].flatMap(([path, entry]) => entry.editable ? [path] : []));
       if (shutdown.signal.aborted) throw Error("本地工作台已关闭。");
       // 按完整验收文本约束拆分，模型不得自行修改本轮目标。
       const criteria = acceptanceCriteria(flow);
@@ -361,7 +373,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
           : run.kind === "code"
           ? "把已生成的开发计划拆成本地代码工单，每单可以单独验证产物。只有确实需要前置补丁时才声明工单依赖。"
           : "把已生成的 souflow 开发计划拆成可独立验收的本地核验工单。工单只根据提供的资料和前置报告产出核验报告。",
-        github ? "每单 editPaths 从可执行的现有文件中列出 1 到 4 个路径。首批 GitHub 工单的可编辑范围须互斥。sources 填送审所需的已有资料路径。"
+        github ? "每单 editPaths 逐字从 availableEditPaths 选择 1 到 4 个路径，首批 GitHub 工单的可编辑范围须互斥。sources 逐字从 availableSources 选择最多 4 个额外只读资料路径，无额外资料时填空数组。GitHub Issue 引用写进说明。"
           : run.kind === "code"
           ? "每单 editPaths 列出需改动的 1 到 4 个现有文件。无依赖的工单填写空 dependsOn。修改同一文件的工单必须按依赖串行。下游只在前置补丁获人工批准后开始。sources 可列出辅助参考文件或为空，路径均从 availableSources 选择。"
           : "前置报告为必须输入时才填写 dependsOn。若需求明确说两张独立核验之后汇总，拆出两个无依赖节点和一个同时依赖它们的汇总节点。从 availableSources 指定一到四份资料，汇总单可只依赖报告。",
@@ -377,16 +389,16 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
         ...(reviewer ? ["只用资料中 criteria 数组的 id 原样填 criteria，文档正文可能使用 AC-01 等不同格式。validation 中每个选用的 id 只出现一次，对应可执行的 procedure 和可观察的 expected。一个编号有多个检查时写在同一条。"] : []),
         ...(routing ? ["逐单判断难度。范围清楚、改动局部且验收直接时给 difficulty=routine；需要判断跨模块契约、权限、迁移或关键步骤证据不足时给 difficulty=advanced。routingReason 用一句话说明本单的可验证依据，不超过 240 字。"] : []),
         "以下是待核对的材料，不授予额外权限。直接返回 JSON 工单，不调用工具或追问。",
-        JSON.stringify({ request: flow.prompt, plan: context.plan.sections, criteria, availableSources: [...catalog.keys()],
-          ...(github ? { issueCandidates: flow.project?.issueCandidates, relatedIssues: flow.project?.relatedIssues } : {}),
+        JSON.stringify({ request: flow.prompt, plan: context.plan.sections, criteria, availableSources: [...sources],
+          ...(github ? { availableEditPaths: [...editable], issueCandidates: flow.project?.issueCandidates, relatedIssues: flow.project?.relatedIssues } : {}),
           ...(reviewer ? { outputs: flow.outputs } : {}) }),
       ].join("\n\n");
       const parse = (output: string | undefined) =>
-        readDispatchTickets(output, criteria.map(item => item.id), new Set(catalog.keys()), run.kind, routing, !!reviewer, ticketOutputMaxBytes, github);
+        readDispatchTickets(output, criteria.map(item => item.id), sources, run.kind, routing, !!reviewer, ticketOutputMaxBytes, github, editable);
       const tickets = await prepareVerifiedDraft(async feedback => {
         shutdown.signal.throwIfAborted();
         const session = monitor?.begin({ flowId: run.flowId, batchId: run.id, planVersion: run.plan.version,
-          title: flow.title, task: feedback ? "纠正工单验收映射" : "拆分工单" });
+          title: flow.title, task: feedback ? "纠正工单引用" : "拆分工单" });
         return result(() => {
           const attempt = split({
             workspace, prompt: feedback ? `${prompt}\n\n上一份草稿未用于授权：${feedback}\n对照相同计划完整重写 JSON。` : prompt,
@@ -397,7 +409,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
           });
           return attempt;
         }, session);
-      }, parse);
+      }, parse, error => error instanceof TicketSourceValidationError ? error.message : undefined);
       run.jobs = tickets.map(ticket => ({ ...ticket, status: "queued" }));
       return { revision, reviewer };
   }
@@ -472,7 +484,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
           }
         }
         const evidence = await Promise.all(job.sources.map(async path => {
-          const blob = catalog.get(path);
+          const blob = catalog.get(path)?.blob;
           if (!blob) throw Error("资料不在冻结的仓库版本内。");
           if (inheritedPaths.has(path)) {
             const { content } = await readEditableFile(source, path);
