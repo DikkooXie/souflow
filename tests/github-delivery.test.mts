@@ -123,14 +123,39 @@ test("同一个 PR 合并后仍能复核合并前的差异", async t => {
   assert.deepEqual(await publisher.reviewChanges({ ...pull, state: "MERGED", mergeCommit: merge }, signal), before);
 });
 
-test("实际通过的验收测试回执去重，排除未执行和失败用例", () => {
-  assert.deepEqual(passingAcceptanceTests([
-    "ok 1 - [AC-1] 撤销后重连被拒绝", "ok 2 - [AC-2] 同一工单只创建一次 # SKIP requires GitHub",
-    "not ok 3 - [AC-3] 重启后恢复", "ok 4 - [AC-4] 返回版本 # TODO",
-    "ok 5 - 普通测试", "ok 6 - [AC-1] 撤销后重连被拒绝", "# 说明 AC-5",
-    "    ok 1 - [AC-5] 嵌套验收检查已通过", "    ok 2 - [AC-6] 嵌套检查 # SKIP", "    ok 3 - [AC-7] 嵌套检查 # TODO",
-    "    # ok 4 - [AC-8] 输出了一条诊断信息",
-  ].join("\n")), ["[AC-1] 撤销后重连被拒绝", "[AC-5] 嵌套验收检查已通过"]);
+test("实际通过的验收测试回执去重，排除跳过的用例和汇总行", async t => {
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const output = execFileSync(process.execPath, ["--test-reporter=tap", "--input-type=module", "-e", `
+    import { describe, it, test } from "node:test";
+    test("[AC-1] 撤销后重连被拒绝", () => {});
+    test("[AC-1] 撤销后重连被拒绝", () => {});
+    test.skip("[AC-2] 同一工单只创建一次", () => {});
+    test.todo("[AC-3] 返回版本");
+    test("普通测试", () => {});
+    describe("[AC-4] 套件没有通过的子用例", () => {
+      it.skip("[AC-5] 未验证的子用例", () => {});
+    });
+    describe("[AC-6] 套件名不能给无关用例赋予编号", () => {
+      describe("嵌套套件", () => {
+        it("[AC-7] 嵌套验收检查已通过", () => {});
+        it("无关用例", () => {});
+      });
+    });
+    test("[AC-8] 父测试没有通过的子用例", async t => {
+      await t.test("跳过的子用例", { skip: true }, () => {});
+    });
+  `], { encoding: "utf8", env });
+  assert.match(output, /ok \d+ - \[AC-4\] 套件没有通过的子用例/);
+  assert.match(output, /ok \d+ - \[AC-8\] 父测试没有通过的子用例/);
+  assert.deepEqual(passingAcceptanceTests(output), ["[AC-1] 撤销后重连被拒绝", "[AC-7] 嵌套验收检查已通过"]);
+  const directory = await mkdtemp(join(tmpdir(), "souflow-test-receipt-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const empty = join(directory, "AC-9-empty.test.mjs");
+  await writeFile(empty, "export const noTests = true;");
+  const fileSummary = execFileSync(process.execPath, ["--test", "--test-reporter=tap", empty], { encoding: "utf8", env });
+  assert.match(fileSummary, /ok \d+ - .*AC-9-empty\.test\.mjs/);
+  assert.deepEqual(passingAcceptanceTests(fileSummary), []);
 });
 
 test("交付复核按当前头和工单版本保存，旧提交回执保留为历史", async () => {

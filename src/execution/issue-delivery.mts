@@ -49,11 +49,21 @@ export function isolatedCheckFailed(code: unknown) {
 }
 
 export function passingAcceptanceTests(output: string) {
-  // 只记录检查器报告已通过、且明确带验收编号的测试名。计划描述本身不构成运行证据。
-  const names = output.split(/\r?\n/).flatMap(line => {
-    const match = /^[ \t]*ok \d+ - (.{1,240})$/.exec(line);
-    const name = match?.[1];
-    return name && /\bAC-\d+\b/.test(name) && !/\s+#\s*(?:SKIP|TODO)\b/i.test(name) ? [scrubAuditText(name)] : [];
+  const lines = output.split(/\r?\n/);
+  const names = lines.flatMap((line, index) => {
+    const result = /^( *)ok \d+ - (.{1,240})$/.exec(line);
+    if (!result) return [];
+    const [, indent, name] = result;
+    if (!name || !/\bAC-\d+\b/.test(name) || /\s+#\s*(?:SKIP|TODO)\b/i.test(name)
+      || /\.(?:[cm]?[jt]s|[jt]sx)$/i.test(name)) return [];
+    // 套件和父测试的汇总行也可能显示 ok，即使子用例都跳过。只接受 Node TAP 的实际叶子用例回执。
+    const childIndent = `${indent}    `;
+    const previous = lines[index - 1];
+    if (previous?.startsWith(childIndent) && /^1\.\.\d+$/.test(previous.slice(childIndent.length))) return [];
+    const detail = `${indent}  `;
+    if (lines[index + 1] !== `${detail}---` || !lines[index + 2]?.startsWith(`${detail}duration_ms: `)
+      || lines[index + 3] !== `${detail}type: 'test'` || lines[index + 4] !== `${detail}...`) return [];
+    return [scrubAuditText(name)];
   });
   return [...new Set(names)].slice(0, 48);
 }
