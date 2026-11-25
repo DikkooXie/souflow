@@ -154,6 +154,8 @@ export function qualityPacket(flow: Flow, revision: string, id: string, tickets:
 export type QualityPacket = ReturnType<typeof qualityPacket> & { sourceReviewMode?: "per-ticket" };
 export type TicketSourcePacket = {
   revision: string; ticket: QualityTicket; criteria: QualityPacket["planning"]["criteria"];
+  plan: QualityPacket["planning"]["documents"][number] | undefined;
+  upstream: readonly QualityTicket[];
   references: Record<string, string>;
 };
 export type TicketSourceFinding = Finding & { ticket: string; revision: string; paths: string[]; sourceDigest: string };
@@ -216,6 +218,8 @@ export async function reviewTicketSources(batch: QualityPacket, ticket: QualityT
   if (missing.length) throw Error(`工单校验未通过：${ticket.id} 的固定源码未完整读入（${missing.join("、")}）。`);
   const references = Object.fromEntries(paths.map(path => [`repo:${path}`, sources[path] ?? ""]));
   const packet: TicketSourcePacket = { revision: batch.revision, ticket, references,
+    plan: batch.planning.documents.find(document => document.kind === "development-plan"),
+    upstream: batch.tickets.filter(parent => ticket.dependsOn.includes(parent.id)),
     criteria: batch.planning.criteria.filter(item => ticket.criteria.includes(item.id)) };
   signal.throwIfAborted();
   const raw = await reviewer(packet, signal);

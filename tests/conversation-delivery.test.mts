@@ -324,9 +324,10 @@ test("保留原未授权草稿，十张工单分别核对固定源码，缺一�
   const plan = currentDevelopmentPlan(flow);
   assert.ok(plan);
   const drafts: PlannedTicket[] = Array.from({ length: 10 }, (_, index) => ({ id: `T${index + 1}`, title: `工单 ${index + 1}`,
-    instructions: "单独回读一次交付结果。", dependsOn: [], criteria: ["AC-1"], validation,
+    instructions: "单独回读一次交付结果。", dependsOn: index === 7 ? ["T7"] : [], criteria: ["AC-1"], validation,
     paths: [`src/feature-${index}.mts`], sources: [`tests/feature-${index}.test.mts`, `src/related-${index}.mts`],
-    delivery: { outcome: `完成第 ${index + 1} 项验收`, priorityReason: "按确认的计划顺序安排", prerequisites: [] },
+    delivery: { outcome: index === 6 ? "提供已验证的回执查询接口" : `完成第 ${index + 1} 项验收`, priorityReason: "按确认的计划顺序安排",
+      prerequisites: index === 7 ? [{ ticket: "T7", reason: "读取上游新增的回执查询接口。" }] : [] },
   }));
   for (const [label, missing, legacyPending] of [
     ["十张均取得源码回执", undefined, false], ["某工单少读源码", drafts[6]?.sources?.[1], false],
@@ -365,6 +366,9 @@ test("保留原未授权草稿，十张工单分别核对固定源码，缺一�
         maximum = Math.max(maximum, active);
         seen.push(packet.ticket.id);
         assert.equal(packet.revision, base);
+        assert.equal(packet.plan?.id, plan.id);
+        assert.equal(packet.plan?.version, plan.version);
+        assert.deepEqual(packet.upstream.map(parent => parent.delivery?.outcome), packet.ticket.id === "T8" ? ["提供已验证的回执查询接口"] : []);
         assert.equal(Object.keys(packet.references).length, 3);
         await setImmediate();
         active--;
