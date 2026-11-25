@@ -53,12 +53,18 @@ export function createGitHubDelivery(repo: string, api: (args: string[]) => Prom
       if (!pull.head || !revision.test(pull.head) || !Number.isSafeInteger(pull.number) || pull.number < 1) {
         throw Error("缺少可复核的 PR 提交。");
       }
+      const merged = pull.state === "MERGED";
+      const merge = merged ? pull.mergeCommit : undefined;
+      if (merged && (!merge || !revision.test(merge))) throw Error("已合并 PR 缺少合并提交。");
       const endpoint = `repos/${repo}/pulls/${pull.number}`;
-      type PullRefs = { head: { sha: string; repo: { full_name: string } | null }; base: { sha: string; repo: { full_name: string } } };
+      type PullRefs = { head: { sha: string; repo: { full_name: string } | null }; base: { sha: string; repo: { full_name: string } };
+        merged: boolean; merge_commit_sha: string | null };
       const read = async () => {
         signal.throwIfAborted();
-        const { head, base } = JSON.parse(await api([endpoint])) as PullRefs;
-        if (head.sha !== pull.head || !revision.test(base.sha) || [head.repo, base.repo].some(item => item?.full_name.toLowerCase() !== repo.toLowerCase())) {
+        const detail = JSON.parse(await api([endpoint])) as PullRefs;
+        const { head, base } = detail;
+        if (head.sha !== pull.head || !revision.test(base.sha) || detail.merged !== merged || (merged && detail.merge_commit_sha !== merge)
+          || [head.repo, base.repo].some(item => item?.full_name.toLowerCase() !== repo.toLowerCase())) {
           throw Error("PR 提交或关联仓库已变化。");
         }
         return base.sha;
@@ -70,10 +76,17 @@ export function createGitHubDelivery(repo: string, api: (args: string[]) => Prom
         const run = (args: string[]) => git(["-C", workspace, ...args], signal, env);
         // 只取 Git 对象，不检出或执行 PR 的文件、过滤器和钩子。
         await run(["init", "--bare", "--template="]);
-        await run(["fetch", "--no-tags", url, `refs/pull/${pull.number}/head:refs/review/head`, `${base}:refs/review/base`]);
+        await run(["fetch", "--no-tags", url, `refs/pull/${pull.number}/head:refs/review/head`, `${base}:refs/review/base`,
+          ...(merge ? [`${merge}:refs/review/merge`] : [])]);
         if (await run(["rev-parse", "refs/review/head"]) !== pull.head) throw Error("PR 提交已变化。");
-        const mergeBase = await run(["merge-base", base, pull.head]);
-        if (!revision.test(mergeBase)) throw Error("无法固定 PR 的比较起点。");
+        let comparison = base;
+        if (merge) {
+          const [, first, second] = (await run(["rev-list", "--parents", "-n", "1", merge])).split(" ");
+          // 普通合并的第一父提交保留当时的目标分支。压缩合并也可以从其唯一父提交计算分叉点。
+          if (first && revision.test(first) && (second === pull.head || (!second && merge !== pull.head))) comparison = first;
+        }
+        const mergeBase = await run(["merge-base", comparison, pull.head]);
+        if (!revision.test(mergeBase) || mergeBase === pull.head) throw Error("无法固定 PR 的合并前比较起点。");
         const diffArgs = ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames"];
         const paths = (await run([...diffArgs, "--name-only", "-z", mergeBase, pull.head, "--"])).split("\0").filter(Boolean);
         const files: { path: string; diff: string }[] = [];
@@ -85,7 +98,7 @@ export function createGitHubDelivery(repo: string, api: (args: string[]) => Prom
           if (!diff) throw Error("无法读取 PR 文件的完整差异。");
           files.push({ path, diff });
         }
-        if (await read() !== base) throw Error("PR 目标分支提交已变化。");
+        if (await read() !== base && comparison === base) throw Error("PR 目标分支提交已变化。");
         return { mergeBase, files };
       } finally {
         await rm(workspace, { recursive: true, force: true });

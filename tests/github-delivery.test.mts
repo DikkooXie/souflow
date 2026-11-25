@@ -5,8 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
+import { pathToFileURL } from "node:url";
 import { openActivityStore } from "../src/audit/activity-store.mts";
-import { githubPull } from "../src/connections/github-delivery.mts";
+import { createGitHubDelivery, githubPull } from "../src/connections/github-delivery.mts";
 import { type DeliveryTracker, issueRevision, type IssueDetail, type IssuePull } from "../src/connections/issue-tracker.mts";
 import { qualitySources } from "../src/execution/codex-quality-review.mts";
 import { checkoutReviewedIssueBase, type DeliveryFailure, isolatedCheckFailed, IssueDeliveryFailed, IssueDeliverySourcesChanged, parseDeliveryPlan,
@@ -78,6 +79,48 @@ test("只展示 PR 当前提交的 CI，合并 SHA 独立记录", () => {
   commit.oid = "current";
   assert.equal(githubPull("a/b", pull).ci, "SUCCESS");
   assert.equal(githubPull("a/b", pull).mergeCommit, "merged");
+});
+
+test("同一个 PR 合并后仍能复核合并前的差异", async t => {
+  const workspace = await mkdtemp(join(tmpdir(), "souflow-pr-comparison-"));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const git = (...args: string[]) => execFileSync("git", ["-C", workspace, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+    "-c", "commit.gpgsign=false", ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git("init", "-q", "--template=", "--initial-branch=main");
+  await writeFile(join(workspace, "file.txt"), "开始\n");
+  git("add", "file.txt");
+  git("commit", "-qm", "baseline");
+  const initial = git("rev-parse", "HEAD");
+  git("switch", "-qc", "feat/review");
+  await writeFile(join(workspace, "file.txt"), "本批交付\n");
+  git("commit", "-qam", "implement feature");
+  const head = git("rev-parse", "HEAD");
+  git("update-ref", "refs/pull/2/head", head);
+  git("switch", "-q", "main");
+  await writeFile(join(workspace, "unrelated.txt"), "独立改动\n");
+  git("add", "unrelated.txt");
+  git("commit", "-qm", "advance target branch");
+  let base = git("rev-parse", "HEAD");
+  let merge: string | null = null;
+  const repo = "example/repo";
+  const publisher = createGitHubDelivery(repo, async ([endpoint]) => {
+    assert.equal(endpoint, `repos/${repo}/pulls/2`);
+    return JSON.stringify({ head: { sha: head, repo: { full_name: repo } }, base: { sha: base, repo: { full_name: repo } },
+      merged: merge !== null, merge_commit_sha: merge });
+  }, async () => ({ ...process.env, GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: `url.${pathToFileURL(workspace)}.insteadOf`,
+    GIT_CONFIG_VALUE_0: `https://github.com/${repo}.git`, GIT_CONFIG_KEY_1: "protocol.file.allow", GIT_CONFIG_VALUE_1: "always" }));
+  const pull = { number: 2, state: "OPEN", head, url: `https://github.com/${repo}/pull/2` };
+  assert.ok(publisher.reviewChanges);
+  const signal = AbortSignal.timeout(10_000);
+  const before = await publisher.reviewChanges(pull, signal);
+  assert.equal(before.mergeBase, initial);
+  assert.deepEqual(before.files.map(file => file.path), ["file.txt"]);
+  git("merge", "--no-ff", "--no-edit", "feat/review");
+  merge = git("rev-parse", "HEAD");
+  git("commit", "--allow-empty", "-qm", "advance after merge");
+  base = git("rev-parse", "HEAD");
+  await assert.rejects(publisher.reviewChanges(pull, signal), /PR 提交或关联仓库已变化/);
+  assert.deepEqual(await publisher.reviewChanges({ ...pull, state: "MERGED", mergeCommit: merge }, signal), before);
 });
 
 test("实际通过的验收测试回执去重，排除未执行和失败用例", () => {
