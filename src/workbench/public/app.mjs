@@ -427,7 +427,7 @@ function later() {
     || issuePlans.some(item => ["selecting", "reviewing", "authorizing"].includes(item.status))
     || dispatches.some(run => ["preparing", "running", "waiting"].includes(run.status))) {
     poll = setTimeout(() => void refresh(), 400);
-  } else if (member) {
+  } else {
     poll = setTimeout(() => void refresh(), 1500);
   }
 }
