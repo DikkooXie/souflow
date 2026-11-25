@@ -1,8 +1,10 @@
 import { matchesGitHubOrigin, validateGitHubRepo } from "../connections/github.mts";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { scrubAuditText } from "../audit/activity-store.mts";
-import { issueRevision, type IssueDetail, type IssueTracker } from "../connections/issue-tracker.mts";
+import { runtimeInteger } from "../config/runtime.mts";
+import { issueRevision, type IssueDetail, type IssueTracker, type PlanningReference } from "../connections/issue-tracker.mts";
 
 const exec = promisify(execFile);
 const sha = /^[a-f0-9]{40,64}$/;
@@ -17,11 +19,13 @@ type PullRequest = { number: number; state: "OPEN" | "CLOSED" | "MERGED"; title:
 type IssueSource = { number: number; title: string; body?: string; truncated?: boolean; revision?: string };
 type RelatedIssue = { number: number; url: string } & ({ status: "unavailable" }
   | { status: "read"; state: "OPEN" | "CLOSED"; assigned: boolean; source: IssueSource });
+type RelatedPullRequest = PullRequest & { head: string; mergeCommit?: string; source: IssueSource };
 export type ProjectEvidence = {
   repository?: { revision: string; commits: { revision: string; subject: string }[] };
   plan: { status: "unconfigured" | "unavailable" | "read"; path?: string };
   issueCandidates?: IssueSource[];
   relatedIssues?: RelatedIssue[];
+  relatedPullRequests?: RelatedPullRequest[];
   relatedIssueOmissions?: { count: number; examples: number[] };
   github: { status: "unconfigured" | "unavailable" | "read"; repo?: string; pullRequests?: PullRequest[] };
 };
@@ -31,30 +35,64 @@ function concise(text: string) {
   return scrubAuditText(text).replace(/[\r\n]+/g, " ").slice(0, 200);
 }
 
+function snapshotIssueSource(issue: Pick<IssueDetail, "number" | "title" | "body">): IssueSource {
+  const body = scrubAuditText(issue.body);
+  return { number: issue.number, title: concise(issue.title), body: body.slice(0, issueBodyLimit),
+    truncated: body.length > issueBodyLimit, revision: issueRevision(issue) };
+}
+
 export function snapshotIssueCandidates(issues: readonly IssueDetail[]): NonNullable<ProjectEvidence["issueCandidates"]> {
-  return issues.slice(0, historyLimit).map(issue => {
-    const body = scrubAuditText(issue.body);
-    return { number: issue.number, title: concise(issue.title), body: body.slice(0, issueBodyLimit),
-      truncated: body.length > issueBodyLimit, revision: issueRevision(issue) };
-  });
+  return issues.slice(0, historyLimit).map(snapshotIssueSource);
 }
 
 const dependencyLine = /^\s*(?:[-*+]\s+)?(?:依赖|depends on)(?=\s|[:：#]|$)/iu;
-function linkedIssueNumbers(text: string, repo: string) {
-  const urlsOrShorthand = /https:\/\/github\.com\/([a-z\d_.-]+\/[a-z\d_.-]+)\/issues\/([1-9]\d*)\b|(?<![\w/#])#([1-9]\d*)\b/gi;
+function linkedReferences(text: string, repo: string) {
+  const urlsOrShorthand = /https:\/\/github\.com\/([a-z\d_.-]+\/[a-z\d_.-]+)\/(issues|pull)\/([1-9]\d*)\b|(?<![\w/#])#([1-9]\d*)\b/gi;
   const links = text.replace(/\[[^\]\r\n]*\]\((https:\/\/github\.com\/[^)\s]+)\)/gi, "$1");
   return [...links.matchAll(urlsOrShorthand)].flatMap(match => {
-    if (match[1] ? match[1].toLowerCase() !== repo.toLowerCase() : /(?:\bPR|pull request)\s*$/i.test(links.slice(0, match.index))) return [];
-    const number = Number(match[2] ?? match[3]);
-    return Number.isSafeInteger(number) ? [number] : [];
+    if (match[1] && match[1].toLowerCase() !== repo.toLowerCase()) return [];
+    const number = Number(match[3] ?? match[4]);
+    const pull = match[2]?.toLowerCase() === "pull" || (!match[1] && /(?:\bPR|pull request)\s*$/i.test(links.slice(0, match.index)));
+    return Number.isSafeInteger(number) ? [{ number, pull }] : [];
   });
 }
 
-export async function readRelatedIssues(tracker: Pick<IssueTracker, "repo" | "read">, candidates: readonly IssueDetail[], planText = "") {
+export async function readRelatedIssues(tracker: Pick<IssueTracker, "repo" | "read" | "readPlanningReferences">,
+  candidates: readonly IssueDetail[], planText = "") {
   const known = new Set(candidates.map(issue => issue.number));
   const lines = [planText, ...candidates.map(issue => issue.body)].flatMap(text => text.split(/\r?\n/));
   const ordered = [...lines.filter(line => dependencyLine.test(line)), ...lines.filter(line => !dependencyLine.test(line))];
-  const numbers = [...new Set(ordered.flatMap(line => linkedIssueNumbers(line, tracker.repo)))].filter(number => !known.has(number));
+  const links = ordered.flatMap(line => linkedReferences(line, tracker.repo));
+  if (tracker.readPlanningReferences) {
+    const limit = runtimeInteger("SOULFLOW_PROJECT_GITHUB_REFERENCE_LIMIT", 1, 32);
+    const numbers = [...new Set(links.map(link => link.number))].filter(number => !known.has(number));
+    const batch = numbers.slice(0, limit);
+    const resolved = batch.length ? await tracker.readPlanningReferences(batch).catch(() => undefined) : undefined;
+    const issues: RelatedIssue[] = [];
+    const pullRequests: RelatedPullRequest[] = [];
+    for (const number of batch) {
+      const found: PlanningReference | undefined = resolved?.get(number);
+      if (found?.number === number && found.kind === "pull") {
+        const { head, mergeCommit, title, body, state } = found;
+        const source = snapshotIssueSource(found);
+        source.revision = createHash("sha256").update(JSON.stringify([title, body, state, head, mergeCommit])).digest("hex");
+        pullRequests.push({ number, url: `https://github.com/${tracker.repo}/pull/${number}`,
+          title: concise(title), state, head, ...(mergeCommit ? { mergeCommit } : {}), source });
+        continue;
+      }
+      const url = `https://github.com/${tracker.repo}/${links.some(link => link.number === number && link.pull) ? "pull" : "issues"}/${number}`;
+      if (found?.number === number && found.kind === "issue") {
+        issues.push({ number, url: `https://github.com/${tracker.repo}/issues/${number}`,
+          status: "read", state: found.state, assigned: found.assigned, source: snapshotIssueSource(found) });
+      } else {
+        issues.push({ number, url, status: "unavailable" });
+      }
+    }
+    return { issues, pullRequests, ...(numbers.length > limit ? {
+      omissions: { count: numbers.length - limit, examples: numbers.slice(limit, limit + historyLimit) },
+    } : {}) };
+  }
+  const numbers = [...new Set(links.filter(link => !link.pull).map(link => link.number))].filter(number => !known.has(number));
   const issues = await Promise.all(numbers.slice(0, historyLimit).map(async (number): Promise<RelatedIssue> => {
     const url = `https://github.com/${tracker.repo}/issues/${number}`;
     try {
@@ -66,7 +104,7 @@ export async function readRelatedIssues(tracker: Pick<IssueTracker, "repo" | "re
     } catch { /* 只记录不可读状态，连接凭据与远端错误留在适配器边界。 */ }
     return { number, url, status: "unavailable" };
   }));
-  return { issues, ...(numbers.length > historyLimit ? {
+  return { issues, pullRequests: [] as RelatedPullRequest[], ...(numbers.length > historyLimit ? {
     omissions: { count: numbers.length - historyLimit, examples: numbers.slice(historyLimit, historyLimit * 2) },
   } : {}) };
 }

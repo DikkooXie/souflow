@@ -199,6 +199,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         if (context.evidence.github.repo?.toLowerCase() === issueTracker.repo.toLowerCase()) {
           const related = await readRelatedIssues(issueTracker, issues ?? [], context.planText);
           context.evidence.relatedIssues = related.issues;
+          if (related.pullRequests.length) context.evidence.relatedPullRequests = related.pullRequests;
           if (related.omissions) context.evidence.relatedIssueOmissions = related.omissions;
         }
         return context;

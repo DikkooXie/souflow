@@ -339,7 +339,7 @@ function renderProjectSources(flow) {
   const project = flow.project;
   projectContext.hidden = !project;
   const key = JSON.stringify([flow.id, project?.repository?.revision, project?.plan, project?.github,
-    project?.relatedIssues, project?.relatedIssueOmissions]);
+    project?.relatedIssues, project?.relatedPullRequests, project?.relatedIssueOmissions]);
   if (projectContext.dataset.key === key) return;
   projectContext.dataset.key = key;
   projectContext.dataset.flow = flow.id;
@@ -364,8 +364,19 @@ function renderProjectSources(flow) {
   for (const issue of project.relatedIssues ?? []) {
     const summary = issue.status === "read" ? `${issue.source.title} · ${issue.state === "CLOSED" ? "已关闭" : issue.assigned ? "已分配" : "开放"} · ${issue.source.revision.slice(0, 8)}`
       : "正文未能读取";
-    const link = node("a", "", `关联 Issue #${issue.number} · ${summary}`);
+    const label = issue.status === "read" ? "关联 Issue" : "关联条目";
+    const link = node("a", "", `${label} #${issue.number} · ${summary}`);
     link.href = issue.url;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    const item = node("li");
+    item.append(link);
+    projectSources.append(item);
+  }
+  for (const pr of project.relatedPullRequests ?? []) {
+    const label = { OPEN: "开放", MERGED: "已合并", CLOSED: "已关闭" }[pr.state];
+    const link = node("a", "", `关联 PR #${pr.number} · ${pr.title} · ${label} · ${(pr.mergeCommit ?? pr.head).slice(0, 8)}`);
+    link.href = pr.url;
     link.target = "_blank";
     link.rel = "noreferrer";
     const item = node("li");
@@ -374,7 +385,7 @@ function renderProjectSources(flow) {
   }
   if (project.relatedIssueOmissions) {
     const { count, examples } = project.relatedIssueOmissions;
-    projectSources.append(node("li", "", `${count} 条关联 Issue 超出本轮资料范围，包括 ${examples.map(id => `#${id}`).join("、")}`));
+    projectSources.append(node("li", "", `${count} 条关联条目超出本轮资料范围，包括 ${examples.map(id => `#${id}`).join("、")}`));
   }
 }
 

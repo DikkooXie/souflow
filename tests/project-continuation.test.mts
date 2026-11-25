@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import type { PlanningReference } from "../src/connections/issue-tracker.mts";
 import { createConversationFlows, makePhasePrompt, phases } from "../src/planning/conversation-flow.mts";
 import { createProjectContextReader, readRelatedIssues, snapshotIssueCandidates } from "../src/planning/project-context.mts";
 
@@ -60,6 +61,46 @@ test("续推规划能读取冻结的 Issue 正文与截断信号，正文在传�
     assert.match(prompt, /"truncated":true/);
     assert.doesNotMatch(prompt, /example-password/);
   }
+});
+
+test("冻结混合 GitHub 引用时保留真实类型，PR 不占用 Issue 候选", async () => {
+  const issue = (number: number) => ({ number, title: `工单 ${number}`, state: "CLOSED" as const,
+    assignees: [], body: `工单依据 ${number}`, pulls: [], url: `https://github.com/a/b/issues/${number}` });
+  const candidates = [{ ...issue(67), body: "依赖 #64\n相关 #60、#61、#62、#75、#76、#55\n[他仓 PR](https://github.com/other/repo/pull/15)" }];
+  const texts = "已验 PR #42 与 [旧 PR](https://github.com/a/b/pull/80)。相关 #47、#43、#44、#78、#66、#99。";
+  const observed: number[][] = [];
+  let head = "a".repeat(40);
+  const tracker = { repo: "a/b", read: async () => assert.fail("混合引用应使用连接层类型查询"),
+    async readPlanningReferences(numbers: readonly number[]) {
+      observed.push([...numbers]);
+      const rows = new Map<number, PlanningReference>();
+      for (const number of numbers) {
+        if ([60, 61, 62, 75, 76, 42, 78, 80].includes(number)) {
+          rows.set(number, { number, kind: "pull", title: "旧 PR", body: "真实交付正文\n密码: example-password",
+            state: "MERGED", head, mergeCommit: "b".repeat(40) });
+        } else if (number !== 99) rows.set(number, { ...issue(number), kind: "issue", assigned: false });
+      }
+      return rows;
+    },
+  };
+  const result = await readRelatedIssues(tracker, candidates, texts);
+  assert.equal(observed.length, 1);
+  assert.equal(observed[0]?.[0], 64);
+  assert.equal(observed[0]?.length, 15);
+  assert.ok(!observed[0]?.includes(15) && !observed[0]?.includes(67));
+  assert.equal(result.issues.find(row => row.number === 55)?.status, "read");
+  assert.equal(result.issues.find(row => row.number === 99)?.status, "unavailable");
+  assert.equal(result.issues.some(row => row.number === 60), false);
+  const pr = result.pullRequests.find(row => row.number === 60);
+  assert.ok(pr);
+  assert.equal(pr.mergeCommit, "b".repeat(40));
+  assert.match(pr.source.body ?? "", /真实交付正文/);
+  assert.doesNotMatch(pr.source.body ?? "", /example-password/);
+  assert.deepEqual(snapshotIssueCandidates(candidates).map(item => item.number), [67]);
+  assert.equal(result.omissions, undefined);
+  head = "c".repeat(40);
+  const reread = await readRelatedIssues(tracker, candidates, texts);
+  assert.notEqual(reread.pullRequests.find(row => row.number === 60)?.source.revision, pr.source.revision);
 });
 
 const exec = promisify(execFile);
