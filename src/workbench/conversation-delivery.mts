@@ -346,10 +346,18 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
     },
     replanFeedback(flow: Flow, actor: string) {
       const p = [...proposals.values()].reverse().find(item => item.flowId === flow.id && item.actor === actor && valid(item, flow));
-      if (p?.status !== "blocked" || p.approvedAt !== undefined || !p.error) return;
-      const sourcePaths = [...new Set((p.quality?.sourceChecks ?? []).flatMap(check =>
+      if (!p || p.approvedAt !== undefined || !p.error) return;
+      const partialBlocks = p.status === "uncertain" && p.sourceReviewRequired && p.sourceError
+        && flow.project?.repository?.revision === p.base
+        ? (p.quality?.sourceChecks ?? p.sourceFindings ?? []).filter(check => check.status === "block" && check.revision === p.base
+          && p.drafts?.some(ticket => ticket.id === check.ticket && JSON.stringify(ticketPaths(ticket)) === JSON.stringify(check.paths)))
+        : [];
+      if (p.status !== "blocked" && !partialBlocks.length) return;
+      const checks = p.status === "blocked" ? p.quality?.sourceChecks ?? [] : partialBlocks;
+      const sourcePaths = [...new Set(checks.flatMap(check =>
         check.evidence.flatMap(({ ref }) => ref.startsWith("repo:") && check.paths.includes(ref.slice(5)) ? [ref.slice(5)] : [])))];
-      return { batchId: p.id, findings: p.error, ...(sourcePaths.length ? { sourcePaths } : {}) };
+      const findings = [p.error, ...partialBlocks.map(check => `${check.ticket} 源码：${check.summary}`)].join("\n");
+      return { batchId: p.id, findings, ...(sourcePaths.length ? { sourcePaths } : {}) };
     },
     locks(flowId: string) { return [...proposals.values()].some(p => p.flowId === flowId
       && p.approvedAt !== undefined); },
