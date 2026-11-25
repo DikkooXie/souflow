@@ -8,6 +8,7 @@ import { setImmediate } from "node:timers/promises";
 import { issueRevision, type DeliveryTracker, type IssueDetail } from "../src/connections/issue-tracker.mts";
 import { currentDevelopmentPlan } from "../src/planning/conversation-flow.mts";
 import { createGitHubSelector, readGitHubSelection } from "../src/planning/github-selection.mts";
+import { type PlannedTicket, qualityPacket, reviewQuality } from "../src/planning/dispatch-quality.mts";
 import { snapshotIssueCandidates } from "../src/planning/project-context.mts";
 import { createConversationDelivery, type IssueProposal } from "../src/workbench/conversation-delivery.mts";
 import { type Claim, createIssueDispatch } from "../src/workbench/issue-dispatch.mts";
@@ -314,6 +315,89 @@ test("源码引用超出复核预算时保留重试入口，不生成授权卡",
     assert.deepEqual(service.cards([flow], "member"), []);
     assert.equal(service.begin(flow, "首版", true), true);
   } finally { await service.close(); }
+});
+
+test("保留原未授权草稿，十张工单分别核对固定源码，缺一份即不能授权", { timeout: 5000 }, async t => {
+  const flow = await readyQualityFlow("继续实施已经确认的需求");
+  const base = "a".repeat(40);
+  flow.project = { repository: { revision: base, commits: [] }, plan: { status: "read" }, github: { status: "read" } };
+  const plan = currentDevelopmentPlan(flow);
+  assert.ok(plan);
+  const drafts: PlannedTicket[] = Array.from({ length: 10 }, (_, index) => ({ id: `T${index + 1}`, title: `工单 ${index + 1}`,
+    instructions: "单独回读一次交付结果。", dependsOn: index === 7 ? ["T7"] : [], criteria: ["AC-1"], validation,
+    paths: [`src/feature-${index}.mts`], sources: [`tests/feature-${index}.test.mts`, `src/related-${index}.mts`],
+    delivery: { outcome: index === 6 ? "提供已验证的回执查询接口" : `完成第 ${index + 1} 项验收`, priorityReason: "按确认的计划顺序安排",
+      prerequisites: index === 7 ? [{ ticket: "T7", reason: "读取上游新增的回执查询接口。" }] : [] },
+  }));
+  for (const [label, missing, legacyPending] of [
+    ["十张均取得源码回执", undefined, false], ["某工单少读源码", drafts[6]?.sources?.[1], false],
+    ["旧待授权卡必须补复核", undefined, true],
+  ] as const) await t.test(label, async () => {
+    const previousId = "previous-draft";
+    const legacyQuality = legacyPending ? await reviewQuality(qualityPacket(flow, base, previousId, drafts),
+      { id: previousId, base, items: drafts }, passingQualityReview, new AbortController().signal) : undefined;
+    const previous: IssueProposal = { id: "previous-draft", flowId: flow.id, actor: "member", planId: plan.id, version: plan.version,
+      base, items: [], drafts, createdAt: 1, ...(legacyQuality ? { status: "pending", quality: legacyQuality }
+        : { status: "uncertain", error: "工单校验未通过：部分源码无法装入复核资料，请缩小范围后重新选单。" }) };
+    const checkpoint = new Map([[previous.id, previous]]);
+    const reads: string[][] = [];
+    const seen: string[] = [];
+    let active = 0;
+    let maximum = 0;
+    const tracker: DeliveryTracker = { repo: "a/b", candidates: async () => [], account: async () => "member",
+      read: async () => assert.fail(), assign: async () => assert.fail(),
+      creation: { create: async () => assert.fail("未授权不得建单"), findCreated: async () => [] },
+      delivery: { checkout: async () => assert.fail(), publish: async () => assert.fail(), find: async () => undefined } };
+    const service = createConversationDelivery({ permits: () => true, suggest: async () => assert.fail("已冻结草稿无需重新选单"),
+      claimApproved: async () => assert.fail("未授权不得认领"), }, {
+      load: () => [...checkpoint.values()], save(id, item) { checkpoint.set(id, structuredClone(item)); return true; },
+    }, async () => assert.fail("不生成别的草稿"), async (packet, signal) => {
+      assert.equal(packet.sourceReviewMode, "per-ticket");
+      assert.equal(packet.tickets.length, 10);
+      return passingQualityReview(packet, signal);
+    }, async (revision, paths) => {
+      assert.equal(revision, base);
+      assert.equal(paths.length, 3);
+      reads.push(paths);
+      return Object.fromEntries(paths.filter(path => path !== missing).map(path => [path, `固定源码 ${path}`]));
+    }, { draft: async () => assert.fail("不生成别的工单"), publish: async () => assert.fail("未授权不得建单"),
+      connection: () => tracker, sourceReview: { concurrency: 2, async reviewer(packet) {
+        active++;
+        maximum = Math.max(maximum, active);
+        seen.push(packet.ticket.id);
+        assert.equal(packet.revision, base);
+        assert.equal(packet.plan?.id, plan.id);
+        assert.equal(packet.plan?.version, plan.version);
+        assert.deepEqual(packet.upstream.map(parent => parent.delivery?.outcome), packet.ticket.id === "T8" ? ["提供已验证的回执查询接口"] : []);
+        assert.equal(Object.keys(packet.references).length, 3);
+        await setImmediate();
+        active--;
+        const ref = `repo:${packet.ticket.paths[0]}`;
+        return JSON.stringify({ status: "pass", summary: "编辑范围支持验收", evidence: [{ ref, quote: packet.references[ref] }] });
+      } } });
+    try {
+      assert.deepEqual(service.cards([flow], "member"), []);
+      assert.equal(await service.answer(previous.id, "member", { authorization: "授权创建 Issue、执行并开草稿 PR" }, [flow]), 409);
+      assert.equal(service.begin(flow, "首版", true), true);
+      while (["selecting", "reviewing"].includes(checkpoint.get(previous.id)?.status ?? "")) await setImmediate();
+      const recovered = checkpoint.get(previous.id);
+      assert.deepEqual(recovered?.drafts, drafts);
+      assert.equal(checkpoint.size, 1);
+      assert.equal(maximum, 2);
+      if (missing) {
+        assert.equal(recovered?.status, "uncertain");
+        assert.ok(recovered.error?.includes(`T7 的固定源码未完整读入（${missing}）`));
+        assert.deepEqual(recovered.quality?.sourceChecks?.map(item => item.ticket), ["T1", "T2", "T3", "T4", "T5", "T6", "T8"]);
+        assert.ok(!seen.includes("T7"));
+        assert.deepEqual(service.cards([flow], "member"), []);
+      } else {
+        assert.equal(recovered?.status, "pending");
+        assert.equal(reads.flat().length, 30);
+        assert.deepEqual(recovered.quality?.sourceChecks?.map(item => item.ticket), drafts.map(item => item.id));
+        assert.equal(service.cards([flow], "member")[0]?.id, previous.id);
+      }
+    } finally { await service.close(); }
+  });
 });
 
 test("Issue 正文在规划后变化时不进入选单或授权", async () => {
