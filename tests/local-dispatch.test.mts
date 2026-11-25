@@ -23,11 +23,12 @@ const draft = [
 ];
 const criteria = ["AC-1", "AC-2", "AC-3"];
 
-test("GitHub 拆单从固定提交区分只读资料和编辑文件，来源错误只重试一次", async t => {
+test("GitHub 拆单按固定提交校验来源与编辑范围，草稿错误只重试一次", async t => {
   const repo = await mkdtemp(join(tmpdir(), "souflow-github-readonly-"));
   t.after(() => rm(repo, { recursive: true, force: true }));
   const git = async (...args: string[]) => (await exec("git", ["-C", repo, ...args])).stdout.trim();
   const editable = "src/feature.mts";
+  const secondEditable = "src/integration.mts";
   const large = "src/reader.mts";
   const additional = Array.from({ length: 4 }, (_, index) => `src/support-${index}.mts`);
   await git("init", "-q");
@@ -35,6 +36,7 @@ test("GitHub 拆单从固定提交区分只读资料和编辑文件，来源错�
   await mkdir(join(repo, "src"));
   await writeFile(join(repo, guide), "Frozen guide");
   await writeFile(join(repo, editable), "export const enabled = true;");
+  await writeFile(join(repo, secondEditable), "export const active = false;");
   const largeBytes = codeEditFileBytes() + 1;
   await writeFile(join(repo, large), "a".repeat(largeBytes));
   await Promise.all(additional.map(path => writeFile(join(repo, path), "a".repeat(qualitySourceFileBytes))));
@@ -57,14 +59,14 @@ test("GitHub 拆单从固定提交区分只读资料和编辑文件，来源错�
     delivery: { outcome: "用户确认纪要后收到一条待办", priorityReason: "独立交付确认行为", prerequisites: [] } };
   const prompts: string[] = [];
   const sourceInputMaxBytes = qualitySourceInputBytes({});
-  let responses = [{ ...ticket, sources: ["docs/later.md"] }, ticket];
+  let responses: unknown[] = [{ ...ticket, sources: ["docs/later.md"] }, ticket];
   const dispatch = createLocalDispatch(repo, 2, {
     split({ prompt }) {
       prompts.push(prompt);
       const response = responses.shift();
       assert.ok(response);
       return { finished: Promise.resolve("completed"), close() {}, answerQuestions: () => false,
-        output: () => JSON.stringify({ tickets: [response], batchAcceptance: [] }) };
+        output: () => JSON.stringify({ tickets: Array.isArray(response) ? response : [response], batchAcceptance: [] }) };
     },
     qualityReviewer: passingQualityReview,
     sourceInputMaxBytes,
@@ -74,10 +76,11 @@ test("GitHub 拆单从固定提交区分只读资料和编辑文件，来源错�
   assert.deepEqual(planned.tickets[0]?.sources, [guide, large]);
   assert.deepEqual(planned.tickets[0]?.paths, [editable]);
   const snapshot = JSON.parse(prompts[0]?.split("\n\n").at(-1) ?? "{}");
-  assert.deepEqual(new Set(snapshot.availableSources.map(([path]: [string, number]) => path)), new Set([guide, editable, large, ...additional]));
+  assert.deepEqual(new Set(snapshot.availableSources.map(([path]: [string, number]) => path)),
+    new Set([guide, editable, secondEditable, large, ...additional]));
   assert.equal(new Map(snapshot.availableSources).get(large), largeBytes);
   assert.equal(snapshot.sourceBudgetBytes, sourceInputMaxBytes);
-  assert.deepEqual(snapshot.availableEditPaths, [editable]);
+  assert.deepEqual(snapshot.availableEditPaths, [editable, secondEditable]);
   assert.ok(prompts[1]?.startsWith(prompts[0] ?? ""));
   assert.match(prompts[1] ?? "", /T1 的 sources/);
   assert.equal(prompts.length, 2);
@@ -111,6 +114,25 @@ test("GitHub 拆单从固定提交区分只读资料和编辑文件，来源错�
   responses = [missingAcceptance, missingAcceptance];
   await assert.rejects(dispatch.planGitHub(flow, "still-missing-acceptance"), /missing-criteria:T1/);
   assert.equal(prompts.length, 11);
+
+  const dependentTicket = { ...ticket, id: "T2", dependsOn: ["T1"],
+    delivery: { outcome: "用户可查看已确认的待办", priorityReason: "沿用已确认待办", prerequisites: [
+      { ticket: "T1", reason: "需要上游生成已确认待办" },
+    ] } };
+  const conflicts = [ticket, dependentTicket];
+  responses = [conflicts, [ticket, { ...dependentTicket, editPaths: [secondEditable] }]];
+  const disjoint = await dispatch.planGitHub(flow, "fix-edit-overlap");
+  assert.deepEqual(disjoint.tickets.map(item => item.paths), [[editable], [secondEditable]]);
+  assert.deepEqual(disjoint.tickets[1]?.dependsOn, ["T1"]);
+  assert.ok(prompts[12]?.startsWith(prompts[11] ?? ""));
+  assert.match(prompts[12] ?? "", /src\/feature\.mts.*T1.*T2/);
+  assert.equal(prompts.length, 13);
+
+  const parallelConflicts = [ticket, { ...dependentTicket, dependsOn: [],
+    delivery: { ...dependentTicket.delivery, prerequisites: [] } }];
+  responses = [parallelConflicts, conflicts];
+  await assert.rejects(dispatch.planGitHub(flow, "persistent-edit-overlap"), /src\/feature\.mts.*T1.*T2/);
+  assert.equal(prompts.length, 15);
 });
 
 test("local dispatch requires criterion coverage, an acyclic graph and approved evidence", () => {
