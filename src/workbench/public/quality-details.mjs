@@ -45,6 +45,8 @@ export function renderQualityDetails(details, node, quality, batchAcceptance = [
 }
 
 const reviewStates = { pass: "通过", block: "有阻塞", incomplete: "证据不完整" };
+const repairStates = { queued: "已授权，等待续修", running: "正在续修", publishing: "正在核对续修发布",
+  complete: "已更新原 PR", failed: "续修待核对", linked: "已关联修复工单" };
 
 export function renderDeliveryReviews(details, node, flowId, entries) {
   details.hidden = !entries.length;
@@ -61,6 +63,18 @@ export function renderDeliveryReviews(details, node, flowId, entries) {
     const current = entry.reviews.find(review => review.current);
     const state = entry.running ? "正在复核" : current ? reviewStates[current.status] : entry.unavailable ? "证据暂不可用" : "等待复核";
     details.append(node("p", "", `Issue #${entry.number} · PR #${entry.pull} · ${entry.head.slice(0, 8)} · ${state}`));
+    if (entry.repairUnavailable) details.append(node("p", "", entry.repairUnavailable));
+    for (const repair of entry.repairs ?? []) {
+      const label = node("p", "", `修复 ${repair.head.slice(0, 8)} · ${repairStates[repair.state]}`);
+      if (repair.url && repair.issue) {
+        const link = node("a", "", ` · Issue #${repair.issue}`);
+        link.href = repair.url;
+        link.target = "_blank";
+        link.rel = "noopener";
+        label.append(link);
+      }
+      details.append(label);
+    }
     for (const review of [...entry.reviews].reverse()) {
       const row = node("details");
       const when = review.current ? "当前" : "历史";

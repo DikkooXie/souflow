@@ -1,5 +1,6 @@
 import { deliveryPath } from "../execution/local-code-changes.mts";
 
+export const approvedReviewFixInstructionLimit = 4000;
 export type ApprovedReviewFix = { issue: number; pull: number; head: string; base: string; files: string[]; instructions: string };
 
 export function readApprovedReviewFix(raw: string): ApprovedReviewFix {
@@ -8,7 +9,7 @@ export function readApprovedReviewFix(raw: string): ApprovedReviewFix {
     || ![value.issue, value.pull].every(number => Number.isSafeInteger(number) && number > 0)
     || typeof value.head !== "string" || !/^[a-f0-9]{40}$/.test(value.head)
     || typeof value.base !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,199}$/.test(value.base) || value.base.includes("..")
-    || typeof value.instructions !== "string" || !value.instructions.trim() || value.instructions.length > 4000
+    || typeof value.instructions !== "string" || !value.instructions.trim() || value.instructions.length > approvedReviewFixInstructionLimit
     || !Array.isArray(value.files) || !value.files.length || value.files.length > 16
     || new Set(value.files).size !== value.files.length
     || !value.files.every((path: unknown) => typeof path === "string" && deliveryPath.test(path))) {

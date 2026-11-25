@@ -9,11 +9,13 @@ import type { PatchIssue } from "../execution/local-code-changes.mts";
 import type { DeliveryReviewReceipt } from "../planning/delivery-review.mts";
 import { qualityBindingCurrent, type QualityBinding } from "../planning/dispatch-quality.mts";
 import type { ApprovedReviewFix } from "./approved-review-fix.mts";
+import { readRepairDecision, repairDecisionCard, repairFromReceipt } from "./delivery-review-repair.mts";
 import type { ReviewIssueDelivery } from "./github-delivery-review.mts";
-import { hasPublicationMarker } from "./planned-issue-publication.mts";
+import { type createPlannedIssuePublication, hasPublicationMarker } from "./planned-issue-publication.mts";
 
 export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; prepare: PrepareIssue; pollMs: number; conversation?: boolean;
   requireQuality?: boolean; recoverFailedIssue?: number; reviewFix?: ApprovedReviewFix; review?: ReviewIssueDelivery;
+  publishRepair?: ReturnType<typeof createPlannedIssuePublication>;
   reviewScopeCurrent?: (claim: Claim) => boolean };
 
 function publisher(tracker: IssueTracker) {
@@ -21,6 +23,7 @@ function publisher(tracker: IssueTracker) {
 }
 
 type Remote = IssueSummary & Pick<IssueDetail, "pulls"> & { syncedAt: number };
+type ReviewRepairDecision = { id: string; head: string; decision: "approved" | "declined"; at: number; issue?: number; completedHead?: string };
 export type Claim = Remote & {
   requestId: string; claimedBy: string; account: string; phase: keyof typeof phases;
   sessionId?: string; report?: string;
@@ -33,7 +36,8 @@ export type Claim = Remote & {
   deliveryReviews?: { observed: string; receipt: DeliveryReviewReceipt }[];
   claimUncertain?: boolean;
   failure?: DeliveryFailure; retryCount?: number;
-  reviewFix?: { from: string; state: "running" | "publishing" | "complete" | "failed"; pendingHead?: string; base?: string };
+  reviewFix?: { from: string; state: "running" | "publishing" | "complete" | "failed"; pendingHead?: string; base?: string; repairId?: string };
+  reviewRepairs?: ReviewRepairDecision[];
 };
 const phases = { claiming: "正在认领", waiting: "等待上游 PR 合并", developing: "Codex 正在开发与测试", publishing: "正在推送并创建 PR", submitted: "已提交 PR", deliveryFailed: "开发或测试失败", running: "Codex 正在核验", done: "核验完成", conflict: "认领冲突", uncertain: "待核对", failed: "核验失败" };
 const stageNames = { preflight: "工单状态核对", checkout: "工作区准备", codex: "Codex 运行", dependencies: "依赖安装",
@@ -74,6 +78,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       ...(c.failure ? { failure: c.failure } : {}), ...(c.retryCount ? { retryCount: c.retryCount } : {}),
       ...(patchCheck ? { patchCheck } : {}),
       ...(c.reviewFix ? { reviewFix: c.reviewFix } : {}),
+      ...(event?.startsWith("review-repair-") ? { repair: c.reviewRepairs?.at(-1) } : {}),
       ...(event === "account-assigned" ? { codexAccount: c.accountAssignment } : {}),
       ...(c.pull ? { pull: c.pull.number, ci: c.pull.ci, merge: c.pull.mergeCommit, state: c.pull.state } : {}), actor: c.claimedBy, githubAccount: c.account, phase: c.phase, session: c.sessionId,
     } } : undefined)) throw new IssueActionError(503, "无法保存 GitHub 工单状态。");
@@ -84,6 +89,27 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     c.checked?.head === c.pull?.head ? c.checked : undefined]);
   const activeReviewScope = (c: Claim) => c.observedIssueRevision === c.approval?.issueRevision && c.observedReviewLink === true
     && (delivery?.reviewScopeCurrent?.(c) ?? true);
+  function repairProposal(c: Claim) {
+    if (!delivery?.publishRepair || !activeReviewScope(c) || !permits(c.claimedBy)) return;
+    const connection = memberTrackers.get(c.claimedBy) ?? tracker;
+    const remote = publisher(connection);
+    if (!connection.creation || !remote?.checkoutPublished || !remote.updatePublished) return;
+    const observed = reviewVersion(c);
+    const receipt = c.deliveryReviews?.find(item => item.observed === observed)?.receipt;
+    return receipt && repairFromReceipt(connection.repo, c, receipt);
+  }
+  function currentRepair(c: Claim) {
+    const proposal = repairProposal(c);
+    return proposal && "fix" in proposal ? proposal : undefined;
+  }
+  function repairDecisions(actor: string) {
+    return [...claims.values()].flatMap(c => {
+      if (c.claimedBy !== actor || c.reviewFix?.from === c.pull?.head) return [];
+      const repair = currentRepair(c);
+      if (!repair || c.reviewRepairs?.some(entry => entry.head === repair.fix.head)) return [];
+      return [{ repair, claim: c }];
+    });
+  }
   function queueReview(c: Claim, connection: IssueTracker, remote: NonNullable<ReturnType<typeof publisher>>, retry: boolean) {
     const review = delivery?.review;
     if (!review || !remote.reviewChanges || !c.approval?.quality || !c.pull?.head || reviewJobs.size >= maxActive || reviewJobs.has(c.number)) return;
@@ -134,7 +160,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   function snapshot(canClaim: boolean) {
     return { repo: tracker.repo, canClaim: canClaim && !delivery?.conversation, ...(delivery ? { deliveryEnabled: true, conversationEnabled: delivery.conversation === true } : {}), items: [
       ...[...claims.values()].reverse().map(({ requestId: _id, account: _account, phase, delivery, pull, approval,
-        checked: _checked, deliveryReviews: _reviews, observedIssueRevision: _issueRevision, observedReviewLink: _reviewLink, ...item }) => ({ ...item,
+        checked: _checked, deliveryReviews: _reviews, reviewRepairs: _repairs,
+        observedIssueRevision: _issueRevision, observedReviewLink: _reviewLink, ...item }) => ({ ...item,
         ...(delivery ? { dependsOn: delivery.dependsOn, mode: "delivery" } : {}),
         ...(approval ? { flowId: approval.flowId } : {}),
         ...(item.failure ? { failureMessage: `${stageNames[item.failure.stage]} · ${reasonNames[item.failure.reason]}` } : {}),
@@ -209,25 +236,41 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   }
   function confirmReviewFix(c: Claim, pull: IssuePull, target: DeliveryTarget) {
     const state = c.reviewFix;
-    if (state?.state !== "publishing" || !state.pendingHead || pull.head !== state.pendingHead
+    const head = pull.head;
+    if (state?.state !== "publishing" || !state.pendingHead || head !== state.pendingHead
       || !state.base || pull.baseName !== state.base || pull.number !== c.pull?.number) return;
-    save({ ...c, target: { ...target, head: pull.head, base: state.base }, pull, reviewFix: { ...state, state: "complete" } }, "review-fix-published");
+    const reviewRepairs = state.repairId ? c.reviewRepairs?.map(item => item.id === state.repairId ? { ...item, completedHead: head } : item) : c.reviewRepairs;
+    save({ ...c, target: { ...target, head, base: state.base }, pull, reviewFix: { ...state, state: "complete" },
+      ...(reviewRepairs ? { reviewRepairs } : {}) }, "review-fix-published");
   }
-  function dispatchReviewFix() {
-    const fix = delivery?.reviewFix;
-    if (!fix || !delivery.conversation || jobs.size >= maxActive) return;
+  function authorizedRepair(retry: boolean) {
+    for (const claim of claims.values()) {
+      const repair = currentRepair(claim);
+      const decision = repair && claim.reviewRepairs?.find(item => item.id === repair.id && item.decision === "approved");
+      if (!repair || !decision) continue;
+      const started = claim.reviewFix;
+      // 建单回执未知时只能续办同一次发布。执行开始后沿用原有的单次续修规则。
+      const recoverable = retry && started?.repairId === repair.id && started.state === "failed" && decision.issue === undefined;
+      if (started?.from !== repair.fix.head || recoverable) return { repair, decision };
+    }
+  }
+  function dispatchReviewFix(retry = false) {
+    if (!delivery?.conversation || jobs.size >= maxActive) return;
+    const authorized = authorizedRepair(retry);
+    const fix = authorized?.repair.fix ?? delivery.reviewFix;
+    if (!fix) return;
     const c = claims.get(fix.issue);
     const target = c?.target;
     const approved = c?.delivery;
     if (c?.phase !== "submitted" || !target || target.head !== fix.head || c.pull?.number !== fix.pull
       || (target.base && target.base !== fix.base)
-      || c.reviewFix?.from === fix.head || !approved?.baseRevision || !qualityBindingCurrent(c.approval?.quality)
+      || (!authorized && c.reviewFix?.from === fix.head) || !approved?.baseRevision || !qualityBindingCurrent(c.approval?.quality)
       || !fix.files.every(path => approved.files.includes(path)) || !permits(c.claimedBy)) return;
     const connection = memberTrackers.get(c.claimedBy) ?? tracker;
     const remote = publisher(connection);
     if (!remote?.checkoutPublished || !remote.updatePublished) return;
     const update = remote.updatePublished;
-    const state = { from: fix.head, state: "running" as const };
+    const state = { from: fix.head, state: "running" as const, ...(authorized ? { repairId: authorized.repair.id } : {}) };
     save({ ...c, reviewFix: state }, "review-fix-started");
     const current = () => claims.get(c.number) ?? c;
     const verify = async () => {
@@ -236,7 +279,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       ]);
       if (account.toLowerCase() !== c.account.toLowerCase() || !stillAssignee(c, issue)
         || !issue.pulls.some(item => item.number === fix.pull) || pull?.state !== "OPEN"
-        || pull.head !== fix.head || pull.baseName !== fix.base) {
+        || pull.head !== fix.head || pull.baseName !== fix.base
+        || (authorized && currentRepair(current())?.id !== authorized.repair.id)) {
         throw Error("PR 或原工单授权已变化。");
       }
       return pull.baseName;
@@ -244,6 +288,15 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     const job = (async () => {
       try {
         const base = await verify();
+        if (authorized) {
+          const issued = await delivery.publishRepair?.(authorized.repair.batch, connection, abort.signal, c.account);
+          const issue = issued?.get("REPAIR");
+          if (issue?.state !== "OPEN") throw Error("关联修复 Issue 未确认或已关闭。");
+          const latest = current();
+          const reviewRepairs = latest.reviewRepairs?.map(item => item.id === authorized.repair.id ? { ...item, issue: issue.number } : item) ?? [];
+          save({ ...latest, reviewRepairs }, "review-repair-linked");
+          await verify();
+        }
         const prepared = await delivery.prepare({
           number: c.number, spec: { ...approved, files: fix.files, instructions: `只处理本轮评审要求。\n${fix.instructions}` },
           branch: target.branch, upstream: [], publisher: remote, reviewTarget: { ...target, base: fix.base },
@@ -319,9 +372,9 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       catch { claims.set(c.number, { ...stopped, phase: "uncertain" }); }
     }
   }
-  function dispatchReady() {
+  function dispatchReady(retryRepairs = false) {
     if (!delivery || abort.signal.aborted) return;
-    dispatchReviewFix();
+    dispatchReviewFix(retryRepairs);
     for (const c of claims.values()) {
       if (jobs.size >= maxActive) break;
       if (c.phase !== "waiting" || !c.delivery || c.requestId === pending?.id) continue;
@@ -381,7 +434,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       const latest = claims.get(c.number);
       if (latest?.phase === "submitted" && issue) queueReview(latest, connection, remote, retryReviews);
     }
-    dispatchReady();
+    dispatchReady(retryReviews);
     if (unavailable) throw Error("部分 GitHub PR 暂时无法读取。");
   }
   function syncDelivery(retryReviews = false): Promise<void> {
@@ -398,12 +451,37 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   }
   return {
     snapshot, permits,
+    repairCards(actor: string) {
+      return repairDecisions(actor).map(({ repair, claim }) => repairDecisionCard(repair, claim.syncedAt));
+    },
+    hasRepair(id: string) {
+      return [...claims.values()].some(claim => claim.reviewRepairs?.some(item => item.id === id) || currentRepair(claim)?.id === id);
+    },
+    answerRepair(id: string, actor: string, input: unknown) {
+      const selected = repairDecisions(actor).find(({ repair }) => repair.id === id);
+      if (!selected) return 409;
+      const decision = readRepairDecision(input);
+      if (!decision) return 422;
+      const { claim, repair } = selected;
+      const record = { id, head: repair.fix.head, decision, at: Date.now() };
+      try {
+        save({ ...claim, reviewRepairs: [...(claim.reviewRepairs ?? []), record] }, `review-repair-${decision}`);
+      } catch { return 503; }
+      if (decision === "approved") void syncDelivery().catch(() => undefined);
+      return 200;
+    },
     reviewStatus(flowId: string, actor: string, sharedReviewer = false) {
       return [...claims.values()].filter(c => c.approval?.flowId === flowId && (sharedReviewer || c.claimedBy === actor) && c.pull?.head)
         .map(c => {
           const observed = reviewVersion(c);
           const current = activeReviewScope(c);
+          const proposedRepair = repairProposal(c);
+          const repairs = c.reviewRepairs?.filter(item => item.decision === "approved").map(({ head, issue, id, completedHead }) =>
+            ({ head, issue, completedHead, state: c.reviewFix?.repairId === id ? c.reviewFix.state : completedHead ? "complete" : issue ? "linked" : "queued",
+              ...(issue ? { url: `https://github.com/${tracker.repo}/issues/${issue}` } : {}) }));
           return { number: c.number, pull: c.pull?.number, head: c.pull?.head, running: reviewJobs.has(c.number),
+            ...(repairs?.length ? { repairs } : {}),
+            ...(proposedRepair && "reason" in proposedRepair ? { repairUnavailable: proposedRepair.reason } : {}),
             unavailable: reviewUnavailable.get(c.number) === observed
               || !!c.observedIssueRevision && !current, reviews: (c.deliveryReviews ?? [])
               .map(({ receipt, observed: prior }) => ({ ...receipt, current: current && prior === observed })) };

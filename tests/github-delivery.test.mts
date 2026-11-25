@@ -13,6 +13,8 @@ import { qualitySources } from "../src/execution/codex-quality-review.mts";
 import { checkoutReviewedIssueBase, type DeliveryFailure, isolatedCheckFailed, IssueDeliveryFailed, IssueDeliverySourcesChanged, parseDeliveryPlan,
   passingAcceptanceTests } from "../src/execution/issue-delivery.mts";
 import { type Claim, createIssueDispatch } from "../src/workbench/issue-dispatch.mts";
+import { createPlannedIssuePublication, type IssuePublication } from "../src/workbench/planned-issue-publication.mts";
+import { repairFromReceipt } from "../src/workbench/delivery-review-repair.mts";
 
 const spec = { files: ["src/main.mts"], instructions: "修改校验逻辑。", dependsOn: [] };
 
@@ -227,6 +229,145 @@ test("交付复核按当前头和工单版本保存，旧提交回执保留为�
     assert.equal(updated?.unavailable, true);
     assert.equal(updated?.reviews.some(item => item.current), false);
     assert.deepEqual(seen, [originalHead, nextHead, nextHead]);
+  } finally { await restored.close(); }
+});
+
+test("超长复核阻塞保留完整结论，禁止只授权部分修复", () => {
+  const head = "a".repeat(40);
+  const hash = "b".repeat(64);
+  const quality = { policy: 1, flowDigest: hash, batchDigest: hash };
+  const pull: IssuePull = { number: 53, url: "https://github.com/a/b/pull/53", state: "OPEN", head, baseName: "main" };
+  const issue: IssueDetail = { number: 47, url: "https://github.com/a/b/issues/47", title: "交付", body: "检查所有验收",
+    assignees: ["member"], pulls: [pull], state: "OPEN" };
+  const revision = issueRevision(issue);
+  const claim: Claim = { ...issue, pull, requestId: "approved", claimedBy: "member", account: "member", phase: "submitted", syncedAt: 0,
+    target: { branch: "feat/47-original", head }, delivery: { ...spec, baseRevision: head },
+    approval: { flowId: "flow", planId: "plan", version: 1, issueRevision: revision, quality } };
+  const finding = { status: "block" as const, summary: "独立阻塞".repeat(120), evidence: [] };
+  const result = repairFromReceipt("a/b", claim, {
+    packetId: hash, key: { repo: "a/b", issue: 47, issueRevision: revision, pull: 53, head,
+      mergeBase: head, plan: { id: "plan", version: 1, quality } },
+    status: "block", implementation: finding,
+    requirements: { criteria: Array.from({ length: 10 }, (_, index) => ({ ...finding, criterion: `AC-${index + 1}` })) },
+  });
+  assert.deepEqual(result, { reason: "复核问题超过单次续修的内容限制。请核对完整复核记录。" });
+});
+
+test("批准关联修复后安全回读建单结果，只续修同一 PR 并复核最新提交", async () => {
+  const head = "a".repeat(40);
+  const revised = "b".repeat(40);
+  const mergeBase = "c".repeat(40);
+  const hash = "d".repeat(64);
+  const quality = { policy: 1, flowDigest: hash, batchDigest: hash };
+  let pull: IssuePull = { number: 53, url: "https://github.com/a/b/pull/53", state: "OPEN", head, baseName: "main" };
+  const original: IssueDetail = { number: 47, url: "https://github.com/a/b/issues/47", state: "OPEN", title: "重连时保存审计",
+    body: "两次存储失败后只产生一条审计。", assignees: ["member"], pulls: [pull] };
+  const revision = issueRevision(original);
+  const writes: string[] = [];
+  let accountReads = 0;
+  let publishedRepair: IssueDetail | undefined;
+  const rows = new Map<string, IssuePublication>();
+  let stored: Claim = { ...original, pull, requestId: "approved", claimedBy: "member", account: "member", phase: "submitted", syncedAt: 0,
+    target: { branch: "feat/47-original", head, base: "main" }, delivery: { ...spec, baseRevision: mergeBase },
+    approval: { flowId: "flow", planId: "plan", version: 1, issueRevision: revision, quality } };
+  const tracker: DeliveryTracker = {
+    repo: "a/b", candidates: async () => [],
+    async account() { return ++accountReads === 2 ? "other-account" : "member"; },
+    assign: async () => assert.fail("续修沿用原工单和原 PR"),
+    async read(number) {
+      if (number === original.number) return { ...original, pulls: [pull] };
+      assert.equal(number, publishedRepair?.number);
+      assert.ok(publishedRepair);
+      return publishedRepair;
+    },
+    creation: {
+      async create({ title, body }, account) {
+        assert.equal(account, "member");
+        writes.push("创建修复单");
+        publishedRepair = { number: 66, url: "https://github.com/a/b/issues/66", title, body, state: "OPEN", assignees: [], pulls: [] };
+        throw Error("GitHub 建单后响应断开。");
+      },
+      async findCreated(marker) { return publishedRepair?.body.split("\n").includes(marker) ? [publishedRepair.number] : []; },
+    },
+    delivery: {
+      checkout: async () => assert.fail(), publish: async () => assert.fail("不得创建新 PR"),
+      checkoutPublished: async () => assert.fail("测试使用固定工作区"),
+      find: async () => pull, reviewChanges: async () => assert.fail("测试使用已核对的复核回执"),
+      async updatePublished({ from, head: proposed, pull: number }) {
+        assert.equal(from, head);
+        assert.equal(number, 53);
+        writes.push("更新原 PR");
+        pull = { ...pull, head: proposed };
+        return pull;
+      },
+    },
+  };
+  const reviewed: string[] = [];
+  const open = () => createIssueDispatch(tracker, { load: () => [stored], save(_key, value) { stored = structuredClone(value); return true; } },
+    async () => assert.fail(), () => true, 1, new Map([["member", tracker]]), {
+      specs: new Map(), conversation: true, pollMs: 60_000,
+      publishRepair: createPlannedIssuePublication({ load: () => [...rows.values()], save(key, value) { rows.set(key, value); return true; } }),
+      async prepare({ reviewTarget, spec: fix, number, branch }) {
+        assert.deepEqual(reviewTarget, { branch: "feat/47-original", head, base: "main" });
+        assert.equal(number, 47);
+        assert.deepEqual(fix.files, spec.files);
+        assert.match(fix.instructions, /两次数据库写入失败/);
+        assert.equal(stored.reviewRepairs?.[0]?.issue, 66);
+        writes.push("开发并测试");
+        return { workspace: "fixture", branch, base: "main", head: revised, checked: { head: revised, passingTests: ["[AC-1] 只记一条"] } };
+      },
+      async review(claim) {
+        const current = claim.pull?.head;
+        assert.ok(current);
+        reviewed.push(current);
+        const blocked = current === head;
+        return {
+          packetId: hash, key: { repo: "a/b", issue: 47, issueRevision: revision, pull: 53, head: current,
+            mergeBase, plan: { id: "plan", version: 1, quality } }, status: blocked ? "block" : "pass",
+          implementation: { status: blocked ? "block" : "pass", summary: "核对连续两次数据库写入失败", evidence: [] },
+          requirements: { criteria: [] },
+        };
+      },
+    });
+  const first = open();
+  try {
+    await first.refresh();
+    await setImmediate();
+    const card = first.repairCards("member")[0];
+    assert.ok(card);
+    assert.match(card.prompt, /原工单 #47 · 原 PR #53/);
+    assert.match(card.prompt, /允许修改 src\/main.mts/);
+    assert.deepEqual(first.repairCards("other"), []);
+    const answer = { authorization: "授权创建修复 Issue 并续修" };
+    assert.equal(first.answerRepair(card.id, "other", answer), 409);
+    assert.equal(first.answerRepair(card.id, "member", { authorization: "允许改所有文件" }), 422);
+    assert.deepEqual(writes, []);
+    assert.equal(first.answerRepair(card.id, "member", answer), 200);
+    assert.equal(first.answerRepair(card.id, "member", answer), 409);
+    await setImmediate();
+    assert.deepEqual(writes, []);
+    assert.equal(rows.size, 0);
+    assert.equal(stored.reviewFix?.state, "failed");
+    await first.refresh();
+    await setImmediate();
+    assert.deepEqual(writes, ["创建修复单"]);
+    assert.equal(stored.reviewFix?.state, "failed");
+  } finally { await first.close(); }
+  const restored = open();
+  try {
+    assert.deepEqual(restored.repairCards("member"), []);
+    await restored.refresh();
+    await setImmediate();
+    assert.deepEqual(writes, ["创建修复单", "开发并测试", "更新原 PR"]);
+    assert.match(publishedRepair?.body ?? "", /原工单 #47 · 原 PR #53/);
+    await restored.refresh();
+    await setImmediate();
+    const result = restored.reviewStatus("flow", "member")[0];
+    assert.deepEqual(result?.reviews.map(receipt => [receipt.key.head, receipt.status, receipt.current]), [
+      [head, "block", false], [revised, "pass", true],
+    ]);
+    assert.deepEqual(result?.repairs, [{ head, issue: 66, completedHead: revised, state: "complete", url: "https://github.com/a/b/issues/66" }]);
+    assert.deepEqual(reviewed, [head, revised]);
   } finally { await restored.close(); }
 });
 

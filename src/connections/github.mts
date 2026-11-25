@@ -56,9 +56,10 @@ export function createGitHubIssues(workspace: string, repo: string, login?: stri
   return {
     repo, read, delivery: createGitHubDelivery(repo, gh, credentialEnv),
     creation: {
-      async create({ title, body }) {
+      async create({ title, body }, account = login) {
+        if (login && account?.toLowerCase() !== login.toLowerCase()) throw Error("建单账号与连接的账号不符。");
         const number = Number(await gh(["--method", "POST", `repos/${repo}/issues`,
-          "-f", `title=${title}`, "-f", `body=${body}`, "--jq", ".number"]));
+          "-f", `title=${title}`, "-f", `body=${body}`, "--jq", ".number"], account));
         if (!Number.isSafeInteger(number) || number < 1) throw Error("GitHub 未返回有效的 Issue 编号。");
         return number;
       },

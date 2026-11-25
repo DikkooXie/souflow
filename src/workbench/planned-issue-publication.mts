@@ -69,13 +69,14 @@ export function createPlannedIssuePublication(store: Checkpoint<IssuePublication
     receipts.set(record.key, record);
   }
 
-  return async function publish(batch: PlannedIssueBatch, tracker: IssueTracker, signal: AbortSignal) {
+  return async function publish(batch: PlannedIssueBatch, tracker: IssueTracker, signal: AbortSignal, expectedAccount?: string) {
     const creator = tracker.creation;
     if (!creator) throw Error("当前 GitHub 连接不支持创建 Issue。");
     if (active.has(batch.id)) throw Error("该批次正在创建 Issue。");
     active.add(batch.id);
     try {
       const account = await tracker.account();
+      if (expectedAccount && account.toLowerCase() !== expectedAccount.toLowerCase()) throw Error("建单账号与原授权不一致。");
       const prepared = preparePlannedIssues(batch, tracker.repo);
       const published = new Map<string, IssueDetail>();
       for (const { draft, key, marker } of prepared) {
@@ -97,7 +98,7 @@ export function createPlannedIssuePublication(store: Checkpoint<IssuePublication
           if (!prior) {
             // GitHub 建单没有幂等键。先保留写入意图，重启后只能回读，避免不确定时再次 POST。
             save(batch, intent);
-            number = await creator.create({ title, body });
+            number = await creator.create({ title, body }, account);
           } else {
             const found = await creator.findCreated(marker, account, new Date(intent.preparedAt - clockSkewAllowance).toISOString());
             if (found.length !== 1) throw Error("GitHub 建单结果待核对，尚未找到唯一回执。");

@@ -15,7 +15,7 @@ export type IssueDetail = IssueSummary & {
 export type IssueCreation = { title: string; body: string };
 export const maxIssueBodyCharacters = 8000;
 export type IssueCreator = {
-  create(input: IssueCreation): Promise<number>;
+  create(input: IssueCreation, account?: string): Promise<number>;
   findCreated(marker: string, creator: string, since: string): Promise<number[]>;
 };
 export type IssueTracker = {
