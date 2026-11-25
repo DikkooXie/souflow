@@ -133,6 +133,38 @@ test("GitHub 选单验收映射错误时，在同一冻结资料内只修正一�
   const outsideScope = await select(up, { ...up, number: 99 });
   assert.equal(outsideScope.calls.length, 1);
   assert.match(String(outsideScope.result), /不在本轮候选资料/);
+
+  await t.test("候选只覆盖部分验收时可转入新工单，二次漏项保持拦截", async () => {
+    const section = flow.outputs.flatMap(output => output.artifacts).find(artifact => artifact.kind === "requirements")
+      ?.sections.find(item => item.title === "验收条件");
+    assert.ok(section);
+    section.text += "\n新人在自己的设备完成登录与配对";
+    const incomplete = { intent: "existing", issues: [up] };
+    const allCriteria = { ...up, criteria: ["AC-1", "AC-2"], validation: [...validation,
+      { criterion: "AC-2", procedure: "从新设备登录", expected: "可以完成配对" }] };
+    for (const [second, expected] of [
+      [{ intent: "new", issues: [] }, "new"],
+      [{ intent: "existing", issues: [allCriteria] }, "existing"],
+      [incomplete, "blocked"],
+      [{ intent: "none", issues: [] }, "blocked"],
+    ] as const) {
+      const calls: Parameters<NonNullable<Parameters<typeof createGitHubSelector>[2]>>[0][] = [];
+      const selector = createGitHubSelector(repo, { timeoutMs: 2000, newIssues: true }, options => {
+        calls.push(options);
+        const reply = calls.length === 1 ? incomplete : second;
+        return { finished: Promise.resolve("completed"), output: () => JSON.stringify(reply), close() {}, answerQuestions: () => false };
+      });
+      const selected = await selector(flow, "已冻结的计划正文", [issue], signal).catch((error: unknown) => error);
+      assert.equal(calls.length, 2);
+      assert.equal(calls[0]?.untrustedContext, calls[1]?.untrustedContext);
+      assert.match(calls[1]?.prompt ?? "", /现有 Issue 未覆盖 AC-2.*intent=new/);
+      if (expected === "new") assert.equal(selected, "new");
+      else if (expected === "existing") {
+        assert.ok(Array.isArray(selected));
+        assert.deepEqual(selected[0]?.criteria, ["AC-1", "AC-2"]);
+      } else assert.match(String(selected), /未覆盖验收项 AC-2/);
+    }
+  });
 });
 
 test("授权卡仅由发起者回答，固定计划并阻止双击重复派发", async () => {

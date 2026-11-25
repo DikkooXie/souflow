@@ -15,8 +15,10 @@ const exec = promisify(execFile);
 export type Selection = { number: number; reason: string; title: string; revision: string; files: string[]; instructions: string; dependsOn: number[];
   criteria: string[]; validation: Verification[]; issueText: string; sourcePaths?: string[] };
 export class IssueCoverageGap extends Error {
+  readonly criteria: readonly string[];
   constructor(criteria: readonly string[]) {
     super(`现有 Issue 未覆盖验收项 ${criteria.join("、")}。按最新项目资料核对缺口，保留已确认的验收范围后重新规划。`);
+    this.criteria = criteria;
   }
 
   static fromLegacy(message: string | undefined): IssueCoverageGap | undefined {
@@ -114,7 +116,10 @@ export function createGitHubSelector(workspace: string, options: { model?: strin
       properties: { ...schema.properties, intent: { type: "string", enum: ["existing", "new", "none"] } } } : schema;
     const prompt = [
         "依据用户请求、冻结的首版计划和本轮规划，准备 GitHub 代码交付。候选卡不授予权限。输出只用于起草待决策。",
-        ...(options.newIssues ? ["先判断用户目的。明确要求开发新需求且没有同范围的候选 Issue 时，填 intent=new 和空 issues，系统随后根据开发计划拆单。续推现有计划时选现有匹配工单，填 intent=existing。不要求开发时填 intent=none 和空 issues。下述选单条件仅适用于 intent=existing。"] : []),
+        ...(options.newIssues ? [
+          "先判断用户目的和候选覆盖范围。只有候选集按实际正文可覆盖全部固定验收项时才用 intent=existing。主题重合、跟踪整个里程碑或只覆盖部分验收项的候选，不能当作已经存在完整同范围的工单。",
+          "对明确要开发的新结果，候选没有可执行、同范围的 Issue 时填 intent=new 和空 issues，系统会从本轮计划拆分缺口。保留现有 Issue 作为来源或前置依据，避免为已经有工单的结果重复建单。不要求开发时填 intent=none 和空 issues。下述选单条件仅适用于 intent=existing。",
+        ] : []),
         "从候选 GitHub Issue 选至多三张能推进当前计划的小工单。",
         "仅从提供的现有文件路径中选可编辑文件。不为不同工单重复分配同一文件。若工单正文明确要求某个候选前置，保留依赖；前置不可执行时跳过该工单。缺少明确依据或本轮请求未要求推进代码时，返回空列表。",
         `如复核需要核对跨文件接口、路由或数据传递，从只读路径清单选最多 ${maxSourcePaths} 个直接相关的文件填入 sourcePaths。优先包括承接调用和传递数据的文件。可编辑路径已经随工单送审，无需重复。sourcePaths 不构成编辑授权。无其他材料时填空数组。`,
@@ -124,6 +129,7 @@ export function createGitHubSelector(workspace: string, options: { model?: strin
     ].join("\n");
     const context = JSON.stringify({ planText, plan, outputs: flow.outputs, criteria, publishedPlan: flow.project?.plan.path, revision,
       availablePaths: [...files], readOnlyPaths: [...readable], issues: snapshotIssueCandidates(issues) });
+    let coverageGap: IssueCoverageGap | undefined;
     return prepareVerifiedDraft(async feedback => {
       signal.throwIfAborted();
       const attempt = startAttempt({ workspace, ...(options.model ? { model: options.model } : {}), localLoginOnly: true,
@@ -148,8 +154,13 @@ export function createGitHubSelector(workspace: string, options: { model?: strin
       if (!options.newIssues) return selected;
       const intent = JSON.parse(output ?? "null")?.intent;
       if (intent === "new" && !selected.length) return "new" as const;
+      if (!selected.length && coverageGap) throw coverageGap;
       if ((intent === "none" && !selected.length) || intent === "existing") return selected;
       throw Error("工单校验未通过：选单意图与返回工单不一致。");
+    }, error => {
+      if (!options.newIssues || !(error instanceof IssueCoverageGap)) return;
+      coverageGap = error;
+      return `现有 Issue 未覆盖 ${error.criteria.join("、")}。重新核对候选正文和原始请求。只有能按实际交付覆盖全部验收才选择 existing；如需开发、未覆盖的是实质新结果，则用 intent=new 和空 issues 转入新需求拆分。不得把未覆盖的验收编号附给范围无关的工单或声称无需开发。`;
     });
   };
 }
