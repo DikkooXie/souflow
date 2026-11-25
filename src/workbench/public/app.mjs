@@ -53,6 +53,7 @@ let requests = [];
 let flows = [];
 let dispatches = [];
 let issuePlans = [];
+let deliveryReviews = [];
 let answerMaxLength;
 let planMaxLength;
 let selectedFlow;
@@ -267,7 +268,7 @@ function renderConversation(flow, pending) {
   promptBox.placeholder = flow ? "发起另一项需求…" : "描述你的需求…";
   const proposal = issuePlans.find(item => item.flowId === flow?.id);
   renderQualityDetails(conversationQuality, node, flow?.status === "ready" ? proposal?.quality : undefined);
-  renderDeliveryReviews(conversationDeliveryReviews, node, flow?.id, proposal?.reviews ?? []);
+  renderDeliveryReviews(conversationDeliveryReviews, node, flow?.id, deliveryReviews.find(entry => entry.flowId === flow?.id)?.reviews ?? []);
   if (!flow) return;
   const action = workflowAction(flow, proposal);
   resumeWorkflow.hidden = !live || member?.id === "reviewer" || !action;
@@ -478,6 +479,7 @@ function applySnapshot(snapshot) {
     flows = snapshot.flows ?? [];
     dispatches = snapshot.dispatches ?? [];
     issuePlans = snapshot.issuePlans ?? [];
+    deliveryReviews = snapshot.deliveryReviews ?? [];
     if (snapshot.flowId) selectedFlow = snapshot.flowId;
     if (selectedFlow && !flows.some(flow => flow.id === selectedFlow)) selectedFlow = undefined;
     live = snapshot.mode === "codex";

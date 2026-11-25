@@ -251,12 +251,14 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
     const state = inbox.snapshot();
     const actor = member?.login ?? member?.id ?? "personal";
     const issueCards = issuePlanning?.cards(conversations, actor) ?? [];
+    const deliveryReviews = github ? conversations.flatMap(flow => {
+      const reviews = github.reviewStatus(flow.id, actor, member?.id === "reviewer");
+      return reviews.length ? [{ flowId: flow.id, reviews }] : [];
+    }) : [];
     return {
       ...state, requests: [...state.requests, ...reviewCards, ...issueCards],
-      ...(issuePlanning ? { issuePlans: issuePlanning.statuses(conversations, actor).map(proposal => {
-        const reviews = github?.reviewStatus(proposal.flowId, actor);
-        return reviews?.length ? { ...proposal, reviews } : proposal;
-      }) } : {}),
+      ...(issuePlanning ? { issuePlans: issuePlanning.statuses(conversations, actor) } : {}),
+      ...(deliveryReviews.length ? { deliveryReviews } : {}),
       flows: conversations.map(flow => ({ ...flow, ...(replanFeedback(flow, actor, member) ? { canReplan: true } : {}) })),
       phases: phases.map(phase => phase.title), inputLimits,
       member, githubEnabled: !!github,

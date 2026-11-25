@@ -398,8 +398,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   }
   return {
     snapshot, permits,
-    reviewStatus(flowId: string, actor: string) {
-      return [...claims.values()].filter(c => c.approval?.flowId === flowId && c.claimedBy === actor && c.pull?.head)
+    reviewStatus(flowId: string, actor: string, sharedReviewer = false) {
+      return [...claims.values()].filter(c => c.approval?.flowId === flowId && (sharedReviewer || c.claimedBy === actor) && c.pull?.head)
         .map(c => {
           const observed = reviewVersion(c);
           const current = activeReviewScope(c);
