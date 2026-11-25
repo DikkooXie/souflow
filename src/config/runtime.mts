@@ -27,6 +27,9 @@ export function runtimeInteger(name: string, min: number, max: number, env?: Nod
 export const dispatchTicketOutputBytes = (env?: NodeJS.ProcessEnv) =>
   runtimeInteger("SOULFLOW_DISPATCH_TICKET_OUTPUT_MAX_BYTES", 1, 2 * 1024 * 1024, env);
 
+export const qualitySourceInputBytes = (env?: NodeJS.ProcessEnv) =>
+  runtimeInteger("SOULFLOW_QUALITY_SOURCE_INPUT_MAX_BYTES", 1, 512 * 1024, env);
+
 export function readCodeWorkerConfig(env?: NodeJS.ProcessEnv) {
   const waitMs = runtimeInteger("SOULFLOW_CODE_WORKER_WAIT_MS", 100, 300_000, env);
   const httpTimeoutMs = runtimeInteger("SOULFLOW_CODE_WORKER_HTTP_TIMEOUT_MS", waitMs + 1, 600_000, env);
