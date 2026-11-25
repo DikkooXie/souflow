@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { scrubAuditText } from "../audit/activity-store.mts";
+import { qualitySourceInputBytes } from "../config/runtime.mts";
 import { qualityReviewLimits, qualityReviewOutputBytes, qualityReviewSchema, ticketSourceReviewSchema,
   type QualityReviewer, type TicketSourceReviewer } from "../planning/dispatch-quality.mts";
 import { startCodexReadOnlyTask } from "./codex-command-attempt.mts";
@@ -9,14 +10,14 @@ import { deliveryPath } from "./local-code-changes.mts";
 const exec = promisify(execFile);
 const sourceLimit = 12;
 export const qualitySourceFileBytes = 65_536;
-export const qualitySourceBudgetBytes = 128 * 1024;
 const regularPath = /^(?:(?:docs|src|tests)\/[a-zA-Z0-9._/-]+\.(?:md|mts|mjs|html|css)|AGENTS\.md)$/;
 
 export function qualitySourcePath(path: string) {
   return (regularPath.test(path) || deliveryPath.test(path)) && !path.split("/").some(part => part.startsWith("."));
 }
 
-export async function qualitySources(workspace: string, revision: string, paths: readonly string[], signal: AbortSignal) {
+export async function qualitySources(workspace: string, revision: string, paths: readonly string[], signal: AbortSignal,
+  inputMaxBytes = qualitySourceInputBytes()) {
   if (!/^[a-f0-9]{40,64}$/.test(revision)) throw Error("工单校验未通过：缺少固定仓库提交。");
   const candidates = [...new Set(paths)].filter(qualitySourcePath);
   const inputs = await Promise.all(candidates.slice(0, sourceLimit).map(async path => {
@@ -30,7 +31,7 @@ export async function qualitySources(workspace: string, revision: string, paths:
     const raw = await git(["cat-file", "blob", blob[1]]);
     return [path, scrubAuditText(raw.stdout)] as const;
   }));
-  let remaining = qualitySourceBudgetBytes;
+  let remaining = inputMaxBytes;
   const selected: Record<string, string> = {};
   for (const entry of inputs) {
     if (!entry) continue;

@@ -6,12 +6,12 @@ import { join } from "node:path";
 import { setImmediate, setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { promisify } from "node:util";
-import { dispatchTicketOutputBytes } from "../src/config/runtime.mts";
+import { dispatchTicketOutputBytes, qualitySourceInputBytes } from "../src/config/runtime.mts";
 import { createLocalDispatch, readDispatchTickets, runLocalJobs } from "../src/execution/local-dispatch.mts";
 import { applyLocalCodeChanges, readEditableFile, replayLocalCodePatch } from "../src/execution/local-code-changes.mts";
 import type { Flow } from "../src/planning/conversation-flow.mts";
 import { createDispatchMonitor } from "../src/execution/dispatch-monitor.mts";
-import { qualitySourceBudgetBytes, qualitySourceFileBytes } from "../src/execution/codex-quality-review.mts";
+import { qualitySourceFileBytes, qualitySources } from "../src/execution/codex-quality-review.mts";
 import { maxSourceBytes } from "../src/execution/local-code-changes.mts";
 import { passingQualityReview, readyQualityFlow, validation } from "./fixtures/planning-quality.mts";
 
@@ -30,7 +30,7 @@ test("GitHub 拆单从固定提交区分只读资料和编辑文件，来源错�
   const git = async (...args: string[]) => (await exec("git", ["-C", repo, ...args])).stdout.trim();
   const editable = "src/feature.mts";
   const large = "src/reader.mts";
-  const additional = ["src/reader-two.mts", "src/reader-three.mts"];
+  const additional = Array.from({ length: 4 }, (_, index) => `src/support-${index}.mts`);
   await git("init", "-q");
   await mkdir(join(repo, "docs"));
   await mkdir(join(repo, "src"));
@@ -54,6 +54,7 @@ test("GitHub 拆单从固定提交区分只读资料和编辑文件，来源错�
   const ticket = { ...draft[0], sources: [guide, large], editPaths: [editable], validation,
     delivery: { outcome: "用户确认纪要后收到一条待办", priorityReason: "独立交付确认行为", prerequisites: [] } };
   const prompts: string[] = [];
+  const sourceInputMaxBytes = qualitySourceInputBytes({});
   let responses = [{ ...ticket, sources: ["docs/later.md"] }, ticket];
   const dispatch = createLocalDispatch(repo, 2, {
     split({ prompt }) {
@@ -64,6 +65,7 @@ test("GitHub 拆单从固定提交区分只读资料和编辑文件，来源错�
         output: () => JSON.stringify({ tickets: [response], batchAcceptance: [] }) };
     },
     qualityReviewer: passingQualityReview,
+    sourceInputMaxBytes,
     execute: () => assert.fail("拆单阶段不能执行代码工单"),
   });
   const planned = await dispatch.planGitHub(flow, "trial");
@@ -72,7 +74,7 @@ test("GitHub 拆单从固定提交区分只读资料和编辑文件，来源错�
   const snapshot = JSON.parse(prompts[0]?.split("\n\n").at(-1) ?? "{}");
   assert.deepEqual(new Set(snapshot.availableSources.map(([path]: [string, number]) => path)), new Set([guide, editable, large, ...additional]));
   assert.equal(new Map(snapshot.availableSources).get(large), maxSourceBytes + 1);
-  assert.equal(snapshot.sourceBudgetBytes, qualitySourceBudgetBytes);
+  assert.equal(snapshot.sourceBudgetBytes, sourceInputMaxBytes);
   assert.deepEqual(snapshot.availableEditPaths, [editable]);
   assert.ok(prompts[1]?.startsWith(prompts[0] ?? ""));
   assert.match(prompts[1] ?? "", /T1 的 sources/);
@@ -84,11 +86,20 @@ test("GitHub 拆单从固定提交区分只读资料和编辑文件，来源错�
   responses = [{ ...ticket, editPaths: [guide] }];
   await assert.rejects(dispatch.planGitHub(flow, "unauthorized-edit"), /编辑文件/);
   assert.equal(prompts.length, 5);
-  responses = [{ ...ticket, sources: [large, ...additional] }, ticket];
+  const largerTicket = { ...ticket, sources: [large, ...additional.slice(0, 2)] };
+  responses = [{ ...ticket, sources: additional }, largerTicket];
   const withinBudget = await dispatch.planGitHub(flow, "oversize-sources");
-  assert.deepEqual(withinBudget.tickets[0]?.sources, [guide, large]);
-  assert.match(prompts[6] ?? "", new RegExp(`超过 ${qualitySourceBudgetBytes}`));
+  assert.deepEqual(withinBudget.tickets[0]?.sources, largerTicket.sources);
+  assert.match(prompts[6] ?? "", new RegExp(`超过 ${sourceInputMaxBytes}`));
   assert.equal(prompts.length, 7);
+  const paths = [editable, ...largerTicket.sources];
+  const signal = new AbortController().signal;
+  const allEvidence = await qualitySources(repo, revision, paths, signal, sourceInputMaxBytes);
+  assert.deepEqual(Object.keys(allEvidence), paths);
+  const oldLimit = qualitySourceInputBytes({ SOULFLOW_QUALITY_SOURCE_INPUT_MAX_BYTES: "131072" });
+  assert.ok(Object.values(allEvidence).reduce((sum, text) => sum + Buffer.byteLength(text), 0) > oldLimit);
+  const lessEvidence = await qualitySources(repo, revision, paths, signal, oldLimit);
+  assert.ok(Object.keys(lessEvidence).length < paths.length);
 });
 
 test("local dispatch requires criterion coverage, an acyclic graph and approved evidence", () => {
@@ -144,19 +155,20 @@ test("a ten-ticket plan preserves dependencies while executing in waves of two",
 test("the process reads local .env and inherited settings take precedence", async t => {
   const dir = await mkdtemp(join(tmpdir(), "souflow-dispatch-env-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  await writeFile(join(dir, ".env"), "SOULFLOW_DISPATCH_TICKET_OUTPUT_MAX_BYTES=1428\n");
+  await writeFile(join(dir, ".env"), "SOULFLOW_DISPATCH_TICKET_OUTPUT_MAX_BYTES=1428\nSOULFLOW_QUALITY_SOURCE_INPUT_MAX_BYTES=230000\n");
   const runtime = new URL("../src/config/runtime.mts", import.meta.url).href;
   const args = ["--experimental-strip-types", "--input-type=module", "--eval", `
-    import { loadLocalEnv, dispatchTicketOutputBytes } from ${JSON.stringify(runtime)};
+    import { loadLocalEnv, dispatchTicketOutputBytes, qualitySourceInputBytes } from ${JSON.stringify(runtime)};
     loadLocalEnv();
-    process.stdout.write(String(dispatchTicketOutputBytes()));
+    process.stdout.write(JSON.stringify([dispatchTicketOutputBytes(), qualitySourceInputBytes()]));
   `];
   const env = { ...process.env };
   delete env.SOULFLOW_DISPATCH_TICKET_OUTPUT_MAX_BYTES;
-  assert.equal((await exec(process.execPath, args, { cwd: dir, env })).stdout, "1428");
-  assert.equal((await exec(process.execPath, args, {
-    cwd: dir, env: { ...env, SOULFLOW_DISPATCH_TICKET_OUTPUT_MAX_BYTES: "2856" },
-  })).stdout, "2856");
+  delete env.SOULFLOW_QUALITY_SOURCE_INPUT_MAX_BYTES;
+  assert.deepEqual(JSON.parse((await exec(process.execPath, args, { cwd: dir, env })).stdout), [1428, 230000]);
+  assert.deepEqual(JSON.parse((await exec(process.execPath, args, {
+    cwd: dir, env: { ...env, SOULFLOW_DISPATCH_TICKET_OUTPUT_MAX_BYTES: "2856", SOULFLOW_QUALITY_SOURCE_INPUT_MAX_BYTES: "280000" },
+  })).stdout), [2856, 280000]);
 });
 
 test("code edits validate every path and anchor before changing a snapshot and emit an applicable patch", async t => {
