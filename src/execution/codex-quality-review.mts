@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { scrubAuditText } from "../audit/activity-store.mts";
-import { qualityReviewLimits, qualityReviewSchema, type QualityReviewer } from "../planning/dispatch-quality.mts";
+import { qualityReviewLimits, qualityReviewOutputBytes, qualityReviewSchema, type QualityReviewer } from "../planning/dispatch-quality.mts";
 import { startCodexReadOnlyTask } from "./codex-command-attempt.mts";
 import { deliveryPath } from "./local-code-changes.mts";
 
@@ -39,12 +39,16 @@ export async function qualitySources(workspace: string, revision: string, paths:
   return selected;
 }
 
-export function createCodexQualityReviewer(workspace: string, model?: string, timeoutMs = 120_000): QualityReviewer {
+export function createCodexQualityReviewer(workspace: string, model?: string, timeoutMs = 120_000,
+  startAttempt = startCodexReadOnlyTask): QualityReviewer {
   return async (packet, signal) => {
     signal.throwIfAborted();
-    const attempt = startCodexReadOnlyTask({
+    const planned = packet.tickets.some(ticket => ticket.delivery);
+    let overflow = false;
+    const attempt = startAttempt({
       workspace, ...(model ? { model } : {}), localLoginOnly: true, disableWebSearch: true,
-      outputSchema: qualityReviewSchema, onEvent() {},
+      outputSchema: qualityReviewSchema(planned), onEvent() {},
+      outputMaxBytes: qualityReviewOutputBytes(packet), onOutputOverflow(bytes) { overflow = bytes !== undefined; },
       prompt: [
         "你是负责派发前复核的独立审查者。只检查材料，不执行实现、调用工具、修改文件、发起审批或证明测试已经运行。",
         "检查 scope（原始意图、确认的范围与 PRD 和工单是否一致）、evidence（计划的关键假设是否有可信依据）、verification（每条 AC 是否有实际对应的验证与预期结果）。",
@@ -54,6 +58,10 @@ export function createCodexQualityReviewer(workspace: string, model?: string, ti
         `每项 evidence 至少提供一条引用，只保留最有决定性的依据。数量上限：${Object.entries(qualityReviewLimits.references).map(([dimension, limit]) => `${dimension} ${limit} 条`).join("，")}。`,
         `用 references 的键作 ref，quote 必须逐字来自对应文本，去除首尾空白后至少 ${qualityReviewLimits.quoteMinCharacters} 个字符，全文最多 ${qualityReviewLimits.quoteCharacters} 个字符。`,
         "verification 为 pass 时每条 AC 至少引用一条对应的 test: 证据。范围核对引用 request 或 requirements，关键实现假设优先查 repo: 引用。缺少资料时引用提出该主张的文本并说明缺少什么。",
+        ...(planned ? [
+          `为每张新建 Issue 返回一个 breakdown，ticket 填工单 ID。分别核对可独立演示结果、必要前置及同级顺序，任一不成立就给该工单 block。每条最多 ${qualityReviewLimits.breakdownReferences} 项依据，至少逐字引用自身 ticket: 条目。`,
+          "仅交付界面、接口或存储层而无法单独演示用户结果时阻塞。测试应能以所列文件和已合并前置独立完成。缺少真正的上游、用依赖强制本可并行的工作串行、或同级顺序违背已确认计划时阻塞。单有自述理由无法证明优先级。",
+        ] : []),
       ].join("\n"),
       untrustedContext: JSON.stringify(packet),
     });
@@ -62,6 +70,7 @@ export function createCodexQualityReviewer(workspace: string, model?: string, ti
     if (signal.aborted) attempt.close();
     try {
       if (await attempt.finished !== "completed") throw Error("独立质量复核未完成，可以重试。");
+      if (overflow) throw Error("独立质量复核输出超过本轮引用和结论的预算，可以重试。");
       return attempt.output();
     } finally {
       clearTimeout(timer);

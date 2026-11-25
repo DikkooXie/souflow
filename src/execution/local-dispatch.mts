@@ -8,7 +8,8 @@ import { type BusinessEvent, type Checkpoint, scrubAuditText } from "../audit/ac
 import { dispatchTicketOutputBytes } from "../config/runtime.mts";
 import { currentDevelopmentPlan, type Flow } from "../planning/conversation-flow.mts";
 import { acceptanceCriteria, planningDigest, qualityBlock, qualityCurrent, qualityPacket, readVerification, reviewQuality,
-  verificationSchema, type QualityReceipt, type QualityReviewer, type QualityTicket, type Verification } from "../planning/dispatch-quality.mts";
+  verificationSchema, type PlannedTicket, type QualityReceipt, type QualityReviewer, type QualityTicket, type Verification } from "../planning/dispatch-quality.mts";
+import { readTicketDelivery, ticketDeliverySchema, type TicketDelivery, validateDeliveryOrder } from "../planning/ticket-delivery.mts";
 import { type TicketDraft, validateTicketPlan } from "../planning/validate-ticket-plan.mts";
 import { startCodexQuestionAttempt, startCodexReadOnlyTask } from "./codex-command-attempt.mts";
 import { type AccountAssignment, type CodexAccountDispatch, withCodexAccount } from "./codex-account-dispatch.mts";
@@ -29,7 +30,7 @@ type Difficulty = "routine" | "advanced";
 type ModelRoute = { difficulty: Difficulty; reason: string; requestedModel: string };
 type ModelRouting = Record<Difficulty, string>;
 type Ticket = TicketDraft & { title: string; instructions: string; sources: readonly string[]; editPaths?: readonly string[];
-  validation?: readonly Verification[]; modelRoute?: ModelRoute };
+  validation?: readonly Verification[]; modelRoute?: ModelRoute; delivery?: TicketDelivery };
 type PatchRef = { ticketId: string; artifactId: string; patchSha256: string };
 type CodeArtifact = LocalCodePatch & { id: string; upstream: PatchRef[]; review?: "accepted" | "rejected" | "invalid" };
 type Job = Ticket & {
@@ -91,11 +92,12 @@ function ancestorsOf<T extends TicketDraft>(ticket: T, byId: ReadonlyMap<string,
   return ancestors;
 }
 
-function ticketSchema(kind: DispatchKind, routeModels: boolean, review: boolean) {
+function ticketSchema(kind: DispatchKind, routeModels: boolean, review: boolean, github: boolean) {
   const properties = {
     id: string, title: string, instructions: string, criteria: strings, dependsOn: strings, sources: strings,
     ...(kind === "code" ? { editPaths: strings } : {}),
     ...(review ? { validation: verificationSchema } : {}),
+    ...(github ? { delivery: ticketDeliverySchema } : {}),
     ...(routeModels ? { difficulty: { type: "string", enum: ["routine", "advanced"] }, routingReason: string } : {}),
   };
   return {
@@ -107,7 +109,8 @@ function ticketSchema(kind: DispatchKind, routeModels: boolean, review: boolean)
 }
 
 export function readDispatchTickets(text: string | undefined, criteria: readonly string[], evidence: ReadonlySet<string>,
-  kind: DispatchKind = "report", routing?: ModelRouting, review = false, ticketOutputMaxBytes = dispatchTicketOutputBytes()): Ticket[] {
+  kind: DispatchKind = "report", routing?: ModelRouting, review = false, ticketOutputMaxBytes = dispatchTicketOutputBytes(),
+  github = false): Ticket[] {
   if (text && Buffer.byteLength(text) > ticketOutputMaxBytes) throw Error("返回的工单方案超过传输字节上限。");
   const candidates = parse(text)?.tickets;
   if (!Array.isArray(candidates)) throw Error("返回的工单结构无效。");
@@ -124,6 +127,7 @@ export function readDispatchTickets(text: string | undefined, criteria: readonly
     }
     const ticket: Ticket = { id: item.id, title: item.title, instructions: item.instructions, criteria: item.criteria, dependsOn: item.dependsOn, sources };
     if (review) ticket.validation = readVerification(item.validation, ticket.criteria);
+    if (github) ticket.delivery = readTicketDelivery(item.delivery, ticket.id, ticket.dependsOn);
     if (routing) {
       const { difficulty, routingReason } = item;
       if ((difficulty !== "routine" && difficulty !== "advanced") || !boundedText(routingReason, 240)) {
@@ -147,6 +151,7 @@ export function readDispatchTickets(text: string | undefined, criteria: readonly
   });
   const errors = validateTicketPlan(criteria, tickets);
   if (errors.length) throw Error(`工单校验未通过（${errors.join("，")}）。`);
+  if (github) validateDeliveryOrder(tickets);
   if (kind === "code") {
     const byId = new Map(tickets.map(ticket => [ticket.id, ticket]));
     const ancestry = new Map(tickets.map(ticket => [ticket.id, ancestorsOf(ticket, byId)]));
@@ -352,7 +357,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
       const criteria = acceptanceCriteria(flow);
       if (criteria.length > 24) throw Error("工单校验未通过（验收项过多，请缩小本轮范围）。");
       const prompt = [
-        github ? "把已生成的开发计划拆成独立可验收的新 GitHub Issue，说明执行优先顺序。上游必须等对应 PR 合并后才能满足依赖。"
+        github ? "把开发计划拆成新 GitHub Issue，每张首先交付一个可向用户独立演示和验证的行为。跨界面、接口、存储只做达成该行为的改动。不要把同一行为按技术层拆成几张无法单独验证的工单。"
           : run.kind === "code"
           ? "把已生成的开发计划拆成本地代码工单，每单可以单独验证产物。只有确实需要前置补丁时才声明工单依赖。"
           : "把已生成的 souflow 开发计划拆成可独立验收的本地核验工单。工单只根据提供的资料和前置报告产出核验报告。",
@@ -362,6 +367,11 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
           : "前置报告为必须输入时才填写 dependsOn。若需求明确说两张独立核验之后汇总，拆出两个无依赖节点和一个同时依赖它们的汇总节点。从 availableSources 指定一到四份资料，汇总单可只依赖报告。",
         "复用计划范围，必须覆盖每个固定验收 ID。每项 instructions 写明交付目标、参考资料及验收方法。工单 ID 用大写字母开头，仅含大写字母、数字和连字符。",
         "工单数量由批准计划和独立验收边界决定。一次返回完整工单和依赖，不因可同时执行的槽位数合并工单。",
+        ...(github ? [
+          "tickets 顺序是可执行的优先顺序：每个前置须排在使用它的工单之前。同级按确认的交付优先级排列。没有阻塞的工单不要为排序添加依赖。",
+          "逐单给 delivery：outcome 写明用户能操作并观察到的结果，priorityReason 说明为何排在当前顺序，prerequisites 为 dependsOn 的每个 ID 提供 {ticket,reason}，指出少了哪项上游合并产物就无法开工。每段不超过 320 字。没有前置使用空数组。",
+          "GitHub 下游只有在上游 PR 合并并进入默认分支后才能开工。核对每张工单的操作、期望和文件范围能独立交付 outcome。",
+        ] : []),
         "工单 ID 用 T1、T2 之类的短名称。criteria 只填下方验收项的 id，例如 AC-1；dependsOn 只填工单 ID，例如 T1。标题少于 100 字，说明少于 2000 字。",
         ...(reviewer ? ["每个 criteria ID 在 validation 中分别写一项，包含 criterion、可执行的 procedure 和可观察的 expected。验证步骤须覆盖对应的失败或并发条件。"] : []),
         ...(routing ? ["逐单判断难度。范围清楚、改动局部且验收直接时给 difficulty=routine；需要判断跨模块契约、权限、迁移或关键步骤证据不足时给 difficulty=advanced。routingReason 用一句话说明本单的可验证依据，不超过 240 字。"] : []),
@@ -373,21 +383,22 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
         title: flow.title, task: "拆分本地工单" });
       const output = await result(() => {
         const attempt = split({
-          workspace, prompt, outputSchema: ticketSchema(run.kind, !!routing, !!reviewer), outputMaxBytes: ticketOutputMaxBytes,
+          workspace, prompt, outputSchema: ticketSchema(run.kind, !!routing, !!reviewer, github), outputMaxBytes: ticketOutputMaxBytes,
           disableWebSearch: true, onModel(model) { run.planningModel = model; session?.model(model); },
           ...(session ? { onThread: session.connected, onAccount: session.account } : {}),
           onEvent(event) { if (event.kind === "question-requested") attempt.close(); },
         });
         return attempt;
       }, session);
-      run.jobs = readDispatchTickets(output, criteria.map(item => item.id), new Set(catalog.keys()), run.kind, routing, !!reviewer, ticketOutputMaxBytes)
+      run.jobs = readDispatchTickets(output, criteria.map(item => item.id), new Set(catalog.keys()), run.kind, routing, !!reviewer, ticketOutputMaxBytes, github)
         .map(ticket => ({ ...ticket, status: "queued" }));
       return { revision, reviewer };
   }
 
   function qualityTickets(jobs: readonly Job[]): QualityTicket[] {
     return jobs.map(job => ({ id: job.id, title: scrubAuditText(job.title), instructions: scrubAuditText(job.instructions),
-      criteria: job.criteria, dependsOn: job.dependsOn, sources: job.sources, validation: job.validation ?? [], paths: job.editPaths ?? [] }));
+      criteria: job.criteria, dependsOn: job.dependsOn, sources: job.sources, validation: job.validation ?? [], paths: job.editPaths ?? [],
+      ...(job.delivery ? { delivery: job.delivery } : {}) }));
   }
 
   async function prepare(current: Flow, run: Run) {
@@ -548,7 +559,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
 
   return {
     list: () => [...runs.values()],
-    async planGitHub(flow: Flow, id: string) {
+    async planGitHub(flow: Flow, id: string): Promise<PlannedTicket[]> {
       const plan = currentDevelopmentPlan(flow);
       if (!plan || !qualityReviewer) throw Error("工单校验未通过：GitHub 建单需要有效的开发计划和质量复核。");
       const run: Run = { id, flowId: flow.id, plan, kind: "code", status: "preparing", jobs: [] };
@@ -556,7 +567,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
       const tickets = qualityTickets(run.jobs);
       const files = tickets.flatMap(ticket => ticket.paths.map(path => path.toLowerCase()));
       if (new Set(files).size !== files.length) throw Error("工单校验未通过：此轮 GitHub 工单的编辑范围重叠。");
-      return tickets;
+      return tickets.map(ticket => ({ ...ticket, delivery: readTicketDelivery(ticket.delivery, ticket.id, ticket.dependsOn) }));
     },
     isRunning: (flowId: string) => [...runs.values()].some(run => run.flowId === flowId && (active(run) || run.status === "paused")),
     reviews: pendingReviews,
