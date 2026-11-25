@@ -168,6 +168,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       const publishIssues = live && issueTracker?.creation
         ? createPlannedIssuePublication(audit.checkpoint<IssuePublication>(`github-publications:${issueTracker.repo.toLowerCase()}`)) : undefined;
       let reviewScope: ((claim: Claim) => DeliveryReviewScope | undefined) | undefined;
+      let reviewSourceHandoff: NonNullable<IssueDeliveryOptions["reviewSourceHandoff"]> | undefined;
       const github = issueTracker && monitor ? createIssueDispatch(issueTracker,
         audit.checkpoint<Claim>(`github-issues:${issueTracker.repo.toLowerCase()}`),
         verifyIssue ?? createIssueVerifier(monitor, codexAccounts ? { codexAccounts } : {}),
@@ -176,6 +177,10 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           ...(issueDelivery.recoverFailedIssue ? { recoverFailedIssue: issueDelivery.recoverFailedIssue } : {}),
           ...(issueDelivery.reviewFix ? { reviewFix: issueDelivery.reviewFix } : {}),
           ...(publishIssues ? { publishRepair: publishIssues } : {}),
+          async reviewSourceHandoff(claim, proof, sources, signal) {
+            if (!reviewSourceHandoff) throw Error("无法复核上游源码交接。");
+            return reviewSourceHandoff(claim, proof, sources, signal);
+          },
           ...(live ? { review: issueDelivery.review ?? createGitHubDeliveryReviewer(live[0], claim => reviewScope?.(claim),
             createCodexDeliveryReviewer(live[0], issueDelivery.timeoutMs, qualityModel ?? issueDelivery.planningModel)),
             reviewScopeCurrent: issueDelivery.reviewScopeCurrent ?? (claim => !!reviewScope?.(claim)) } : {}),
@@ -227,6 +232,8 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
               ...(card.clarificationOrigin ? { origin: card.clarificationOrigin } : {}) }];
           }) : []) : undefined);
       reviewScope = claim => issuePlanning?.reviewScope(claim, flows.list().find(flow => flow.id === claim.approval?.flowId));
+      if (issuePlanning) reviewSourceHandoff = (claim, proof, sources, signal) =>
+        issuePlanning.reviewHandoff(claim, flows.list().find(flow => flow.id === claim.approval?.flowId), proof, sources, signal);
       flows.reopenReady();
       return { codex, inbox, flows, dispatch, acceptance, github, issuePlanning };
     } catch (error) {

@@ -3,11 +3,12 @@ import { isDeepStrictEqual } from "node:util";
 import type { BusinessEvent, Checkpoint } from "../audit/activity-store.mts";
 import { issueRevision, type DeliveryTracker, type IssueDetail, type IssuePull, type IssueSummary, type IssueTracker } from "../connections/issue-tracker.mts";
 import type { AccountAssignment } from "../execution/codex-account-dispatch.mts";
+import type { SourceHandoff, SourceProducer } from "../execution/dependency-source-handoff.mts";
 import { IssueDeliveryFailed, IssueDeliverySourcesChanged, type CheckedIssue, type DeliveryFailure, type DeliverySpec, type DeliveryTarget, type PrepareIssue } from "../execution/issue-delivery.mts";
 import { IssueVerificationUncertain, type VerifyIssue } from "../execution/issue-verification.mts";
 import type { PatchIssue } from "../execution/local-code-changes.mts";
 import type { DeliveryReviewReceipt } from "../planning/delivery-review.mts";
-import { qualityBindingCurrent, type QualityBinding } from "../planning/dispatch-quality.mts";
+import { qualityBindingCurrent, type QualityBinding, type TicketSourceFinding } from "../planning/dispatch-quality.mts";
 import type { ApprovedReviewFix } from "./approved-review-fix.mts";
 import { readRepairDecision, repairDecisionCard, repairFromReceipt } from "./delivery-review-repair.mts";
 import type { ReviewIssueDelivery } from "./github-delivery-review.mts";
@@ -16,7 +17,8 @@ import { type createPlannedIssuePublication, hasPublicationMarker } from "./plan
 export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; prepare: PrepareIssue; pollMs: number; conversation?: boolean;
   requireQuality?: boolean; recoverFailedIssue?: number; reviewFix?: ApprovedReviewFix; review?: ReviewIssueDelivery;
   publishRepair?: ReturnType<typeof createPlannedIssuePublication>;
-  reviewScopeCurrent?: (claim: Claim) => boolean };
+  reviewScopeCurrent?: (claim: Claim) => boolean;
+  reviewSourceHandoff?: (claim: Claim, proof: SourceHandoff, sources: Record<string, string>, signal: AbortSignal) => Promise<TicketSourceFinding> };
 
 function publisher(tracker: IssueTracker) {
   return (tracker as Partial<DeliveryTracker>).delivery;
@@ -38,8 +40,11 @@ export type Claim = Remote & {
   failure?: DeliveryFailure; retryCount?: number;
   reviewFix?: { from: string; state: "running" | "publishing" | "complete" | "failed"; pendingHead?: string; base?: string; repairId?: string };
   reviewRepairs?: ReviewRepairDecision[];
+  sourceHandoff?: { proof: SourceHandoff; finding: TicketSourceFinding };
 };
-const phases = { claiming: "正在认领", waiting: "等待上游 PR 合并", developing: "Codex 正在开发与测试", publishing: "正在推送并创建 PR", submitted: "已提交 PR", deliveryFailed: "开发或测试失败", running: "Codex 正在核验", done: "核验完成", conflict: "认领冲突", uncertain: "待核对", failed: "核验失败" };
+const phases = { claiming: "正在认领", waiting: "等待上游 PR 合并", checkingSources: "正在核对上游源码",
+  developing: "Codex 正在开发与测试", publishing: "正在推送并创建 PR", submitted: "已提交 PR", deliveryFailed: "开发或测试失败",
+  running: "Codex 正在核验", done: "核验完成", conflict: "认领冲突", uncertain: "待核对", failed: "核验失败" };
 const stageNames = { preflight: "工单状态核对", checkout: "工作区准备", codex: "Codex 运行", dependencies: "依赖安装",
   patch: "补丁校验与应用", tests: "隔离检查", commit: "生成本地提交", publish: "远端发布", legacy: "旧版执行" };
 const reasonNames = { unavailable: "暂无更细的失败记录", format: "替换格式无效", scope: "涉及未授权文件", redacted: "涉及已脱敏字段",
@@ -80,6 +85,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       ...(c.reviewFix ? { reviewFix: c.reviewFix } : {}),
       ...(event?.startsWith("review-repair-") ? { repair: c.reviewRepairs?.at(-1) } : {}),
       ...(event === "account-assigned" ? { codexAccount: c.accountAssignment } : {}),
+      ...(event?.startsWith("dependency-source-") ? { sourceHandoff: c.sourceHandoff } : {}),
       ...(c.pull ? { pull: c.pull.number, ci: c.pull.ci, merge: c.pull.mergeCommit, state: c.pull.state } : {}), actor: c.claimedBy, githubAccount: c.account, phase: c.phase, session: c.sessionId,
     } } : undefined)) throw new IssueActionError(503, "无法保存 GitHub 工单状态。");
     claims.set(c.number, c);
@@ -149,6 +155,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   }
   for (const c of store.load()) {
     if (c.reviewFix?.state === "running") save({ ...c, reviewFix: { ...c.reviewFix, state: "failed" } }, "review-fix-interrupted");
+    else if (c.phase === "checkingSources") save({ ...c,
+      phase: c.sourceHandoff?.finding.status === "block" ? "uncertain" : "waiting" }, "dependency-source-restarted");
     else if (["claiming", "running", "developing", "publishing"].includes(c.phase)) {
       save({ ...c, phase: "uncertain", ...(c.phase === "claiming" ? { claimUncertain: true } : {}) }, "restart");
     }
@@ -160,7 +168,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   function snapshot(canClaim: boolean) {
     return { repo: tracker.repo, canClaim: canClaim && !delivery?.conversation, ...(delivery ? { deliveryEnabled: true, conversationEnabled: delivery.conversation === true } : {}), items: [
       ...[...claims.values()].reverse().map(({ requestId: _id, account: _account, phase, delivery, pull, approval,
-        checked: _checked, deliveryReviews: _reviews, reviewRepairs: _repairs,
+        checked: _checked, deliveryReviews: _reviews, reviewRepairs: _repairs, sourceHandoff: _sourceHandoff,
         observedIssueRevision: _issueRevision, observedReviewLink: _reviewLink, ...item }) => ({ ...item,
         ...(delivery ? { dependsOn: delivery.dependsOn, mode: "delivery" } : {}),
         ...(approval ? { flowId: approval.flowId } : {}),
@@ -327,6 +335,34 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     const connection = memberTrackers.get(c.claimedBy) ?? tracker;
     const remote = publisher(connection);
     const current = () => claims.get(c.number) ?? c;
+    const producers = async (baseName: string, signal: AbortSignal) => {
+      signal.throwIfAborted();
+      if (!remote || !c.approval?.quality || !delivery?.reviewScopeCurrent?.(current())) throw new IssueDeliverySourcesChanged();
+      const groups = new Map<number, string[]>();
+      for (const { issue, path } of spec.sourceFrom ?? []) {
+        if (!spec.dependsOn.includes(issue) || !spec.sourcePaths?.includes(path)) throw new IssueDeliverySourcesChanged();
+        groups.set(issue, [...(groups.get(issue) ?? []), path]);
+      }
+      return Promise.all([...groups].map(async ([issue, sources]): Promise<SourceProducer> => {
+        const parent = claims.get(issue);
+        const target = parent?.target;
+        const pull = parent?.pull;
+        if (!parent?.delivery || !parent.approval || parent.requestId !== c.requestId || parent.claimedBy !== c.claimedBy
+          || parent.account !== c.account || !isDeepStrictEqual(parent.approval.quality, c.approval?.quality)
+          || parent.delivery.baseRevision !== spec.baseRevision || !target || !pull || pull.state !== "MERGED"
+          || !pull.mergeCommit || !upstream.includes(pull.mergeCommit) || pull.baseName !== baseName || pull.head !== target.head
+          || sources.some(path => !parent.delivery?.files.includes(path))) throw new IssueDeliverySourcesChanged();
+        const [livePull, liveIssue] = await Promise.all([remote.find(target.branch, target.head, pull.number), connection.read(issue)])
+          .catch(() => { throw new IssueDeliverySourcesChanged(); });
+        signal.throwIfAborted();
+        if (claims.get(issue)?.target !== target || livePull?.number !== pull.number || livePull.head !== target.head
+          || livePull.state !== "MERGED" || livePull.baseName !== baseName || livePull.mergeCommit !== pull.mergeCommit
+          || issueRevision(liveIssue) !== parent.approval.issueRevision || !liveIssue.pulls.some(item => item.number === pull.number)) {
+          throw new IssueDeliverySourcesChanged();
+        }
+        return { issue, pull: pull.number, head: target.head, merge: pull.mergeCommit, baseName, files: parent.delivery.files, sources };
+      }));
+    };
     try {
       if (!remote || !delivery || !permits(c.claimedBy) || (await connection.account()).toLowerCase() !== c.account.toLowerCase()) {
         throw Error("工单账号无法确认。");
@@ -336,6 +372,22 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       const branch = `feat/${c.number}-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
       const prepared = await delivery.prepare({ number: c.number, spec, branch, publisher: remote, upstream,
         ...(c.retryCount && c.failure ? { previousFailure: c.failure } : {}),
+        ...(spec.sourceFrom?.length && delivery.reviewSourceHandoff ? { sourceHandoff: {
+          current: producers,
+          ready() {
+            abort.signal.throwIfAborted();
+            const latest = current();
+            if (latest.phase !== "checkingSources" || !delivery.reviewScopeCurrent?.(latest)) throw new IssueDeliverySourcesChanged();
+            save({ ...latest, phase: "developing" }, "woken");
+          },
+          async review(proof: SourceHandoff, sources: Record<string, string>, signal: AbortSignal) {
+            const finding = await delivery.reviewSourceHandoff?.(current(), proof, sources, signal);
+            if (!finding || finding.revision !== proof.execution) throw new IssueDeliverySourcesChanged();
+            signal.throwIfAborted();
+            save({ ...current(), sourceHandoff: { proof, finding } }, `dependency-source-${finding.status}`);
+            if (finding.status !== "pass") throw new IssueDeliverySourcesChanged();
+          },
+        } } : {}),
         repairing: diagnostic => save(current(), "patch-repair", diagnostic),
         ...(c.approval?.quality ? { workerProof: { repo: connection.repo, issueRevision: c.approval.issueRevision,
           plan: { flowId: c.approval.flowId, version: c.approval.version,
@@ -353,6 +405,11 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
         accountAssignment => save({ ...current(), accountAssignment }, "account-assigned"));
       const checkedIssue = await connection.read(c.number);
       if (!stillAssignee(c, checkedIssue) || checkedIssue.pulls.length) throw Error("工单状态已变化。");
+      if (current().phase !== "developing") throw new IssueDeliverySourcesChanged();
+      const handoff = current().sourceHandoff;
+      if (handoff && (handoff.finding.status !== "pass" || handoff.proof.execution !== prepared.executionRevision
+        || JSON.stringify(await producers(handoff.proof.producers[0]?.baseName ?? "", abort.signal))
+          !== JSON.stringify(handoff.proof.producers))) throw new IssueDeliverySourcesChanged();
       abort.signal.throwIfAborted();
       const target = { branch, head: prepared.head, base: prepared.base };
       save({ ...current(), target, ...(prepared.checked ? { checked: prepared.checked } : {}), phase: "publishing" }, "checked");
@@ -389,7 +446,9 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       }
       const upstream = c.delivery.dependsOn.map(number => claims.get(number)?.pull);
       if (!upstream.every(pull => pull?.state === "MERGED" && pull.mergeCommit)) continue;
-      save({ ...c, phase: "developing" }, upstream.length ? "woken" : "dispatched");
+      const checkSources = !!(c.delivery.sourceFrom?.length && delivery.reviewSourceHandoff);
+      save({ ...c, phase: checkSources ? "checkingSources" : "developing" },
+        checkSources ? "dependency-source-checking" : upstream.length ? "woken" : "dispatched");
       const job = develop(c, c.delivery, upstream.map(pull => pull?.mergeCommit ?? ""));
       jobs.add(job);
       void job.finally(() => { jobs.delete(job); });
@@ -523,7 +582,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
             if (prior.phase === "uncertain" && prior.claimUncertain && stillAssignee(prior, issue)) {
               return { issue, resume: prior, deliverySpec, authorization };
             }
-            if (["waiting", "developing", "publishing", "submitted", "deliveryFailed"].includes(prior.phase)) return undefined;
+            if (["waiting", "checkingSources", "developing", "publishing", "submitted", "deliveryFailed"].includes(prior.phase)) return undefined;
           }
           if (prior || issue.state !== "OPEN" || issue.assignees.length || issue.pulls.length) {
             throw new IssueActionError(409, "工单状态已变化，请重新规划。");

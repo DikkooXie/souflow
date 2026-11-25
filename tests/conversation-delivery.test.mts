@@ -613,6 +613,10 @@ test("从新需求复核和授权，创建 Issue 后认领派发，重启后能�
   let visible = false;
   let merged = false;
   const merge = "b".repeat(40);
+  const head = "c".repeat(40);
+  let liveService: ReturnType<typeof createConversationDelivery> | undefined;
+  let sourceFailure: unknown;
+  const reviewedRevisions: string[] = [];
   function read(number: number) {
     const issue = remote.get(number);
     assert.ok(issue);
@@ -640,8 +644,12 @@ test("从新需求复核和授权，创建 Issue 后认领派发，重启后能�
     },
     delivery: {
       checkout: async () => assert.fail("由夹具提供工作区"),
-      publish: async ({ issue }) => ({ number: 100 + issue, url: `https://github.com/a/b/pull/${100 + issue}`, state: "OPEN" }),
-      find: async (_branch, _head, knownPull) => knownPull === 110 ? { number: 110, url: "https://github.com/a/b/pull/110",
+      async publish({ issue }) {
+        const pull = { number: 100 + issue, url: `https://github.com/a/b/pull/${100 + issue}`, state: "OPEN", head, baseName: "main" };
+        read(issue).pulls.push(pull);
+        return pull;
+      },
+      find: async (_branch, _head, knownPull) => knownPull === 110 ? { number: 110, url: "https://github.com/a/b/pull/110", head, baseName: "main",
         state: merged ? "MERGED" : "OPEN", ...(merged ? { mergeCommit: merge } : {}) } : undefined,
     },
   };
@@ -650,24 +658,59 @@ test("从新需求复核和授权，创建 Issue 后认领派发，重启后能�
   });
   const github = createIssueDispatch(tracker, store(claims), async () => assert.fail("不得进入只读核验"), () => true, 2,
     new Map([["member", tracker]]), { specs: new Map(), conversation: true, requireQuality: true, pollMs: 60_000,
-      prepare: async ({ number, branch, upstream }) => {
+      reviewScopeCurrent: claim => !!liveService?.reviewScope(claim, flow),
+      async reviewSourceHandoff(claim, proof, sources, signal) {
+        assert.ok(liveService);
+        return liveService.reviewHandoff(claim, flow, proof, sources, signal);
+      },
+      prepare: async ({ number, branch, upstream, spec, sourceHandoff }, _connected, signal) => {
         assert.deepEqual(upstream, number === 11 ? [merge] : []);
+        if (number === 11) {
+          assert.ok(sourceHandoff);
+          assert.deepEqual(spec.sourceFrom, up.files.map(path => ({ path, issue: 10 })));
+          const parent = read(10);
+          const approvedBody = parent.body;
+          parent.body = "未经授权的上游范围";
+          await assert.rejects(sourceHandoff.current("main", signal), /依赖合并改变了已校验的源码/);
+          assert.equal(claims.get("11")?.phase, "checkingSources");
+          parent.body = approvedBody;
+          const producers = await sourceHandoff.current("main", signal).catch(error => { sourceFailure = error; throw error; });
+          assert.deepEqual(producers.map(item => [item.issue, item.pull, item.merge]), [[10, 110, merge]]);
+          const paths = [...down.files, ...up.files];
+          await sourceHandoff.review({ original: "a".repeat(40), execution: merge, producers,
+            blobs: paths.map(path => ({ path, mode: "100644", sha: "d".repeat(40) })) },
+          Object.fromEntries(paths.map(path => [path, "合并后的真实接口夹具"])), signal).catch(error => { sourceFailure = error; throw error; });
+          assert.equal(claims.get("11")?.sourceHandoff?.finding.status, "pass");
+          assert.equal(claims.get("11")?.phase, "checkingSources");
+          sourceHandoff.ready();
+        }
         writes.push(`开发 ${number}`);
-        return { workspace: "fixture", branch, base: "main", head: "a".repeat(40) };
+        return { workspace: "fixture", branch, base: "main", head, ...(number === 11 ? { executionRevision: merge } : {}) };
       },
     });
   const makeService = () => createConversationDelivery(github, store(proposals), async () => "new", passingQualityReview,
     async (_revision, paths) => Object.fromEntries(paths.map(path => [path, "冻结的源码"])), {
+      sourceReview: { concurrency: 2, async reviewer(packet) {
+        const [ref, quote] = Object.entries(packet.references)[0] ?? [];
+        assert.ok(ref && quote);
+        if (packet.handoff) {
+          assert.equal(packet.handoff.original, "a".repeat(40));
+          assert.equal(quote, "合并后的真实接口夹具");
+          reviewedRevisions.push(packet.revision);
+        }
+        return JSON.stringify({ status: "pass", summary: "按固定资料核对接口", evidence: [{ ref, quote }] });
+      } },
       draft: async () => ({ batchAcceptance, tickets: [
         { id: "T1", title: "上游工单", instructions: "实现新需求。", paths: up.files, dependsOn: [], criteria: up.criteria, validation,
           delivery: { outcome: "用户能看到待确认纪要", priorityReason: "先交付确认入口", prerequisites: [] } },
-        { id: "T2", title: "下游工单", instructions: "在合并后验证。", paths: down.files, dependsOn: ["T1"], criteria: up.criteria, validation,
+        { id: "T2", title: "下游工单", instructions: "在合并后验证。", paths: down.files, sources: up.files, dependsOn: ["T1"], criteria: up.criteria, validation,
           delivery: { outcome: "用户反复确认仍只收到一条待办", priorityReason: "复用上游确认入口",
             prerequisites: [{ ticket: "T1", reason: "需要上游合并后的确认操作入口" }] } },
       ] }),
       publish: createPlannedIssuePublication(store(receipts)), connection: actor => actor === "member" ? tracker : undefined,
     });
   const initial = makeService();
+  liveService = initial;
   let restarted: ReturnType<typeof makeService> | undefined;
   try {
     assert.equal(initial.begin(flow, "首版"), true);
@@ -677,6 +720,7 @@ test("从新需求复核和授权，创建 Issue 后认领派发，重启后能�
     assert.match(card.prompt, /T2 · 下游工单/);
     assert.match(card.prompt, /可演示结果：用户能看到待确认纪要/);
     assert.match(card.prompt, /前置 T1：需要上游合并后的确认操作入口/);
+    assert.ok(card.prompt.includes(`只读交接：T1 合并后重新核对 ${up.files[0]}`));
     assert.match(card.prompt, /AC-2 · 整批验收 · 等待并合并上游 PR/);
     assert.match(card.prompt, /AC-3 · 关联 Issue #3/);
     assert.deepEqual(initial.statuses([flow], "member")[0]?.batchAcceptance, batchAcceptance);
@@ -692,6 +736,7 @@ test("从新需求复核和授权，创建 Issue 后认领派发，重启后能�
     assert.deepEqual(await github.suggest(), []);
     await initial.close();
     restarted = makeService();
+    liveService = restarted;
     assert.equal(await restarted.resumePublication(flow, "other"), 409);
     assert.equal(await restarted.resumePublication(flow, "member"), 409);
     assert.deepEqual(writes, ["创建 10"]);
@@ -712,8 +757,12 @@ test("从新需求复核和授权，创建 Issue 后认领派发，重启后能�
     merged = true;
     await github.refresh();
     await setImmediate();
+    assert.ifError(sourceFailure);
     assert.deepEqual(writes.slice(-2), ["开发 10", "开发 11"]);
     assert.equal(claims.get("11")?.pull?.number, 111);
+    assert.deepEqual(reviewedRevisions, [merge]);
+    await github.refresh();
+    assert.equal(writes.filter(write => write === "开发 11").length, 1);
   } finally {
     await Promise.all([initial.close(), restarted?.close(), github.close()]);
   }
