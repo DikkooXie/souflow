@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { startCodexReadOnlyTask } from "../src/execution/codex-command-attempt.mts";
 import { createCodexQualityReviewer } from "../src/execution/codex-quality-review.mts";
 import { readDispatchTickets } from "../src/execution/local-dispatch.mts";
-import { qualityBlock, qualityCurrent, reviewQuality } from "../src/planning/dispatch-quality.mts";
+import { prepareVerifiedDraft, qualityBlock, qualityCurrent, reviewQuality } from "../src/planning/dispatch-quality.mts";
 import { deviceTicketPlan } from "./fixtures/device-ticket-plan.mts";
 import { qualityReviewOutput } from "./fixtures/planning-quality.mts";
 
@@ -67,6 +67,22 @@ test("逐单复核必须引用每张工单，并能阻止按技术层拆、虚�
   assert.ok(secondCheck && firstCheck);
   await assert.rejects(reviewQuality(accepted, fixture.tickets,
     async () => JSON.stringify({ ...output, breakdown: [firstCheck, { ...secondCheck, evidence: firstCheck.evidence }] }), signal), /未引用 T2/);
+});
+
+test("新建工单的两个验收字段均采用旧编号时也能修正一次", async () => {
+  const { tickets } = await deviceTicketPlan();
+  const allowed = new Set(tickets.flatMap(ticket => ticket.paths));
+  let calls = 0;
+  const result = await prepareVerifiedDraft(async feedback => {
+    calls++;
+    if (calls === 2) assert.match(feedback ?? "", /工单 T1 验收编号必须从本轮资料原样选择：AC-1、AC-2/);
+    return JSON.stringify({ tickets: tickets.map(ticket => ({ ...ticket, editPaths: ticket.paths, sources: [],
+      ...(calls === 1 && ticket.id === "T1"
+        ? { criteria: ["AC-01"], validation: ticket.validation.map(item => ({ ...item, criterion: "AC-01" })) } : {}),
+    })) });
+  }, output => readDispatchTickets(output, ["AC-1", "AC-2"], allowed, "code", undefined, true, 16_000, true));
+  assert.equal(calls, 2);
+  assert.deepEqual(result.map(ticket => ticket.criteria), [["AC-1"], ["AC-2"]]);
 });
 
 test("逐单复核通过真实适配器协议完整接收超过旧上限的有效结果", async () => {

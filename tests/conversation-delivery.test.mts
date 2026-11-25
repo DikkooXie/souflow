@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { issueRevision, type DeliveryTracker, type IssueDetail } from "../src/connections/issue-tracker.mts";
 import { currentDevelopmentPlan } from "../src/planning/conversation-flow.mts";
-import { readGitHubSelection } from "../src/planning/github-selection.mts";
+import { createGitHubSelector, readGitHubSelection } from "../src/planning/github-selection.mts";
 import { snapshotIssueCandidates } from "../src/planning/project-context.mts";
 import { createConversationDelivery, type IssueProposal } from "../src/workbench/conversation-delivery.mts";
 import { type Claim, createIssueDispatch } from "../src/workbench/issue-dispatch.mts";
@@ -40,6 +44,56 @@ test("保留 Issue 正文中用井号声明的依赖，拒绝遗漏该依赖的�
 
   assert.deepEqual(read([up, down])[1]?.dependsOn, [1]);
   assert.throws(() => read([up, { ...down, dependsOn: [] }]));
+});
+
+test("GitHub 选单验收映射错误时，在同一冻结资料内只修正一次", async t => {
+  const repo = await mkdtemp(join(tmpdir(), "souflow-selection-repair-"));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  for (const path of [...up.files, route]) {
+    await mkdir(join(repo, dirname(path)), { recursive: true });
+    await writeFile(join(repo, path), "export const valid = true;\n");
+  }
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: repo }).toString().trim();
+  git("init", "-q");
+  git("add", "src");
+  git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--no-gpg-sign", "-qm", "fixture");
+  const flow = await readyQualityFlow();
+  flow.project = { repository: { revision: git("rev-parse", "HEAD"), commits: [] }, plan: { status: "read" }, github: { status: "read" } };
+  const signal = new AbortController().signal;
+  const issue = makeIssue(1);
+  async function select(second: typeof up, first: typeof up = { ...up, validation: [] }) {
+    const calls: { prompt: string; context?: string }[] = [];
+    const selector = createGitHubSelector(repo, { timeoutMs: 2000, newIssues: true }, options => {
+      calls.push({ prompt: options.prompt, ...(options.untrustedContext ? { context: options.untrustedContext } : {}) });
+      const candidate = calls.length === 1 ? first : second;
+      return { finished: Promise.resolve("completed"), output: () => JSON.stringify({ intent: "existing", issues: [candidate] }),
+        close() {}, answerQuestions: () => false };
+    });
+    const result = await selector(flow, "已冻结的计划正文", [issue], signal).catch((error: unknown) => error);
+    return { result, calls };
+  }
+  const repaired = await select(up);
+  assert.ok(Array.isArray(repaired.result));
+  assert.equal(repaired.calls.length, 2);
+  assert.equal(repaired.calls[0]?.context, repaired.calls[1]?.context);
+  assert.match(repaired.calls[1]?.prompt ?? "", /工单 #1.*AC-1/);
+  assert.equal(repaired.result[0]?.validation[0]?.criterion, "AC-1");
+
+  const step = validation[0];
+  assert.ok(step);
+  const wrongId = { ...up, validation: [{ ...step, criterion: "AC-01" }] };
+  const rejected = await select(wrongId);
+  assert.equal(rejected.calls.length, 2);
+  assert.match(String(rejected.result), /工单 #1.*AC-1/);
+
+  const copiedNumber = await select(up, { ...wrongId, criteria: ["AC-01"] });
+  assert.equal(copiedNumber.calls.length, 2);
+  assert.match(copiedNumber.calls[1]?.prompt ?? "", /工单 #1 验收编号必须从本轮资料原样选择：AC-1/);
+  assert.ok(Array.isArray(copiedNumber.result));
+
+  const outsideScope = await select(up, { ...up, number: 99 });
+  assert.equal(outsideScope.calls.length, 1);
+  assert.match(String(outsideScope.result), /不在本轮候选资料/);
 });
 
 test("授权卡仅由发起者回答，固定计划并阻止双击重复派发", async () => {

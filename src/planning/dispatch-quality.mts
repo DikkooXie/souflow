@@ -53,19 +53,40 @@ export function acceptanceCriteria(flow: Flow) {
   return text.split(/\r?\n/).map(line => line.trim()).filter(Boolean).map((text, i) => ({ id: `AC-${i + 1}`, text }));
 }
 
-export function readVerification(raw: unknown, criteria: readonly string[]) {
+class VerificationMappingError extends Error {}
+
+export function readVerification(raw: unknown, criteria: readonly string[], ticket?: string, allowed?: readonly string[]) {
+  const subject = ticket ? `工单 ${ticket} ` : "";
+  if (allowed && criteria.some(id => !allowed.includes(id))) {
+    throw new VerificationMappingError(`工单校验未通过：${subject}验收编号必须从本轮资料原样选择：${allowed.join("、")}。`);
+  }
+  const invalidMapping = () => new VerificationMappingError(
+    `工单校验未通过：${subject}每项验收引用需要一条验证步骤和预期结果。按 criteria 中的编号原样填写，且每个编号只出现一次：${criteria.join("、") || "空"}。`);
   if (!Array.isArray(raw) || raw.length !== criteria.length || new Set(criteria).size !== criteria.length) {
-    throw Error("工单校验未通过：每项验收引用需要一条验证步骤和预期结果。");
+    throw invalidMapping();
   }
   const seen = new Set(criteria);
   return raw.map(item => {
     const { criterion, procedure, expected } = object(item) ?? {};
-    if (typeof criterion !== "string" || !seen.delete(criterion) || typeof procedure !== "string" || !procedure.trim()
-      || procedure.length > 500 || typeof expected !== "string" || !expected.trim() || expected.length > 300) {
-      throw Error(`工单校验未通过：${typeof criterion === "string" ? scrubAuditText(criterion).slice(0, 30) : "验收项"} 缺少有效验证步骤或预期结果。`);
+    if (typeof criterion !== "string" || !seen.delete(criterion)) throw invalidMapping();
+    if (typeof procedure !== "string" || !procedure.trim() || procedure.length > 500
+      || typeof expected !== "string" || !expected.trim() || expected.length > 300) {
+      throw new VerificationMappingError(`工单校验未通过：${subject}${criterion} 缺少有效验证步骤或预期结果。`);
     }
     return { criterion, procedure: scrubAuditText(procedure.trim()), expected: scrubAuditText(expected.trim()) };
   });
+}
+
+export async function prepareVerifiedDraft<T>(generate: (feedback?: string) => Promise<string | undefined>,
+  parse: (output: string | undefined) => T): Promise<T> {
+  const output = await generate();
+  try {
+    return parse(output);
+  } catch (error) {
+    if (!(error instanceof VerificationMappingError)) throw error;
+    // 修正一次并重新运行全部解析器，模型仍只看到同一份计划、仓库版本和允许范围。
+    return parse(await generate(error.message));
+  }
 }
 
 function planningDocuments(flow: Flow) {
@@ -110,7 +131,7 @@ export function qualityPacket(flow: Flow, revision: string, id: string, tickets:
     || (flow.project?.repository && flow.project.repository.revision !== revision)) {
     throw Error(`工单校验未通过：${errors.join("、") || "验收项或仓库版本不匹配"}。`);
   }
-  for (const ticket of tickets) readVerification(ticket.validation, ticket.criteria);
+  for (const ticket of tickets) readVerification(ticket.validation, ticket.criteria, ticket.id);
   // 批次中的结构工单引用当前计划，即使改版后旧的文字草稿已移入历史。
   const references = Object.fromEntries([
     ["request", planning.request],
