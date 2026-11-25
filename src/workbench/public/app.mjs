@@ -339,7 +339,7 @@ function renderProjectSources(flow) {
   const project = flow.project;
   projectContext.hidden = !project;
   const key = JSON.stringify([flow.id, project?.repository?.revision, project?.plan, project?.github,
-    project?.relatedIssues, project?.relatedPullRequests, project?.relatedIssueOmissions]);
+    project?.relatedIssues, project?.relatedPullRequests, project?.relatedIssueOmissions, project?.planningSources]);
   if (projectContext.dataset.key === key) return;
   projectContext.dataset.key = key;
   projectContext.dataset.flow = flow.id;
@@ -386,6 +386,13 @@ function renderProjectSources(flow) {
   if (project.relatedIssueOmissions) {
     const { count, examples } = project.relatedIssueOmissions;
     projectSources.append(node("li", "", `${count} 条关联条目超出本轮资料范围，包括 ${examples.map(id => `#${id}`).join("、")}`));
+  }
+  for (const entry of project.planningSources?.files ?? []) {
+    const status = entry.status === "read" ? `已读 · ${entry.sha256.slice(0, 8)}` : "未读 · 文件限制或读取失败";
+    projectSources.append(node("li", "", `固定源码 ${entry.path} · ${status}`));
+  }
+  if (project.planningSources?.omitted) {
+    projectSources.append(node("li", "", `${project.planningSources.omitted} 个源码引用超出本轮文件数量上限`));
   }
 }
 

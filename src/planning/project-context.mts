@@ -20,6 +20,9 @@ type IssueSource = { number: number; title: string; body?: string; truncated?: b
 type RelatedIssue = { number: number; url: string } & ({ status: "unavailable" }
   | { status: "read"; state: "OPEN" | "CLOSED"; assigned: boolean; source: IssueSource });
 type RelatedPullRequest = PullRequest & { head: string; mergeCommit?: string; source: IssueSource };
+export type PlanningSourceFile = { path: string } & (
+  { status: "unavailable" } | { status: "read"; bytes: number; sha256: string }
+);
 export type ProjectEvidence = {
   repository?: { revision: string; commits: { revision: string; subject: string }[] };
   plan: { status: "unconfigured" | "unavailable" | "read"; path?: string };
@@ -27,6 +30,7 @@ export type ProjectEvidence = {
   relatedIssues?: RelatedIssue[];
   relatedPullRequests?: RelatedPullRequest[];
   relatedIssueOmissions?: { count: number; examples: number[] };
+  planningSources?: { files: PlanningSourceFile[]; omitted: number };
   github: { status: "unconfigured" | "unavailable" | "read"; repo?: string; pullRequests?: PullRequest[] };
 };
 export type ProjectContext = { evidence: ProjectEvidence; planText?: string };

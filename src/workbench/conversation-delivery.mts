@@ -346,7 +346,10 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
     },
     replanFeedback(flow: Flow, actor: string) {
       const p = [...proposals.values()].reverse().find(item => item.flowId === flow.id && item.actor === actor && valid(item, flow));
-      if (p?.status === "blocked" && p.approvedAt === undefined && p.error) return { batchId: p.id, findings: p.error };
+      if (p?.status !== "blocked" || p.approvedAt !== undefined || !p.error) return;
+      const sourcePaths = [...new Set((p.quality?.sourceChecks ?? []).flatMap(check =>
+        check.evidence.flatMap(({ ref }) => ref.startsWith("repo:") && check.paths.includes(ref.slice(5)) ? [ref.slice(5)] : [])))];
+      return { batchId: p.id, findings: p.error, ...(sourcePaths.length ? { sourcePaths } : {}) };
     },
     locks(flowId: string) { return [...proposals.values()].some(p => p.flowId === flowId
       && p.approvedAt !== undefined); },

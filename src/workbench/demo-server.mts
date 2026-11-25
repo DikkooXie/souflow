@@ -29,9 +29,10 @@ import { loadLocalEnv, readCodeWorkerConfig, runtimeInteger } from "../config/ru
 import { workerId } from "../execution/code-worker-protocol.mts";
 import { createRemoteWorkerIngress, readRemoteFiles, remoteWorkerNetwork, type RemoteLanConfig } from "./remote-worker-ingress.mts";
 import { createCodexAccountDispatch, readCodexProfiles, type CodexAccountDispatch } from "../execution/codex-account-dispatch.mts";
-import { createConversationFlows, currentDevelopmentPlan, maxArtifactTextLength, phases, readPlanRevision, type StoredFlow } from "../planning/conversation-flow.mts";
+import { createConversationFlows, currentDevelopmentPlan, maxArtifactTextLength, phases, readPlanRevision, type Flow, type StoredFlow } from "../planning/conversation-flow.mts";
 import { createProjectContextReader, readRelatedIssues, snapshotIssueCandidates, type ProjectSettings } from "../planning/project-context.mts";
 import { createCodexInbox } from "./codex-inbox.mts";
+import { freezePlanningSources } from "../execution/frozen-planning-sources.mts";
 import { createDecisionDemo, type DecisionCard } from "./demo-state.mts";
 import { createAcceptance, maxAcceptanceNote, type AcceptanceAction, type StoredAcceptance } from "./acceptance.mts";
 import { createMembers, type Member, type MemberKeys } from "./members.mts";
@@ -193,17 +194,30 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
             ...(!qualityReviewer || ticketSourceReviewer ? { sourceReview: { concurrency: dispatchConcurrency,
               reviewer: ticketSourceReviewer ?? createCodexTicketSourceReviewer(live[0], qualityModel ?? issueDelivery.planningModel, issueDelivery.timeoutMs) } } : {}),
           } : undefined) : undefined;
-      const projectContext = loadProject && issuePlanning && github && issueTracker ? async () => {
-        const [context, issues] = await Promise.all([loadProject(), github.suggest().catch(() => undefined)]);
-        context.evidence.issueCandidates = snapshotIssueCandidates(issues ?? []);
-        if (context.evidence.github.repo?.toLowerCase() === issueTracker.repo.toLowerCase()) {
-          const related = await readRelatedIssues(issueTracker, issues ?? [], context.planText);
-          context.evidence.relatedIssues = related.issues;
-          if (related.pullRequests.length) context.evidence.relatedPullRequests = related.pullRequests;
-          if (related.omissions) context.evidence.relatedIssueOmissions = related.omissions;
+      const projectContext = loadProject && live ? async (flow: Flow) => {
+        const [context, issues] = await Promise.all([
+          loadProject(), issuePlanning && github ? github.suggest().catch(() => undefined) : undefined,
+        ]);
+        if (issuePlanning && issueTracker) {
+          context.evidence.issueCandidates = snapshotIssueCandidates(issues ?? []);
+          if (context.evidence.github.repo?.toLowerCase() === issueTracker.repo.toLowerCase()) {
+            const related = await readRelatedIssues(issueTracker, issues ?? [], context.planText);
+            context.evidence.relatedIssues = related.issues;
+            if (related.pullRequests.length) context.evidence.relatedPullRequests = related.pullRequests;
+            if (related.omissions) context.evidence.relatedIssueOmissions = related.omissions;
+          }
+        }
+        const revision = context.evidence.repository?.revision;
+        if (revision) {
+          const sources = await freezePlanningSources(live[0], revision,
+            [flow.prompt, ...(flow.replan?.sourcePaths ?? []), flow.replan?.findings ?? "", context.planText ?? "",
+              ...(context.evidence.issueCandidates ?? []).map(issue => issue.body ?? ""),
+              ...(context.evidence.relatedIssues ?? []).flatMap(issue => issue.status === "read" ? [issue.source.body ?? ""] : []),
+              ...(context.evidence.relatedPullRequests ?? []).map(pr => pr.source.body ?? "")]);
+          if (sources) context.evidence.planningSources = sources;
         }
         return context;
-      } : loadProject;
+      } : undefined;
       const flows = createConversationFlows(inbox.runPhase, codex ? limits.codex : limits.demo, audit.record, projectContext,
         recovery ? audit.checkpoint<StoredFlow>("flows") : undefined, issuePlanning?.begin,
         codex ? flowId => codex.snapshot().requests.flatMap(card => card.flowId === flowId && card.status === "closed"

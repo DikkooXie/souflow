@@ -6,8 +6,10 @@ import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import type { PlanningReference } from "../src/connections/issue-tracker.mts";
+import { freezePlanningSources, frozenPlanningInput } from "../src/execution/frozen-planning-sources.mts";
 import { createConversationFlows, makePhasePrompt, phases } from "../src/planning/conversation-flow.mts";
 import { createProjectContextReader, readRelatedIssues, snapshotIssueCandidates } from "../src/planning/project-context.mts";
+import { createCodexInbox } from "../src/workbench/codex-inbox.mts";
 
 test("先读明确前置和已关闭的关联工单，保持候选边界与来源版本", async () => {
   const issue = (number: number, body: string, state = "OPEN", assignees: string[] = []) => ({
@@ -104,6 +106,57 @@ test("冻结混合 GitHub 引用时保留真实类型，PR 不占用 Issue 候�
 });
 
 const exec = promisify(execFile);
+
+test("规划只接收固定提交的只读正文，编辑工作区与旧版本恢复均有边界", async t => {
+  const repo = await mkdtemp(join(tmpdir(), "souflow-frozen-planning-"));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const git = async (...args: string[]) => (await exec("git", ["-C", repo, ...args])).stdout.trim();
+  await git("init", "-q");
+  await mkdir(join(repo, "src", "other"), { recursive: true });
+  await writeFile(join(repo, "src/entry.mts"), "export const visible = 'approved-source';\n密码: example-password\n");
+  await writeFile(join(repo, "src/route.mts"), "export const route = 'a';\n");
+  await writeFile(join(repo, "src/other/route.mts"), "export const route = 'b';\n");
+  await writeFile(join(repo, "src/.local.mts"), "do not use");
+  await symlink("entry.mts", join(repo, "src/linked.mts"));
+  await git("add", "src");
+  await git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "initial");
+  const revision = await git("rev-parse", "HEAD");
+  const planningSources = await freezePlanningSources(repo, revision,
+    ["entry.mts 和 route.mts", "src/missing.mts\nsrc/linked.mts\nsrc/.local.mts\nsrc/route.mts"], 3);
+  assert.ok(planningSources);
+  assert.deepEqual(planningSources.files.map(item => [item.path, item.status]),
+    [["src/entry.mts", "read"], ["src/missing.mts", "unavailable"], ["src/linked.mts", "unavailable"]]);
+  assert.equal(planningSources.omitted, 1);
+  await writeFile(join(repo, "src/entry.mts"), "export const visible = 'new-head';");
+  await git("add", "src/entry.mts");
+  await git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "new");
+  await writeFile(join(repo, "src/entry.mts"), "export const visible = 'dirty-workspace';");
+  const evidence = { repository: { revision, commits: [] }, plan: { status: "read" as const },
+    github: { status: "read" as const }, planningSources };
+  const input = await frozenPlanningInput(repo, evidence);
+  assert.match(input ?? "", /approved-source/);
+  assert.doesNotMatch(input ?? "", /new-head|dirty-workspace|example-password/);
+  const sent: (string | undefined)[] = [];
+  const inbox = createCodexInbox(repo, { limit: 1, answerMaxLength: 100, startAttempt(options) {
+    sent.push(options.untrustedContext);
+    assert.doesNotMatch(options.prompt, /approved-source/);
+    return { finished: Promise.resolve("completed"), close() {}, answerQuestions: () => false,
+      output: () => JSON.stringify(Object.fromEntries(((options.outputSchema?.required ?? []) as string[]).map(field => [field, "样例"]))) };
+  } });
+  const service = createConversationFlows(inbox.runPhase, 1, undefined, async () => ({ evidence }));
+  service.begin("更新 entry.mts");
+  await service.settled();
+  assert.equal(service.list()[0]?.status, "ready");
+  assert.deepEqual(sent, Array(phases.length).fill(input));
+  assert.doesNotMatch(JSON.stringify(service.list()), /approved-source|example-password/);
+  const invalid = structuredClone(evidence);
+  const file = invalid.planningSources.files[0];
+  assert.ok(file?.status === "read");
+  file.sha256 = "0".repeat(64);
+  await assert.rejects(frozenPlanningInput(repo, invalid), /固定规划源码资料已不可读/);
+  const { planningSources: _unused, ...legacy } = evidence;
+  assert.equal(await frozenPlanningInput(repo, legacy), undefined);
+});
 
 test("continuing a project binds every stage to the same committed plan, with unavailable sources explicit", async t => {
   const repo = await mkdtemp(join(tmpdir(), "souflow-project-context-"));

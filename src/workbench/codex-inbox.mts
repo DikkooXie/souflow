@@ -3,6 +3,7 @@ import { auditDecisionAnswers, type BusinessEvent, type Checkpoint, type RecordB
 import { readDecisionAnswers } from "../decisions/questions.mts";
 import { startCodexQuestionAttempt, type CodexAttemptEvent } from "../execution/codex-command-attempt.mts";
 import type { DispatchMonitor } from "../execution/dispatch-monitor.mts";
+import { frozenPlanningInput } from "../execution/frozen-planning-sources.mts";
 import { clarificationOrigin, type Flow, makePhasePrompt, type Phase, type PhaseTarget, readPhaseOutput } from "../planning/conversation-flow.mts";
 import type { DecisionCard } from "./demo-state.mts";
 
@@ -60,6 +61,7 @@ export function createCodexInbox(workspace: string, options: {
   }
 
   function begin(prompt: string, step?: { flow: Flow; phase: Phase; targets: readonly PhaseTarget[];
+    sourceInput?: string;
     complete: (output: string | undefined, interrupted: boolean) => void }): 200 | 409 | 503 {
     if (!canBegin()) return 409;
     const attemptId = randomUUID();
@@ -108,6 +110,7 @@ export function createCodexInbox(workspace: string, options: {
       const fields = step?.phase.fields;
       attempt = startAttempt({ workspace, prompt, onEvent, answerMaxLength,
         ...(step?.flow.project ? { disableWebSearch: true } : {}),
+        ...(step?.sourceInput ? { untrustedContext: step.sourceInput } : {}),
         ...(monitored ? { onThread: monitored.connected, onAccount: monitored.account } : {}),
         onModel: model => {
           monitored?.model(model);
@@ -141,10 +144,12 @@ export function createCodexInbox(workspace: string, options: {
     snapshot: () => ({ requests, mode: "codex" as const, active: active.size, lastMessage }),
     begin,
     canBegin,
-    runPhase(flow: Flow, phase: Phase, targets: readonly PhaseTarget[], planText?: string) {
+    async runPhase(flow: Flow, phase: Phase, targets: readonly PhaseTarget[], planText?: string) {
+      const sourceInput = await frozenPlanningInput(workspace, flow.project);
       return new Promise<string[] | "interrupted" | undefined>(resolve => {
         const status = begin(makePhasePrompt(flow, phase, targets, planText), {
-          flow, phase, targets, complete: (output, interrupted) => resolve(interrupted ? "interrupted" : readPhaseOutput(phase, output)),
+          flow, phase, targets, ...(sourceInput ? { sourceInput } : {}),
+          complete: (output, interrupted) => resolve(interrupted ? "interrupted" : readPhaseOutput(phase, output)),
         });
         if (status !== 200) resolve(status === 409 ? "interrupted" : undefined);
       });
