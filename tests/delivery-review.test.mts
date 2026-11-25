@@ -60,6 +60,16 @@ test("引用其它验收项的测试或不存在的代码时保留可信的一�
   assert.equal(falseCode.requirements?.criteria.length, 2);
 });
 
+test("同一个文件的两处有效引文可并存，重复同一引文仍会被拦截", async () => {
+  const signal = new AbortController().signal;
+  const excerpt = { ref: "src/devices.mts", quote: "return deny()" };
+  const withQuotes = (quote: string) => JSON.stringify({ ...JSON.parse(code()), evidence: [excerpt, { ...excerpt, quote }] });
+  const distinct = await reviewDelivery(packet, async axis => axis === "implementation" ? withQuotes("isRevoked") : requirements(), signal);
+  assert.equal(distinct.status, "pass");
+  const duplicate = await reviewDelivery(packet, async axis => axis === "implementation" ? withQuotes(excerpt.quote) : requirements(), signal);
+  assert.equal(duplicate.status, "incomplete");
+});
+
 test("同一 PR 的新提交或验收版本变化产生不同的复核标识", async () => {
   const run = async () => undefined;
   const signal = new AbortController().signal;

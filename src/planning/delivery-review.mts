@@ -63,8 +63,10 @@ function parseFinding(value: Record<string, unknown>, references: ReadonlyMap<st
   const quotes = (evidence as unknown[]).map(item => {
     const { ref, quote } = object(item);
     if (typeof ref !== "string" || typeof quote !== "string" || quote.trim().length < 2 || quote.length > deliveryReviewLimits.quote
-      || seen.has(ref) || !references.get(ref)?.includes(quote)) throw Error("复核引用无法在固定证据中找到。");
-    seen.add(ref);
+      || !references.get(ref)?.includes(quote)) throw Error("复核引用无法在固定证据中找到。");
+    const citation = JSON.stringify([ref, quote]);
+    if (seen.has(citation)) throw Error("复核重复引用了同一条证据。");
+    seen.add(citation);
     return { ref, quote };
   });
   return { status, summary: scrubAuditText(summary.trim()), evidence: quotes } satisfies ReviewFinding;
