@@ -190,7 +190,8 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         codex ? flowId => codex.snapshot().requests.flatMap(card => card.flowId === flowId && card.status === "closed"
           ? card.questions.flatMap(question => {
             const answer = card.answers?.[question.id];
-            return answer === undefined ? [] : [{ cardId: card.id, questionId: question.id, question: scrubAuditText(question.prompt), answer }];
+            return answer === undefined ? [] : [{ cardId: card.id, questionId: question.id, question: scrubAuditText(question.prompt), answer,
+              ...(card.clarificationOrigin ? { origin: card.clarificationOrigin } : {}) }];
           }) : []) : undefined);
       flows.reopenReady();
       return { codex, inbox, flows, dispatch, acceptance, github, issuePlanning };

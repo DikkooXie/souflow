@@ -102,6 +102,10 @@ test("restores interrupted planning and receipt state without redelivering a sta
     const path = `/api/workflows/${flowId}/resume`;
     const answer = (id: string, scope: string) => post(`/api/decisions/${id}/answer`, { scope });
     const first = await until(snapshot => snapshot.requests.find(card => card.status === "pending"));
+    const request = { id: `${flowId}/request`, version: 1 };
+    const requirements = { id: `${flowId}/requirements`, version: 1 };
+    const source = { phase: "需求澄清", request, requirements };
+    assert.deepEqual(first.clarificationOrigin, source);
     const original = (await read()).flows[0]?.outputs[0];
     assert.ok(original);
     const writer = new DatabaseSync(database);
@@ -121,6 +125,7 @@ test("restores interrupted planning and receipt state without redelivering a sta
     assert.equal(afterRestart.flows[0]?.status, "interrupted");
     assert.deepEqual(afterRestart.flows[0]?.outputs, [original]);
     assert.equal(afterRestart.requests[0]?.status, "uncertain");
+    assert.deepEqual(afterRestart.requests[0]?.clarificationOrigin, source);
     assert.equal((await fetch(`${origin}/api/decisions`)).status, 401);
     assert.equal((await post(path, undefined, "reviewer")).status, 403);
     assert.equal((await answer(first.id, "旧答复")).status, 409);
@@ -139,6 +144,11 @@ test("restores interrupted planning and receipt state without redelivering a sta
     assert.equal((await answer(third.id, "新会话的确认")).status, 200);
     const ready = await until(snapshot => snapshot.flows.find(flow => flow.status === "ready"));
     assert.deepEqual(ready.outputs[0], original);
+    assert.deepEqual(ready.clarifications, [{ cardId: third.id, questionId: "scope", question: "请选择范围。",
+      answer: "新会话的确认", origin: source }]);
+    for (const artifact of ready.outputs.slice(1).flatMap(output => output.artifacts)) {
+      assert.deepEqual(artifact.clarificationInputs, [{ cardId: third.id, questionId: "scope" }]);
+    }
     assert.deepEqual(phases, ["output", "clarify", "clarify", "clarify", "output", "output", "output"]);
     assert.deepEqual(delivered, [{ scope: "已发出但无回执" }, { scope: "新会话的确认" }]);
   } finally {
