@@ -33,6 +33,7 @@ export type QualityReceipt = {
   documents: { kind: string; id: string; version: number }[];
   checks: Record<(typeof dimensions)[number], Finding>;
   breakdown?: (Finding & { ticket: string })[];
+  sourceChecks?: TicketSourceFinding[];
 };
 export type QualityBinding = Pick<QualityReceipt, "policy" | "flowDigest" | "batchDigest">;
 export type QualityReviewer = (packet: QualityPacket, signal: AbortSignal) => Promise<string | undefined>;
@@ -150,12 +151,21 @@ export function qualityPacket(flow: Flow, revision: string, id: string, tickets:
   return { planning, references, revision, id, tickets };
 }
 
-export type QualityPacket = ReturnType<typeof qualityPacket>;
+export type QualityPacket = ReturnType<typeof qualityPacket> & { sourceReviewMode?: "per-ticket" };
+export type TicketSourcePacket = {
+  revision: string; ticket: QualityTicket; criteria: QualityPacket["planning"]["criteria"];
+  references: Record<string, string>;
+};
+export type TicketSourceFinding = Finding & { ticket: string; revision: string; paths: string[]; sourceDigest: string };
+export type TicketSourceReviewer = (packet: TicketSourcePacket, signal: AbortSignal) => Promise<string | undefined>;
 
 const findingFields = {
   status: { type: "string", enum: ["pass", "block"] }, summary: { type: "string" },
   evidence: { type: "array", items: { type: "object", additionalProperties: false, required: ["ref", "quote"],
     properties: { ref: { type: "string" }, quote: { type: "string" } } } },
+};
+export const ticketSourceReviewSchema = {
+  type: "object", additionalProperties: false, required: Object.keys(findingFields), properties: findingFields,
 };
 
 export function qualityReviewSchema(ticketBreakdown: boolean) {
@@ -180,7 +190,7 @@ export function qualityReviewOutputBytes(packet: QualityPacket) {
   return Buffer.byteLength(JSON.stringify({ ...documents, breakdown }, undefined, 2));
 }
 
-function readFinding(value: unknown, packet: QualityPacket, referenceLimit: number): Finding {
+function readFinding(value: unknown, packet: Pick<QualityPacket, "references">, referenceLimit: number): Finding {
   const row = object(value);
   if (!row || (row.status !== "pass" && row.status !== "block") || typeof row.summary !== "string"
     || !row.summary.trim() || row.summary.length > qualityReviewLimits.summaryCharacters || !Array.isArray(row.evidence)
@@ -197,6 +207,21 @@ function readFinding(value: unknown, packet: QualityPacket, referenceLimit: numb
     return { ref, quote: scrubAuditText(quote) };
   });
   return { status: row.status, summary: scrubAuditText(row.summary), evidence };
+}
+
+export async function reviewTicketSources(batch: QualityPacket, ticket: QualityTicket,
+  sources: Record<string, string>, reviewer: TicketSourceReviewer, signal: AbortSignal): Promise<TicketSourceFinding> {
+  const paths = [...new Set([...ticket.paths, ...(ticket.sources ?? [])])];
+  const missing = paths.filter(path => !Object.hasOwn(sources, path));
+  if (missing.length) throw Error(`工单校验未通过：${ticket.id} 的固定源码未完整读入（${missing.join("、")}）。`);
+  const references = Object.fromEntries(paths.map(path => [`repo:${path}`, sources[path] ?? ""]));
+  const packet: TicketSourcePacket = { revision: batch.revision, ticket, references,
+    criteria: batch.planning.criteria.filter(item => ticket.criteria.includes(item.id)) };
+  signal.throwIfAborted();
+  const raw = await reviewer(packet, signal);
+  signal.throwIfAborted();
+  const finding = readFinding(JSON.parse(raw ?? "null"), packet, qualityReviewLimits.breakdownReferences);
+  return { ...finding, ticket: ticket.id, revision: batch.revision, paths, sourceDigest: hash(references) };
 }
 
 function readBreakdown(raw: unknown, packet: QualityPacket) {
@@ -244,13 +269,15 @@ export function qualityBlock(receipt: QualityReceipt) {
     return check.status === "block" ? [`${details[key]}：${check.summary}`] : [];
   });
   const tickets = receipt.breakdown?.filter(finding => finding.status === "block").map(finding => `${finding.ticket}：${finding.summary}`) ?? [];
-  return [...documents, ...tickets].join("\n");
+  const sources = receipt.sourceChecks?.filter(finding => finding.status === "block").map(finding => `${finding.ticket} 源码：${finding.summary}`) ?? [];
+  return [...documents, ...tickets, ...sources].join("\n");
 }
 
 export function qualityCurrent(receipt: QualityReceipt | undefined, flow: Flow | undefined, payload: unknown) {
   return !!receipt && qualityBindingCurrent(receipt) && !!flow && receipt.flowDigest === planningDigest(flow)
     && receipt.batchDigest === hash(payload) && dimensions.every(key => receipt.checks?.[key]?.status === "pass")
-    && (receipt.breakdown?.every(finding => finding.status === "pass") ?? true);
+    && (receipt.breakdown?.every(finding => finding.status === "pass") ?? true)
+    && (receipt.sourceChecks?.every(finding => finding.status === "pass") ?? true);
 }
 
 export function qualityBindingCurrent(binding: QualityBinding | undefined) {

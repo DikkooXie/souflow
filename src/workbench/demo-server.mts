@@ -4,8 +4,8 @@ import { createPlannedIssuePublication, type IssuePublication } from "./planned-
 import { readFile } from "node:fs/promises";
 import { X509Certificate } from "node:crypto";
 import { createIssueDeveloper } from "../execution/issue-delivery.mts";
-import { createCodexQualityReviewer, qualitySources } from "../execution/codex-quality-review.mts";
-import type { QualityReviewer } from "../planning/dispatch-quality.mts";
+import { createCodexQualityReviewer, createCodexTicketSourceReviewer, qualitySources } from "../execution/codex-quality-review.mts";
+import type { QualityReviewer, TicketSourceReviewer } from "../planning/dispatch-quality.mts";
 import { createGitHubIssues } from "../connections/github.mts";
 import type { IssueTracker } from "../connections/issue-tracker.mts";
 import { createIssueVerifier, type VerifyIssue } from "../execution/issue-verification.mts";
@@ -93,13 +93,14 @@ type WorkbenchOptions = {
   remoteLan?: RemoteLanConfig;
   codeDevices?: ReadonlySet<string>;
   qualityReviewer?: QualityReviewer;
+  ticketSourceReviewer?: TicketSourceReviewer;
   qualityModel?: string;
 };
 
 export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions, auditPath?: string, {
   limits = defaultLimits, inputLimits = defaultInputLimits, auditThresholds = defaultAuditThresholds,
   dispatchConcurrency = defaultDispatchConcurrency, dispatchAdapters, project, members, issueTracker, verifyIssue, issueDelivery,
-  memberTrackers, hostName = hostname(), codexAccounts, remoteLan, codeDevices, qualityReviewer, qualityModel,
+  memberTrackers, hostName = hostname(), codexAccounts, remoteLan, codeDevices, qualityReviewer, ticketSourceReviewer, qualityModel,
 }: WorkbenchOptions = {}) {
   if (codeDevices?.size && (!remoteLan || !issueDelivery || !issueTracker)) {
     throw Error("代码设备需要开启设备接入和 GitHub 对话工单交付。");
@@ -179,6 +180,8 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
             draft: dispatch.planGitHub,
             publish: createPlannedIssuePublication(audit.checkpoint<IssuePublication>(`github-publications:${issueTracker.repo.toLowerCase()}`)),
             connection: actor => github.permits(actor) ? memberTrackers?.get(actor) ?? issueTracker : undefined,
+            ...(!qualityReviewer || ticketSourceReviewer ? { sourceReview: { concurrency: dispatchConcurrency,
+              reviewer: ticketSourceReviewer ?? createCodexTicketSourceReviewer(live[0], qualityModel ?? issueDelivery.planningModel, issueDelivery.timeoutMs) } } : {}),
           } : undefined) : undefined;
       const projectContext = loadProject && issuePlanning && github ? async () => {
         const [context, issues] = await Promise.all([loadProject(), github.suggest().catch(() => undefined)]);
