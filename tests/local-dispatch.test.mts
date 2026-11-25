@@ -59,10 +59,17 @@ test("GitHub 拆单按固定提交校验来源与编辑范围，草稿错误只�
     delivery: { outcome: "用户确认纪要后收到一条待办", priorityReason: "独立交付确认行为", prerequisites: [] } };
   const prompts: string[] = [];
   const sourceInputMaxBytes = qualitySourceInputBytes({});
+  const ticketOutputMaxBytes = dispatchTicketOutputBytes({});
+  let overflowBytes: number | undefined;
   let responses: unknown[] = [{ ...ticket, sources: ["docs/later.md"] }, ticket];
   const dispatch = createLocalDispatch(repo, 2, {
-    split({ prompt }) {
+    split({ prompt, outputMaxBytes, onOutputOverflow }) {
       prompts.push(prompt);
+      assert.equal(outputMaxBytes, ticketOutputMaxBytes);
+      if (overflowBytes !== undefined) {
+        onOutputOverflow?.(overflowBytes);
+        return { finished: Promise.resolve("completed"), close() {}, answerQuestions: () => false, output: () => undefined };
+      }
       const response = responses.shift();
       assert.ok(response);
       return { finished: Promise.resolve("completed"), close() {}, answerQuestions: () => false,
@@ -70,6 +77,7 @@ test("GitHub 拆单按固定提交校验来源与编辑范围，草稿错误只�
     },
     qualityReviewer: passingQualityReview,
     sourceInputMaxBytes,
+    ticketOutputMaxBytes,
     execute: () => assert.fail("拆单阶段不能执行代码工单"),
   });
   const planned = await dispatch.planGitHub(flow, "trial");
@@ -133,6 +141,11 @@ test("GitHub 拆单按固定提交校验来源与编辑范围，草稿错误只�
   responses = [parallelConflicts, conflicts];
   await assert.rejects(dispatch.planGitHub(flow, "persistent-edit-overlap"), /src\/feature\.mts.*T1.*T2/);
   assert.equal(prompts.length, 15);
+
+  overflowBytes = ticketOutputMaxBytes + 1;
+  await assert.rejects(dispatch.planGitHub(flow, "output-overflow"),
+    new RegExp(`工单方案超过传输字节上限（${overflowBytes} / ${ticketOutputMaxBytes} 字节）`));
+  assert.equal(prompts.length, 16);
 });
 
 test("local dispatch requires criterion coverage, an acyclic graph and approved evidence", () => {
@@ -183,6 +196,25 @@ test("a ten-ticket plan preserves dependencies while executing in waves of two",
   assert.throws(() => readDispatchTickets(output, ["AC-1"], new Set([guide]), "report", undefined, false, limit(bytes - 1)),
     /传输字节上限/);
   assert.deepEqual(readDispatchTickets(output, ["AC-1"], new Set([guide]), "report", undefined, false, limit(bytes)), tickets);
+});
+
+test("整批拆单按 UTF-8 字节数接受超过旧上限的工单并拦截超限批次", () => {
+  const maxBytes = dispatchTicketOutputBytes({});
+  assert.equal(maxBytes, 524_288);
+  const tickets = Array.from({ length: 32 }, (_, index) => ({
+    ...draft[0],
+    id: `T${index + 1}`,
+    instructions: "读取版本规则，逐项核对结果。".repeat(120),
+    dependsOn: index === 31 ? ["T1", "T31"] : [],
+  }));
+  const evidence = new Set([guide]);
+  const output = JSON.stringify({ tickets });
+  const bytes = Buffer.byteLength(output);
+  assert.ok(output.length < 131_072 && bytes > 131_072 && bytes < maxBytes);
+  const atLimit = output.padEnd(output.length + maxBytes - bytes);
+  assert.deepEqual(readDispatchTickets(atLimit, ["AC-1"], evidence, "report", undefined, false, maxBytes), tickets);
+  assert.throws(() => readDispatchTickets(`${atLimit} `, ["AC-1"], evidence, "report", undefined, false, maxBytes),
+    /524289 \/ 524288 字节/);
 });
 
 test("the process reads local .env and inherited settings take precedence", async t => {

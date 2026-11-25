@@ -199,7 +199,7 @@ node --experimental-strip-types src/workbench/code-device.mts
 
 规划就绪后，在「本地执行工单」选择「编写代码」。负责人确认开发计划版本、仓库提交和每单可编辑文件后，服务在独立的快照目录为每单启动本机 Codex 会话。工单可修改已纳入 Git 的普通源文件、测试和文档。没有先后关系的工单可以并行，编辑范围须互斥。需要改同一文件的工单必须按依赖串行。
 
-工单准备保存完整依赖图。执行器根据 `SOULFLOW_DISPATCH_MAX_CONCURRENT` 批次并发上限逐张启动已就绪的工单。拆单输出的传输上限由 `SOULFLOW_DISPATCH_TICKET_OUTPUT_MAX_BYTES` 配置，校验和 Codex 接收使用同一数值，超限的批次停止准备。
+工单准备保存完整依赖图。执行器根据 `SOULFLOW_DISPATCH_MAX_CONCURRENT` 批次并发上限逐张启动已就绪的工单。本地和 GitHub 拆单均通过 `SOULFLOW_DISPATCH_TICKET_OUTPUT_MAX_BYTES` 限制整批返回的 UTF-8 JSON，包括工单、依赖和验收映射。默认 512 KiB，可在 `.env` 中配置，最高 2 MiB。校验和 Codex 接收使用同一数值。超限时停止准备并报告实际字节数及上限。
 
 执行模型根据提供的文件内容返回文本替换和交付说明。服务核对路径、原文和范围，再将改动写入该工单的工作目录并保存 `changes.patch`。涉及已脱敏的凭据片段时，改用未脱敏的原文锚点或缩小工单范围。
 
