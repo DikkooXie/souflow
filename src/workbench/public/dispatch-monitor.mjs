@@ -30,6 +30,8 @@ function stageFor(job, session) {
   return session?.status ?? "preparing";
 }
 
+const stageLabel = (state, job) => job?.blockedByBatch ? "批次拦截 · 未派发" : labels[state];
+
 export function createMonitorView(node, selectFlow, onViewChange) {
   const dialog = document.querySelector("#monitor-dialog");
   const trigger = document.querySelector("#open-monitor");
@@ -60,9 +62,9 @@ export function createMonitorView(node, selectFlow, onViewChange) {
     row.dataset.state = stageFor(job, item);
     const heading = node("div", "monitor-session-heading");
     const title = node("strong", "", [item.ticketId, item.task].filter(Boolean).join(" · "));
-    heading.append(title, node("span", "monitor-badge", labels[row.dataset.state]));
-    const detail = node("p", "monitor-project", [item.title, item.planVersion ? `计划 v${item.planVersion}` : "", host].filter(Boolean).join(" · "));
-    row.append(heading, detail);
+    heading.append(title, node("span", "monitor-badge", stageLabel(row.dataset.state, job)));
+    const project = node("p", "monitor-project", [item.title, item.planVersion ? `计划 v${item.planVersion}` : "", host].filter(Boolean).join(" · "));
+    row.append(heading, project);
     if (job?.dependsOn.length) row.append(node("p", "monitor-meta", `依赖 ${job.dependsOn.join("、")}`));
     if (item.model || item.threadId || item.accountRef || item.accountAssignment) {
       const thread = item.threadId ? `会话 …${item.threadId.slice(-8)}` : "";
@@ -309,7 +311,7 @@ export function createMonitorView(node, selectFlow, onViewChange) {
       button.dataset.state = state;
       button.dataset.nodeKey = `job/${jobKey(job)}`;
       button.setAttribute("aria-haspopup", "dialog");
-      button.append(node("strong", "", `${job.ticketId} · ${job.task}`), node("span", "monitor-badge", labels[state]));
+      button.append(node("strong", "", `${job.ticketId} · ${job.task}`), node("span", "monitor-badge", stageLabel(state, job)));
       if (state === "dependencies") button.append(node("span", "monitor-meta", job.waitingOn.join("、")));
       if (job.accountAssignment) button.append(node("span", "monitor-meta", accountLabel(job)));
       button.addEventListener("click", () => openDetail({ kind: "工单", id: jobKey(job), title: `${job.ticketId} · ${job.task}` }));

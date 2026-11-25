@@ -108,6 +108,21 @@ test("复核拦截后只有原发起者能在同一对话重规划，旧批次�
   const entry = `/api/workflows/${flow.id}`;
   assert.equal((await post("implementer", `${entry}/local-dispatch/prepare`, { kind: "code" })).status, 200);
   const run = await waitFor(state => state.dispatches.find(item => item.status === "failed"));
+  async function checkMonitorHistory() {
+    const response = await fetch(`${server.url}/api/dispatch-status`, { headers: { authorization: credential("implementer") } });
+    assert.equal(response.status, 200);
+    const status = await response.json() as { waiting: { batchId: string }[]; jobs: {
+      batchId: string; ticketId: string; planVersion: number; status: string; blockedByBatch?: boolean; waitingOn: string[];
+    }[] };
+    assert.equal(status.waiting.some(job => job.batchId === run.id), false);
+    const history = status.jobs.find(job => job.batchId === run.id && job.ticketId === "T1");
+    assert.ok(history);
+    assert.equal(history.status, "blocked");
+    assert.equal(history.blockedByBatch, true);
+    assert.equal(history.planVersion, 1);
+    assert.deepEqual(history.waitingOn, []);
+  }
+  await checkMonitorHistory();
   assert.equal((await read()).flows[0]?.canReplan, true);
   assert.equal((await read("second")).flows[0]?.canReplan, undefined);
   assert.equal((await post("second", `${entry}/replan`)).status, 409);
@@ -119,6 +134,7 @@ test("复核拦截后只有原发起者能在同一对话重规划，旧批次�
   assert.equal(updated.project?.repository?.revision, newBase);
   assert.equal(updated.replan?.batchId, run.id);
   assert.equal(updated.canReplan, undefined);
+  await checkMonitorHistory();
   assert.equal((await post("implementer", `${entry}/local-dispatch/start`, { id: run.id })).status, 409);
 });
 

@@ -321,16 +321,21 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         const jobs = runs.filter((run, index) => index >= runs.length - recentMonitorRuns || run.status === "running" || run.status === "waiting")
           .flatMap(run => {
             const byId = new Map(run.jobs.map(job => [job.id, job]));
-            return run.jobs.map(job => ({
-              flowId: run.flowId, batchId: run.id, planVersion: run.plan.version, ticketId: job.id, task: scrubAuditText(job.title),
-              title: names.get(run.flowId), dependsOn: job.dependsOn, status: job.status,
-              waitingOn: job.status === "queued" ? job.dependsOn.filter(id => {
-                const input = byId.get(id);
-                return input?.status !== "ready" || (run.kind === "code" && input.artifact?.review !== "accepted");
-              }) : [],
-              startedAt: job.startedAt, finishedAt: job.finishedAt, accountRef: job.accountRef, accountAssignment: job.accountAssignment,
-              reviewing: job.artifact ? reviewing.has(job.artifact.id) : false, review: job.artifact?.review,
-            }));
+            return run.jobs.map(job => {
+              // 旧批次拦截时可能保留草稿状态。批次已失败，这些草稿只作为历史展示。
+              const blockedByBatch = run.status === "failed" && job.status === "queued";
+              const status = blockedByBatch ? "blocked" as const : job.status;
+              return {
+                flowId: run.flowId, batchId: run.id, planVersion: run.plan.version, ticketId: job.id, task: scrubAuditText(job.title),
+                title: names.get(run.flowId), dependsOn: job.dependsOn, status, ...(blockedByBatch ? { blockedByBatch } : {}),
+                waitingOn: status === "queued" ? job.dependsOn.filter(id => {
+                  const input = byId.get(id);
+                  return input?.status !== "ready" || (run.kind === "code" && input.artifact?.review !== "accepted");
+                }) : [],
+                startedAt: job.startedAt, finishedAt: job.finishedAt, accountRef: job.accountRef, accountAssignment: job.accountAssignment,
+                reviewing: job.artifact ? reviewing.has(job.artifact.id) : false, review: job.artifact?.review,
+              };
+            });
           });
         const remote = remoteLink?.handoff.snapshot();
         const code = remoteLink?.code;
