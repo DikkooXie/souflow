@@ -109,7 +109,7 @@ function ticketSchema(kind: DispatchKind, routeModels: boolean, review: boolean,
   };
 }
 
-class TicketSourceValidationError extends Error {}
+class RetryableTicketDraftError extends Error {}
 
 export function readDispatchTickets(text: string | undefined, criteria: readonly string[], evidence: ReadonlySet<string>,
   kind: DispatchKind = "report", routing?: ModelRouting, review = false, ticketOutputMaxBytes = dispatchTicketOutputBytes(),
@@ -127,7 +127,7 @@ export function readDispatchTickets(text: string | undefined, criteria: readonly
       || (kind === "report" && !sources.length && !item.dependsOn.length)
       || !sources.every(path => typeof path === "string" && evidence.has(path))) {
       if (github) {
-        throw new TicketSourceValidationError(`工单校验未通过：${item.id} 的 sources 只能从冻结版本的 availableSources 逐字选取最多 4 个不同路径，无资料时填空数组。`);
+        throw new RetryableTicketDraftError(`工单校验未通过：${item.id} 的 sources 只能从冻结版本的 availableSources 逐字选取最多 4 个不同路径，无资料时填空数组。`);
       }
       throw Error("工单校验未通过（资料必须引用冻结版本中的普通文件或前置报告）。");
     }
@@ -156,7 +156,13 @@ export function readDispatchTickets(text: string | undefined, criteria: readonly
     return { ...ticket, editPaths: paths };
   });
   const errors = validateTicketPlan(criteria.filter(criterion => !outsideTickets.has(criterion)), tickets);
-  if (errors.length) throw Error(`工单校验未通过（${errors.join("，")}）。`);
+  if (errors.length) {
+    const message = `工单校验未通过（${errors.join("，")}）。`;
+    if (github && errors.every(error => /^(missing-criteria|uncovered|unknown-criterion):/.test(error))) {
+      throw new RetryableTicketDraftError(`${message} 每张新工单须填写它能独立验证的验收编号及步骤。一个编号可以由多张新工单各验证一部分，但不能同时归到新工单和另行验收。支持性改动可以并入交付该用户结果的工单，原计划验收条件必须完整保留。`);
+    }
+    throw Error(message);
+  }
   if (github) validateDeliveryOrder(tickets);
   if (kind === "code") {
     const byId = new Map(tickets.map(ticket => [ticket.id, ticket]));
@@ -383,7 +389,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
         "工单数量由批准计划和独立验收边界决定。一次返回完整工单和依赖，不因可同时执行的槽位数合并工单。",
         ...(github ? [
           "结合冻结的候选 Issue 和只读关联 Issue 正文，区分已安排交付与尚缺的用户结果。新工单不能重复实现已有 Issue 的交付；如需核对已安排的能力，在验证步骤写明如何沿用并取得实际回执。",
-          "每个固定验收 ID 必须归到能兑现它的新工单或 batchAcceptance。新工单只写能在本单范围独立开发和验证的验收。依赖多个交付或调度动作才能验证的验收写入 batchAcceptance，owner 填 batch、issue 填 null。已有 Issue 正文承接的验收写入 batchAcceptance，owner 填 related-issue，issue 填 relatedIssues 中已读的原编号。",
+          "每个固定验收 ID 必须归到能兑现它的新工单或 batchAcceptance。每张新工单至少引用一个 ID，多个工单可各验证同一验收的不同部分。新工单只写能在本单范围独立开发和验证的验收。依赖多个交付或调度动作才能验证的验收写入 batchAcceptance，owner 填 batch、issue 填 null。已有 Issue 正文承接的验收写入 batchAcceptance，owner 填 related-issue，issue 填 relatedIssues 中已读的原编号。",
           "batchAcceptance 每项提供 criterion、owner、issue、basis、procedure、expected。有关联 Issue 时，basis 从其冻结正文逐字摘录 2 到 240 字的相关内容，整批验收的 basis 填 null。这些条目不生成 Issue、执行授权或通过记录。同一编号不能同时归入新工单和 batchAcceptance。明确哪些仍需实测，不能把真正阻塞本单的未完成外部依赖记作后置验收。",
           "tickets 顺序是可执行的优先顺序：每个前置须排在使用它的工单之前。同级按确认的交付优先级排列，并在 priorityReason 用已有材料说明与下一张同级工单相比的价值、风险或就绪差异。没有阻塞的工单不要为排序添加依赖。",
           "逐单给 delivery：outcome 写明用户能操作并观察到的结果，priorityReason 说明为何排在当前顺序，prerequisites 为 dependsOn 的每个 ID 提供 {ticket,reason}，指出少了哪项上游合并产物就无法开工。每段不超过 320 字。没有前置使用空数组。",
@@ -409,7 +415,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
         if (github) for (const ticket of tickets) {
           const paths = [...new Set([...(ticket.editPaths ?? []), ...ticket.sources])];
           const bytes = paths.reduce((total, path) => total + (catalog.get(path)?.bytes ?? 0), 0);
-          if (bytes > sourceInputMaxBytes) throw new TicketSourceValidationError(
+          if (bytes > sourceInputMaxBytes) throw new RetryableTicketDraftError(
             `工单校验未通过：${ticket.id} 的编辑文件和只读资料合计 ${bytes} 字节，超过 ${sourceInputMaxBytes}。保留交付所需文件，缩减或替换非必要只读资料。`);
         }
         return { tickets, batchAcceptance };
@@ -428,7 +434,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
           });
           return attempt;
         }, session);
-      }, parseDraft, error => error instanceof TicketSourceValidationError ? error.message : undefined);
+      }, parseDraft, error => error instanceof RetryableTicketDraftError ? error.message : undefined);
       run.jobs = tickets.map(ticket => ({ ...ticket, status: "queued" }));
       return { revision, reviewer, batchAcceptance };
   }
