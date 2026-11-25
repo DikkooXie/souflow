@@ -14,6 +14,16 @@ import { validateTicketPlan } from "./validate-ticket-plan.mts";
 const exec = promisify(execFile);
 export type Selection = { number: number; reason: string; title: string; revision: string; files: string[]; instructions: string; dependsOn: number[];
   criteria: string[]; validation: Verification[]; issueText: string; sourcePaths?: string[] };
+export class IssueCoverageGap extends Error {
+  constructor(criteria: readonly string[]) {
+    super(`现有 Issue 未覆盖验收项 ${criteria.join("、")}。按最新项目资料核对缺口，保留已确认的验收范围后重新规划。`);
+  }
+
+  static fromLegacy(message: string | undefined): IssueCoverageGap | undefined {
+    if (!message || !/^工单校验未通过：uncovered:AC-\d+(?:、uncovered:AC-\d+)*。$/.test(message)) return;
+    return new IssueCoverageGap(message.match(/AC-\d+/g) ?? []);
+  }
+}
 const maxSelected = 3;
 const maxSourcePaths = 3;
 const keys = ["number", "reason", "files", "instructions", "dependsOn", "criteria", "validation", "sourcePaths"];
@@ -76,6 +86,9 @@ export function readGitHubSelection(output: string | undefined, issues: readonly
   const errors = validateTicketPlan(required, selections.map(item => ({
     id: String(item.number), dependsOn: item.dependsOn.map(String), criteria: item.criteria,
   })));
+  if (errors.length && errors.every(error => error.startsWith("uncovered:"))) {
+    throw new IssueCoverageGap(errors.map(error => error.slice("uncovered:".length)));
+  }
   if (errors.length) throw Error(`工单校验未通过：${errors.join("、")}。`);
   return selections;
 }
