@@ -29,6 +29,7 @@ export type QualityTicket = TicketDraft & {
 };
 export type PlannedTicket = QualityTicket & { delivery: TicketDelivery };
 export type PlannedTicketBatch = { tickets: PlannedTicket[]; batchAcceptance: BatchAcceptance[] };
+export type DraftCorrection = { findings: string; tickets: readonly QualityTicket[]; batchAcceptance: readonly BatchAcceptance[] };
 export type Quote = { ref: string; quote: string };
 type Finding = { status: "pass" | "block"; summary: string; evidence: Quote[] };
 export type QualityReceipt = {
@@ -184,7 +185,7 @@ export function qualityPacket(flow: Flow, revision: string, id: string, tickets:
   return { planning, references, revision, id, tickets, batchAcceptance: accepted };
 }
 
-export type QualityPacket = ReturnType<typeof qualityPacket> & { sourceReviewMode?: "per-ticket" };
+export type QualityPacket = ReturnType<typeof qualityPacket> & { sourceChecks?: readonly TicketSourceFinding[] };
 export type TicketSourcePacket = {
   revision: string; ticket: QualityTicket; criteria: QualityPacket["planning"]["criteria"];
   plan: QualityPacket["planning"]["documents"][number] | undefined;
@@ -193,6 +194,12 @@ export type TicketSourcePacket = {
 };
 export type TicketSourceFinding = Finding & { ticket: string; revision: string; paths: string[]; sourceDigest: string };
 export type TicketSourceReviewer = (packet: TicketSourcePacket, signal: AbortSignal) => Promise<string | undefined>;
+
+export function withTicketSourceEvidence(packet: QualityPacket, sourceChecks: readonly TicketSourceFinding[]): QualityPacket {
+  const findings = Object.fromEntries(sourceChecks.map(check => [`source-check:${check.ticket}`,
+    [check.summary, ...check.evidence.map(({ ref, quote }) => `${ref} · ${quote}`)].join("\n")]));
+  return { ...packet, sourceChecks, references: { ...packet.references, ...findings } };
+}
 
 const findingFields = {
   status: { type: "string", enum: ["pass", "block"] }, summary: { type: "string" },

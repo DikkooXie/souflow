@@ -267,7 +267,8 @@ function renderConversation(flow, pending) {
   conversation.hidden = !flow;
   promptBox.placeholder = flow ? "发起另一项需求…" : "描述你的需求…";
   const proposal = issuePlans.find(item => item.flowId === flow?.id);
-  renderQualityDetails(conversationQuality, node, flow?.status === "ready" ? proposal?.quality : undefined, proposal?.batchAcceptance);
+  renderQualityDetails(conversationQuality, node, flow?.status === "ready" ? proposal?.quality : undefined,
+    proposal?.batchAcceptance, proposal?.sourceFindings);
   renderDeliveryReviews(conversationDeliveryReviews, node, flow?.id, deliveryReviews.find(entry => entry.flowId === flow?.id)?.reviews ?? []);
   if (!flow) return;
   const action = workflowAction(flow, proposal);
@@ -287,7 +288,7 @@ function renderConversation(flow, pending) {
     empty: "这轮计划暂无符合条件的未认领 GitHub 工单。",
     uncertain: proposal?.createsIssues && proposal.approved ? "" : "GitHub 工单状态待核对。请查看工单列表。",
   };
-  const note = flow.status === "ready" ? [deliveryStatus[proposal?.status] ?? "项目文档已就绪。", proposal?.error].filter(Boolean).join(" ")
+  const note = flow.status === "ready" ? [deliveryStatus[proposal?.status] ?? "项目文档已就绪。", proposal?.error, proposal?.sourceError].filter(Boolean).join(" ")
     : flow.status === "interrupted" ? "规划已中断，已完成的项目文档已保留。"
       : flow.status === "failed" ? "这项需求暂未完成。"
         : waiting ? "有一个问题需要你决定。" : "正在推进你的需求…";

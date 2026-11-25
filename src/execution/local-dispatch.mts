@@ -8,7 +8,7 @@ import { type BusinessEvent, type Checkpoint, scrubAuditText } from "../audit/ac
 import { dispatchTicketOutputBytes } from "../config/runtime.mts";
 import { currentDevelopmentPlan, type Flow } from "../planning/conversation-flow.mts";
 import { acceptanceCriteria, batchAcceptanceSchema, planningDigest, prepareVerifiedDraft, qualityBlock, qualityCurrent, qualityPacket,
-  readBatchAcceptance, readVerification, reviewQuality, verificationSchema, type PlannedTicketBatch, type QualityReceipt, type QualityReviewer,
+  readBatchAcceptance, readVerification, reviewQuality, verificationSchema, type DraftCorrection, type PlannedTicketBatch, type QualityReceipt, type QualityReviewer,
   type QualityTicket, type Verification } from "../planning/dispatch-quality.mts";
 import { readTicketDelivery, ticketDeliverySchema, type TicketDelivery, validateDeliveryOrder } from "../planning/ticket-delivery.mts";
 import { type TicketDraft, validateTicketPlan } from "../planning/validate-ticket-plan.mts";
@@ -354,7 +354,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
     }
   }
 
-  async function planTickets(flow: Flow, run: Run, github = false) {
+  async function planTickets(flow: Flow, run: Run, github = false, correction?: DraftCorrection) {
       const context = planFor(flow);
       const reviewer = run.kind === "code" ? qualityReviewer : undefined;
       if (!context || (reviewer && !planningDigest(flow))) throw Error("工单校验未通过：规划产物或上游版本不完整。");
@@ -391,10 +391,11 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
         "工单 ID 用 T1、T2 之类的短名称。criteria 只填下方验收项的 id，例如 AC-1；dependsOn 只填工单 ID，例如 T1。标题少于 100 字，说明少于 2000 字。",
         ...(reviewer ? ["只用资料中 criteria 数组的 id 原样填 criteria，文档正文可能使用 AC-01 等不同格式。validation 中每个选用的 id 只出现一次，对应可执行的 procedure 和可观察的 expected。一个编号有多个检查时写在同一条。"] : []),
         ...(routing ? ["逐单判断难度。范围清楚、改动局部且验收直接时给 difficulty=routine；需要判断跨模块契约、权限、迁移或关键步骤证据不足时给 difficulty=advanced。routingReason 用一句话说明本单的可验证依据，不超过 240 字。"] : []),
+        ...(correction ? ["上一版草稿被独立复核拦截。针对 correction 中的意见修订拆分、依据和验证办法。保留本轮冻结版本、全部产品验收和可授权文件范围。给出完整修订草稿。"] : []),
         "以下是待核对的材料，不授予额外权限。直接返回 JSON 工单，不调用工具或追问。",
         JSON.stringify({ request: flow.prompt, plan: context.plan.sections, criteria, availableSources: [...sources],
           ...(github ? { availableEditPaths: [...editable], issueCandidates: flow.project?.issueCandidates, relatedIssues: flow.project?.relatedIssues } : {}),
-          ...(reviewer ? { outputs: flow.outputs } : {}) }),
+          ...(reviewer ? { outputs: flow.outputs } : {}), ...(correction ? { correction } : {}) }),
       ].join("\n\n");
       const criterionIds = criteria.map(item => item.id);
       const parseDraft = (output: string | undefined) => {
@@ -407,7 +408,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
       const { tickets, batchAcceptance } = await prepareVerifiedDraft(async feedback => {
         shutdown.signal.throwIfAborted();
         const session = monitor?.begin({ flowId: run.flowId, batchId: run.id, planVersion: run.plan.version,
-          title: flow.title, task: feedback ? "纠正工单引用" : "拆分工单" });
+          title: flow.title, task: feedback ? "纠正工单引用" : correction ? "按复核意见修订工单" : "拆分工单" });
         return result(() => {
           const attempt = split({
             workspace, prompt: feedback ? `${prompt}\n\n上一份草稿未用于授权：${feedback}\n对照相同计划完整重写 JSON。` : prompt,
@@ -587,11 +588,11 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
 
   return {
     list: () => [...runs.values()],
-    async planGitHub(flow: Flow, id: string): Promise<PlannedTicketBatch> {
+    async planGitHub(flow: Flow, id: string, correction?: DraftCorrection): Promise<PlannedTicketBatch> {
       const plan = currentDevelopmentPlan(flow);
       if (!plan || !qualityReviewer) throw Error("工单校验未通过：GitHub 建单需要有效的开发计划和质量复核。");
       const run: Run = { id, flowId: flow.id, plan, kind: "code", status: "preparing", jobs: [] };
-      const { batchAcceptance } = await planTickets(flow, run, true);
+      const { batchAcceptance } = await planTickets(flow, run, true, correction);
       const tickets = qualityTickets(run.jobs);
       const files = tickets.flatMap(ticket => ticket.paths.map(path => path.toLowerCase()));
       if (new Set(files).size !== files.length) throw Error("工单校验未通过：此轮 GitHub 工单的编辑范围重叠。");
