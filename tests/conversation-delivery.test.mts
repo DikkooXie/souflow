@@ -7,6 +7,7 @@ import { readGitHubSelection } from "../src/planning/github-selection.mts";
 import { snapshotIssueCandidates } from "../src/planning/project-context.mts";
 import { createConversationDelivery, type IssueProposal } from "../src/workbench/conversation-delivery.mts";
 import { type Claim, createIssueDispatch } from "../src/workbench/issue-dispatch.mts";
+import { createPlannedIssuePublication, type IssuePublication } from "../src/workbench/planned-issue-publication.mts";
 import { passingQualityReview, qualityReviewOutput, readyQualityFlow, validation } from "./fixtures/planning-quality.mts";
 
 const makeIssue = (number: number, body = "实施并验证。"): IssueDetail => ({
@@ -253,4 +254,213 @@ test("一次授权批量认领后，只派发就绪工单，合并后接续下�
     assert.deepEqual(started, [1, 2]);
     assert.equal(records.get("2")?.pull?.number, 102);
   } finally { await github.close(); }
+});
+
+test("从新需求复核和授权，创建 Issue 后认领派发，重启后能找回丢失的建单回执", async () => {
+  const flow = await readyQualityFlow("实现一个尚未建单的新需求。");
+  flow.project = { repository: { revision: "a".repeat(40), commits: [] }, plan: { status: "read" }, github: { status: "read" } };
+  const proposals = new Map<string, IssueProposal>();
+  const receipts = new Map<string, IssuePublication>();
+  const claims = new Map<string, Claim>();
+  const remote = new Map<number, IssueDetail>();
+  const writes: string[] = [];
+  let visible = false;
+  let merged = false;
+  const merge = "b".repeat(40);
+  function read(number: number) {
+    const issue = remote.get(number);
+    assert.ok(issue);
+    return issue;
+  }
+  const tracker: DeliveryTracker = {
+    repo: "a/b", account: async () => "login", candidates: async () => [...remote.values()],
+    read: async number => structuredClone(read(number)),
+    assign: async (number, account) => {
+      assert.equal(remote.size, 2);
+      writes.push(`认领 ${number}`);
+      read(number).assignees = [account];
+    },
+    creation: {
+      async create({ title, body }) {
+        const number = 10 + remote.size;
+        writes.push(`创建 ${number}`);
+        remote.set(number, { ...makeIssue(number, body), title });
+        if (number === 10) throw Error("GitHub 已写入，响应断开。");
+        return number;
+      },
+      async findCreated(marker) {
+        return visible ? [...remote.values()].filter(issue => issue.body.split("\n").includes(marker)).map(issue => issue.number) : [];
+      },
+    },
+    delivery: {
+      checkout: async () => assert.fail("由夹具提供工作区"),
+      publish: async ({ issue }) => ({ number: 100 + issue, url: `https://github.com/a/b/pull/${100 + issue}`, state: "OPEN" }),
+      find: async (_branch, _head, knownPull) => knownPull === 110 ? { number: 110, url: "https://github.com/a/b/pull/110",
+        state: merged ? "MERGED" : "OPEN", ...(merged ? { mergeCommit: merge } : {}) } : undefined,
+    },
+  };
+  const store = <T extends object>(rows: Map<string, T>) => ({
+    load: () => [...rows.values()], save(id: string, value: T) { rows.set(id, structuredClone(value)); return true; },
+  });
+  const github = createIssueDispatch(tracker, store(claims), async () => assert.fail("不得进入只读核验"), () => true, 2,
+    new Map([["member", tracker]]), { specs: new Map(), conversation: true, requireQuality: true, pollMs: 60_000,
+      prepare: async ({ number, branch, upstream }) => {
+        assert.deepEqual(upstream, number === 11 ? [merge] : []);
+        writes.push(`开发 ${number}`);
+        return { workspace: "fixture", branch, base: "main", head: "a".repeat(40) };
+      },
+    });
+  const makeService = () => createConversationDelivery(github, store(proposals), async () => "new", passingQualityReview,
+    async (_revision, paths) => Object.fromEntries(paths.map(path => [path, "冻结的源码"])), {
+      draft: async () => [
+        { id: "T2", title: "下游工单", instructions: "在合并后验证。", paths: down.files, dependsOn: ["T1"], criteria: up.criteria, validation },
+        { id: "T1", title: "上游工单", instructions: "实现新需求。", paths: up.files, dependsOn: [], criteria: up.criteria, validation },
+      ],
+      publish: createPlannedIssuePublication(store(receipts)), connection: actor => actor === "member" ? tracker : undefined,
+    });
+  const initial = makeService();
+  let restarted: ReturnType<typeof makeService> | undefined;
+  try {
+    assert.equal(initial.begin(flow, "首版"), true);
+    await setImmediate();
+    const card = initial.cards([flow], "member")[0];
+    assert.ok(card);
+    assert.match(card.prompt, /T2 · 下游工单/);
+    const answer = { authorization: "授权创建 Issue、执行并开草稿 PR" };
+    const changedFlow = { ...flow, prompt: "授权后改变的原始需求" };
+    assert.equal(await initial.answer(card.id, "member", answer, [changedFlow]), 409);
+    assert.equal(await initial.answer(card.id, "other", answer, [flow]), 404);
+    assert.equal(await initial.answer(card.id, "member", { authorization: "授权执行并开草稿 PR" }, [flow]), 422);
+    assert.equal(writes.length, 0);
+    assert.equal(await initial.answer(card.id, "member", answer, [flow]), 409);
+    assert.deepEqual(writes, ["创建 10"]);
+    assert.deepEqual(await github.suggest(), []);
+    await initial.close();
+    restarted = makeService();
+    assert.equal(await restarted.resumePublication(flow, "other"), 409);
+    assert.equal(await restarted.resumePublication(flow, "member"), 409);
+    assert.deepEqual(writes, ["创建 10"]);
+
+    visible = true;
+    assert.equal(await restarted.resumePublication(flow, "member"), 200);
+    await setImmediate();
+    assert.deepEqual(writes, ["创建 10", "创建 11", "认领 11", "认领 10", "开发 10"]);
+    assert.match(read(11).body, /^依赖 #10$/m);
+    assert.equal(claims.get("11")?.phase, "waiting");
+    assert.deepEqual(restarted.statuses([flow], "member")[0]?.issues, [11, 10]);
+    assert.equal(await restarted.resumePublication(flow, "member"), 409);
+    await github.refresh();
+    assert.equal(writes.includes("开发 11"), false);
+    merged = true;
+    await github.refresh();
+    await setImmediate();
+    assert.deepEqual(writes.slice(-2), ["开发 10", "开发 11"]);
+    assert.equal(claims.get("11")?.pull?.number, 111);
+  } finally {
+    await Promise.all([initial.close(), restarted?.close(), github.close()]);
+  }
+});
+
+test("认领已写入但回读失败时，重启后续办不会重复指派", async () => {
+  const item = makeIssue(10);
+  const saved = new Map<string, Claim>();
+  let assignments = 0;
+  let starts = 0;
+  let failRead = false;
+  const tracker: DeliveryTracker = {
+    repo: "a/b", account: async () => "login", candidates: async () => [],
+    read: async () => {
+      if (failRead) throw Error("GitHub 回读中断。");
+      return structuredClone(item);
+    },
+    assign: async (_number, account) => {
+      assignments++;
+      item.assignees = [account];
+      failRead = true;
+    },
+    delivery: {
+      checkout: async () => assert.fail("由夹具提供工作区"),
+      find: async () => undefined,
+      publish: async () => ({ number: 110, url: "https://github.com/a/b/pull/110", state: "OPEN" }),
+    },
+  };
+  const dispatcher = () => createIssueDispatch(tracker, {
+    load: () => [...saved.values()], save(id, item) { saved.set(id, structuredClone(item)); return true; },
+  }, async () => assert.fail("不得进入核验"), () => true, 1, new Map(), {
+    specs: new Map(), conversation: true, pollMs: 60_000,
+    prepare: async ({ branch }) => {
+      starts++;
+      return { workspace: "fixture", branch, base: "main", head: "a".repeat(40) };
+    },
+  });
+  const approved = new Map([[item.number, { instructions: "已确认。", files: up.files, dependsOn: [], issueRevision: issueRevision(item) }]]);
+  const authorization = { flowId: "flow", planId: "plan", version: 1 };
+  const initial = dispatcher();
+  try {
+    await assert.rejects(initial.claimApproved("batch", "member", approved, authorization, true), /待核对/);
+    assert.equal(saved.get("10")?.claimUncertain, true);
+    assert.equal(starts, 0);
+  } finally { await initial.close(); }
+  failRead = false;
+  const resumed = dispatcher();
+  try {
+    await assert.rejects(resumed.claimApproved("other-batch", "member", approved, authorization, true), /变化/);
+    await resumed.claimApproved("batch", "member", approved, authorization, true);
+    await setImmediate();
+    assert.equal(assignments, 1);
+    assert.equal(starts, 1);
+    assert.equal(saved.get("10")?.pull?.number, 110);
+  } finally { await resumed.close(); }
+});
+
+test("Issue 正文超出回读上限时不生成授权卡，原计划仍可修订", async () => {
+  const flow = await readyQualityFlow();
+  flow.project = { repository: { revision: "a".repeat(40), commits: [] }, plan: { status: "read" }, github: { status: "read" } };
+  const tracker: DeliveryTracker = {
+    repo: "a/b", account: async () => "login", candidates: async () => [],
+    read: async () => assert.fail("未授权不得回读创建结果"),
+    assign: async () => assert.fail("未授权不得认领"),
+    creation: { create: async () => assert.fail("未授权不得建单"), findCreated: async () => [] },
+    delivery: {
+      checkout: async () => assert.fail("不得执行"), find: async () => undefined, publish: async () => assert.fail("不得发布"),
+    },
+  };
+  const saved = new Map<string, IssueProposal>();
+  const service = createConversationDelivery({
+    permits: () => true, suggest: async () => [], claimApproved: async () => assert.fail("不得派发"),
+  }, { load: () => [...saved.values()], save(id, proposal) { saved.set(id, structuredClone(proposal)); return true; } },
+  async () => "new", async () => assert.fail("无效草稿不得进入复核"), async () => ({}), {
+    draft: async () => [{ id: "T1", title: "过长工单", instructions: "说明".repeat(1_000),
+      paths: up.files, dependsOn: [], criteria: up.criteria,
+      validation: Array.from({ length: 10 }, (_, i) => ({
+        criterion: `AC-${i + 1}`, procedure: "验证".repeat(250), expected: "结果".repeat(150),
+      })) }],
+    publish: async () => assert.fail("未授权不得发布"), connection: () => tracker,
+  });
+  try {
+    assert.equal(service.begin(flow, "首版"), true);
+    await setImmediate();
+    assert.equal(service.cards([flow], "member").length, 0);
+    assert.match(service.statuses([flow], "member")[0]?.error ?? "", /T1.*正文/);
+    assert.equal(service.locks(flow.id), false);
+    assert.equal(service.begin(flow, "首版", true), true);
+  } finally { await service.close(); }
+});
+
+test("已保留到其他批次的 Issue 不会占满选单窗口", async () => {
+  const marker = `<!-- souflow-issue:${"a".repeat(64)} -->`;
+  const items = Array.from({ length: 10 }, (_, index) => makeIssue(index + 1, index < 8 ? marker : "可认领。"));
+  const tracker: DeliveryTracker = {
+    repo: "a/b", account: async () => "login", candidates: async () => items,
+    read: async number => { const item = items[number - 1]; assert.ok(item); return item; },
+    assign: async () => assert.fail("选单不得认领"),
+    delivery: {
+      checkout: async () => assert.fail("不得执行"), find: async () => undefined, publish: async () => assert.fail("不得发布"),
+    },
+  };
+  const github = createIssueDispatch(tracker, { load: () => [], save: () => true }, async () => assert.fail("不得执行"),
+    () => true, 1, new Map(), { conversation: true, specs: new Map(), pollMs: 60_000,
+      prepare: async () => assert.fail("不得执行") });
+  try { assert.deepEqual((await github.suggest()).map(issue => issue.number), [9, 10]); }
+  finally { await github.close(); }
 });

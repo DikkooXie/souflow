@@ -1,5 +1,6 @@
 import { createGitHubSelector } from "../planning/github-selection.mts";
 import { createConversationDelivery, type IssueProposal } from "./conversation-delivery.mts";
+import { createPlannedIssuePublication, type IssuePublication } from "./planned-issue-publication.mts";
 import { readFile } from "node:fs/promises";
 import { X509Certificate } from "node:crypto";
 import { createIssueDeveloper } from "../execution/issue-delivery.mts";
@@ -170,9 +171,14 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         }) : undefined;
       const issuePlanning = live && github && issueTracker && issueDelivery?.conversation && reviewQuality
         ? createConversationDelivery(github, audit.checkpoint<IssueProposal>(`github-proposals:${issueTracker.repo.toLowerCase()}`),
-          createGitHubSelector(live[0], { timeoutMs: issueDelivery.timeoutMs,
+          createGitHubSelector(live[0], { timeoutMs: issueDelivery.timeoutMs, newIssues: !!(dispatch && issueTracker.creation),
             ...(issueDelivery.planningModel ? { model: issueDelivery.planningModel } : {}) }), reviewQuality,
-          (revision, paths, signal) => qualitySources(live[0], revision, paths, signal)) : undefined;
+          (revision, paths, signal) => qualitySources(live[0], revision, paths, signal),
+          dispatch && issueTracker.creation ? {
+            draft: dispatch.planGitHub,
+            publish: createPlannedIssuePublication(audit.checkpoint<IssuePublication>(`github-publications:${issueTracker.repo.toLowerCase()}`)),
+            connection: actor => github.permits(actor) ? memberTrackers?.get(actor) ?? issueTracker : undefined,
+          } : undefined) : undefined;
       const projectContext = loadProject && issuePlanning && github ? async () => {
         const [context, issues] = await Promise.all([loadProject(), github.suggest().catch(() => undefined)]);
         context.evidence.issueCandidates = snapshotIssueCandidates(issues ?? []);
@@ -406,6 +412,14 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         if (!flow) return send(404, { error: "需求对话不存在。" });
         return flows.retryIssueSelection(flow) ? send(200, state()) : send(409, { error: "当前选单无法重试。" });
       }
+      const retryPublication = /^\/api\/workflows\/([a-f0-9-]+)\/github-publication\/resume$/.exec(path)?.[1];
+      if (retryPublication && issuePlanning) {
+        if (!allowed("implementer", "github.publication.resume", retryPublication)) return;
+        const flow = flows.list().find(item => item.id === retryPublication && item.requestedBy === githubActor);
+        if (!flow) return send(404, { error: "需求对话不存在。" });
+        const status = await issuePlanning.resumePublication(flow, githubActor);
+        return status === 200 ? send(200, state()) : send(status, { ...state(), error: "GitHub 建单或认领回执仍待核对。" });
+      }
       const revisionFlow = /^\/api\/workflows\/([a-f0-9-]+)\/plan\/revise$/.exec(path)?.[1];
       if (revisionFlow) {
         if (!allowed("implementer", "plan.revise", revisionFlow)) return;
@@ -486,7 +500,8 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
             const result = await issuePlanning.answer(action[1], githubActor, body.value, flows.list());
             return send(result, result === 200 ? state() : { ...state(),
               error: result === 422 ? "请选择有效授权选项。" : result === 503 ? "暂时无法保存授权。"
-                : "授权已失效或工单状态已变化，请核对 GitHub 状态。" });
+                : result === 409 && issuePlanning.publicationNeedsCheck(action[1], githubActor) ? "授权已记录，建单或派发回执待核对。"
+                  : "授权已失效或工单状态已变化，请核对 GitHub 状态。" });
           }
           const regular = inbox.snapshot().requests.some(card => card.id === action[1]);
           if (!allowed(regular ? "implementer" : "reviewer", regular ? "decision.answer" : "dispatch.review", action[1])) return;
