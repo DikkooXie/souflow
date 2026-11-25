@@ -334,7 +334,8 @@ function renderInterruptedDecisions(flow) {
 function renderProjectSources(flow) {
   const project = flow.project;
   projectContext.hidden = !project;
-  const key = JSON.stringify([flow.id, project?.repository?.revision, project?.plan, project?.github]);
+  const key = JSON.stringify([flow.id, project?.repository?.revision, project?.plan, project?.github,
+    project?.relatedIssues, project?.relatedIssueOmissions]);
   if (projectContext.dataset.key === key) return;
   projectContext.dataset.key = key;
   projectContext.dataset.flow = flow.id;
@@ -344,7 +345,7 @@ function renderProjectSources(flow) {
   projectSources.replaceChildren(
     node("li", "", repository ? `仓库提交 ${repository.revision.slice(0, 8)}` : "仓库提交未能读取"),
     node("li", "", plan.status === "read" ? `计划 ${plan.path}` : plan.status === "unavailable" ? "计划未能读取" : "未配置项目计划"),
-    node("li", "", github.status === "read" ? `GitHub · 最近 ${github.pullRequests.length} 条 PR`
+    node("li", "", github.status === "read" ? `GitHub · 最近 ${github.pullRequests?.length ?? 0} 条 PR`
       : github.status === "unavailable" ? "GitHub PR 未能读取" : "未配置 GitHub 仓库"),
   );
   for (const pr of github.pullRequests ?? []) {
@@ -355,6 +356,21 @@ function renderProjectSources(flow) {
     const item = node("li");
     item.append(link);
     projectSources.append(item);
+  }
+  for (const issue of project.relatedIssues ?? []) {
+    const summary = issue.status === "read" ? `${issue.source.title} · ${issue.state === "CLOSED" ? "已关闭" : issue.assigned ? "已分配" : "开放"} · ${issue.source.revision.slice(0, 8)}`
+      : "正文未能读取";
+    const link = node("a", "", `关联 Issue #${issue.number} · ${summary}`);
+    link.href = issue.url;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    const item = node("li");
+    item.append(link);
+    projectSources.append(item);
+  }
+  if (project.relatedIssueOmissions) {
+    const { count, examples } = project.relatedIssueOmissions;
+    projectSources.append(node("li", "", `${count} 条关联 Issue 超出本轮资料范围，包括 ${examples.map(id => `#${id}`).join("、")}`));
   }
 }
 

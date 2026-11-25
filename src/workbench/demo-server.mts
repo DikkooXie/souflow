@@ -27,7 +27,7 @@ import { workerId } from "../execution/code-worker-protocol.mts";
 import { createRemoteWorkerIngress, readRemoteFiles, remoteWorkerNetwork, type RemoteLanConfig } from "./remote-worker-ingress.mts";
 import { createCodexAccountDispatch, readCodexProfiles, type CodexAccountDispatch } from "../execution/codex-account-dispatch.mts";
 import { createConversationFlows, currentDevelopmentPlan, maxArtifactTextLength, phases, readPlanRevision, type StoredFlow } from "../planning/conversation-flow.mts";
-import { createProjectContextReader, snapshotIssueCandidates, type ProjectSettings } from "../planning/project-context.mts";
+import { createProjectContextReader, readRelatedIssues, snapshotIssueCandidates, type ProjectSettings } from "../planning/project-context.mts";
 import { createCodexInbox } from "./codex-inbox.mts";
 import { createDecisionDemo, type DecisionCard } from "./demo-state.mts";
 import { createAcceptance, maxAcceptanceNote, type AcceptanceAction, type StoredAcceptance } from "./acceptance.mts";
@@ -183,9 +183,14 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
             ...(!qualityReviewer || ticketSourceReviewer ? { sourceReview: { concurrency: dispatchConcurrency,
               reviewer: ticketSourceReviewer ?? createCodexTicketSourceReviewer(live[0], qualityModel ?? issueDelivery.planningModel, issueDelivery.timeoutMs) } } : {}),
           } : undefined) : undefined;
-      const projectContext = loadProject && issuePlanning && github ? async () => {
+      const projectContext = loadProject && issuePlanning && github && issueTracker ? async () => {
         const [context, issues] = await Promise.all([loadProject(), github.suggest().catch(() => undefined)]);
         context.evidence.issueCandidates = snapshotIssueCandidates(issues ?? []);
+        if (context.evidence.github.repo?.toLowerCase() === issueTracker.repo.toLowerCase()) {
+          const related = await readRelatedIssues(issueTracker, issues ?? [], context.planText);
+          context.evidence.relatedIssues = related.issues;
+          if (related.omissions) context.evidence.relatedIssueOmissions = related.omissions;
+        }
         return context;
       } : loadProject;
       const flows = createConversationFlows(inbox.runPhase, codex ? limits.codex : limits.demo, audit.record, projectContext,
