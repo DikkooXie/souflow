@@ -55,7 +55,10 @@ test("另行待验收仍须覆盖所有条件，且关联闭单证据随批次�
   const url = "https://github.com/a/b/issues/8";
   flow.project = { plan: { status: "read" }, repository: { revision, commits: [] }, github: { status: "read", repo: "a/b" },
     relatedIssues: [{ number: 8, url, status: "read", state: "CLOSED", assigned: false,
-      source: { number: 8, title: "确认前禁止发送", body: "等待人工确认后再发送纪要待办。", revision: "8".repeat(64) } }] };
+      source: { number: 8, title: "确认前禁止发送", body: "等待人工确认后再发送纪要待办。", revision: "8".repeat(64) } }],
+    relatedPullRequests: [{ number: 9, state: "MERGED", url: "https://github.com/a/b/pull/9",
+      title: "确认交付", head: "d".repeat(40), mergeCommit: "e".repeat(40),
+      source: { number: 9, title: "确认交付", body: "等待人工确认后再发送纪要待办。", revision: "9".repeat(64) } }] };
   const [first, second] = ticket.validation;
   assert.ok(first && second);
   const onlyNew = { ...ticket, criteria: ["AC-1"], validation: [first] };
@@ -70,6 +73,8 @@ test("另行待验收仍须覆盖所有条件，且关联闭单证据随批次�
   const packet = input([related]);
   assert.deepEqual(packet.batchAcceptance, [related]);
   assert.equal(packet.references["github:issue:8"], "确认前禁止发送\n等待人工确认后再发送纪要待办。");
+  assert.equal(packet.references["github:pr:9"], `确认交付\n等待人工确认后再发送纪要待办。\n${"e".repeat(40)}`);
+  assert.equal(packet.references["github:issue:9"], undefined);
   const payload = { tickets: [onlyNew], batchAcceptance: [related] };
   const receipt = await reviewQuality(packet, payload, passingQualityReview, signal);
   const invalid = qualityReviewOutput(packet);
@@ -83,6 +88,9 @@ test("另行待验收仍须覆盖所有条件，且关联闭单证据随批次�
   const changed = structuredClone(flow);
   if (changed.project) changed.project.relatedIssues = [];
   assert.equal(qualityCurrent(receipt, changed, payload), false);
+  const changedPull = structuredClone(flow);
+  if (changedPull.project) changedPull.project.relatedPullRequests = [];
+  assert.equal(qualityCurrent(receipt, changedPull, payload), false);
 });
 
 test("工单引用不存在的验收项时拒绝准备复审", async () => {

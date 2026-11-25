@@ -13,6 +13,10 @@ export type IssueDetail = IssueSummary & {
   body: string;
 };
 export type IssueCreation = { title: string; body: string };
+export type PlanningReference = { number: number; title: string; body: string } & (
+  { kind: "issue"; state: "OPEN" | "CLOSED"; assigned: boolean }
+  | { kind: "pull"; state: "OPEN" | "CLOSED" | "MERGED"; head: string; mergeCommit?: string }
+);
 export const maxIssueBodyCharacters = 8000;
 export type IssueCreator = {
   create(input: IssueCreation, account?: string): Promise<number>;
@@ -22,6 +26,7 @@ export type IssueTracker = {
   repo: string;
   candidates(exclude?: ReadonlySet<number>, allowed?: ReadonlySet<number>): Promise<IssueSummary[]>;
   read(number: number): Promise<IssueDetail>;
+  readPlanningReferences?(numbers: readonly number[]): Promise<ReadonlyMap<number, PlanningReference>>;
   account(): Promise<string>;
   assign(number: number, login: string): Promise<void>;
   creation?: IssueCreator;
@@ -38,6 +43,6 @@ export type IssuePublisher = {
 
 export type DeliveryTracker = IssueTracker & { delivery: IssuePublisher };
 
-export function issueRevision(issue: IssueDetail) {
+export function issueRevision(issue: Pick<IssueDetail, "title" | "body">) {
   return createHash("sha256").update(JSON.stringify([issue.title, issue.body])).digest("hex");
 }

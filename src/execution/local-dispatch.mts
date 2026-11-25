@@ -418,7 +418,8 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
         JSON.stringify({ request: flow.prompt, plan: context.plan.sections, criteria,
           availableSources: github ? [...catalog].map(([path, { bytes }]) => [path, bytes]) : [...sources],
           ...(github ? { availableEditPaths: [...editable], sourceBudgetBytes: sourceInputMaxBytes,
-            issueCandidates: flow.project?.issueCandidates, relatedIssues: flow.project?.relatedIssues } : {}),
+            issueCandidates: flow.project?.issueCandidates, relatedIssues: flow.project?.relatedIssues,
+            relatedPullRequests: flow.project?.relatedPullRequests } : {}),
           ...(reviewer ? { outputs: flow.outputs } : {}), ...(correction ? { correction } : {}) }),
       ].join("\n\n");
       const criterionIds = criteria.map(item => item.id);

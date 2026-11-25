@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { scrubAuditText } from "../audit/activity-store.mts";
 import { createGitHubDelivery, githubPull, githubPullFields } from "./github-delivery.mts";
-import { maxIssueBodyCharacters, type DeliveryTracker, type IssueDetail } from "./issue-tracker.mts";
+import { maxIssueBodyCharacters, type DeliveryTracker, type IssueDetail, type PlanningReference } from "./issue-tracker.mts";
 
 const exec = promisify(execFile);
 const repoPattern = /^[a-z\d][a-z\d-]*\/[a-z\d_.-]+$/i;
@@ -53,8 +53,43 @@ export function createGitHubIssues(workspace: string, repo: string, login?: stri
       pulls: pulls.filter(pr => pr.repository.nameWithOwner.toLowerCase() === repo.toLowerCase())
         .map(pr => githubPull(repo, pr)) };
   }
+  async function readPlanningReferences(numbers: readonly number[]) {
+    const fields = numbers.filter(number => Number.isInteger(number) && number > 0 && number <= 2147483647);
+    if (!fields.length) return new Map<number, PlanningReference>();
+    const selection = fields.map(number => `ref${number}:issueOrPullRequest(number:${number}){
+      __typename
+      ... on Issue {number title body state assignees{totalCount}}
+      ... on PullRequest {number title body state headRefOid mergeCommit{oid}}
+    }`).join("\n");
+    const query = `query($owner:String!, $name:String!){repository(owner:$owner,name:$name){${selection}}}`;
+    // GitHub 为缺失编号返回非零状态，同时保留同批中已读的 GraphQL 字段。
+    const raw = await gh(["graphql", "-f", `query=${query}`, "-f", `owner=${owner}`, "-f", `name=${name}`])
+      .catch((error: unknown) => {
+        if (error && typeof error === "object" && "stdout" in error && typeof error.stdout === "string" && error.stdout) return error.stdout;
+        throw error;
+      });
+    const { data } = JSON.parse(raw);
+    if (!data?.repository) throw Error("关联 GitHub 资料当前不可读取。");
+    const references = new Map<number, PlanningReference>();
+    const commit = /^[a-f0-9]{40}$/;
+    for (const number of fields) {
+      const item = data.repository[`ref${number}`];
+      if (item?.number !== number || typeof item.title !== "string" || typeof item.body !== "string") continue;
+      const base = { number, title: scrubAuditText(item.title), body: scrubAuditText(item.body).slice(0, maxIssueBodyCharacters) };
+      if (item.__typename === "Issue" && (item.state === "OPEN" || item.state === "CLOSED") && Number.isInteger(item.assignees?.totalCount)) {
+        references.set(number, { ...base, kind: "issue", state: item.state, assigned: item.assignees.totalCount > 0 });
+      } else if (item.__typename === "PullRequest" && (item.state === "OPEN" || item.state === "CLOSED" || item.state === "MERGED")
+        && typeof item.headRefOid === "string" && commit.test(item.headRefOid)) {
+        const merge = item.mergeCommit?.oid;
+        if (item.state === "MERGED" && (typeof merge !== "string" || !commit.test(merge))) continue;
+        references.set(number, { ...base, kind: "pull", state: item.state, head: item.headRefOid,
+          ...(typeof merge === "string" && commit.test(merge) ? { mergeCommit: merge } : {}) });
+      }
+    }
+    return references;
+  }
   return {
-    repo, read, delivery: createGitHubDelivery(repo, gh, credentialEnv),
+    repo, read, readPlanningReferences, delivery: createGitHubDelivery(repo, gh, credentialEnv),
     creation: {
       async create({ title, body }, account = login) {
         if (login && account?.toLowerCase() !== login.toLowerCase()) throw Error("建单账号与连接的账号不符。");

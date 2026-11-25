@@ -174,6 +174,8 @@ export function qualityPacket(flow: Flow, revision: string, id: string, tickets:
     ...planning.criteria.map(({ id, text }) => [`criterion:${id}`, text]),
     ...(planning.project?.relatedIssues ?? []).flatMap(issue => issue.status === "read"
       ? [[`github:issue:${issue.number}`, [issue.source.title, issue.source.body].filter(Boolean).join("\n")]] : []),
+    ...(planning.project?.relatedPullRequests ?? []).map(pr =>
+      [`github:pr:${pr.number}`, [pr.source.title, pr.source.body, pr.mergeCommit].filter(Boolean).join("\n")]),
     ...tickets.flatMap(ticket => [
       [`ticket:${ticket.id}`, [ticket.title, ticket.instructions, ...(ticket.delivery ? ticketDeliveryLines(ticket.delivery) : [])].join("\n")],
       ...ticket.validation.map(({ criterion, procedure, expected }) => [`test:${ticket.id}:${criterion}`, `${procedure}\n${expected}`]),

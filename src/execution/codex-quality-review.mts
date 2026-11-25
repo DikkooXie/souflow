@@ -67,7 +67,7 @@ export function createCodexQualityReviewer(workspace: string, model?: string, ti
         ...(planned ? [
           `为每张新建 Issue 返回一个 breakdown，ticket 填工单 ID。分别核对可独立演示结果、必要前置及同级顺序，任一不成立就给该工单 block。每条最多 ${qualityReviewLimits.breakdownReferences} 项依据，至少逐字引用自身 ticket: 条目。`,
           "仅交付界面、接口或存储层而无法单独演示用户结果时阻塞。测试应能以所列文件和已合并前置独立完成。缺少真正的上游、用依赖强制本可并行的工作串行、或同级顺序违背已确认计划时阻塞。单有自述理由无法证明优先级。",
-          "依据 planning.project.issueCandidates 与 planning.project.relatedIssues 中冻结的正文，核对每张新工单是否重复已有 Issue 的交付结果。可用 github:issue:编号 引用已读取的关联 Issue。范围重复、缺少真实上游或借既有 Issue 名义代替验收均须阻塞。",
+          "依据 planning.project.issueCandidates、relatedIssues 和 relatedPullRequests 中冻结的正文，核对每张新工单是否重复已有交付。可用 github:issue:编号 引用关联 Issue，用 github:pr:编号 引用关联 PR。范围重复、缺少真实上游或借既有交付名义代替验收均须阻塞。",
           "batchAcceptance 只安排仍待执行的验证。整批验收须给出真实多工单或调度场景。关联 Issue 的正文须确实承担对应验收，已关闭也不能代替实测。如果结论通过，在 scope、evidence 或 verification 为每个不同的关联 Issue 至少引用一次 github:issue:编号 及对应 basis 的实质原文。发现新功能被藏在整批验收、借用无关 Issue、或外部未完成依赖阻塞单独开工时，应拦截。",
           "验证可引用 batch-test:AC-编号 核对整批或已有交付的步骤。逐单 breakdown 只按各自分配的验收判断独立交付。",
         ] : []),
