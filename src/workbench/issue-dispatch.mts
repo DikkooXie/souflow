@@ -8,6 +8,7 @@ import { IssueVerificationUncertain, type VerifyIssue } from "../execution/issue
 import type { PatchIssue } from "../execution/local-code-changes.mts";
 import { qualityBindingCurrent, type QualityBinding } from "../planning/dispatch-quality.mts";
 import type { ApprovedReviewFix } from "./approved-review-fix.mts";
+import { hasPublicationMarker } from "./planned-issue-publication.mts";
 
 export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; prepare: PrepareIssue; pollMs: number; conversation?: boolean;
   requireQuality?: boolean; recoverFailedIssue?: number; reviewFix?: ApprovedReviewFix };
@@ -23,6 +24,7 @@ export type Claim = Remote & {
   accountAssignment?: AccountAssignment;
   delivery?: DeliverySpec; approval?: { flowId: string; planId: string; version: number; issueRevision: string; quality?: QualityBinding };
   target?: DeliveryTarget; pull?: IssuePull;
+  claimUncertain?: boolean;
   failure?: DeliveryFailure; retryCount?: number;
   reviewFix?: { from: string; state: "running" | "publishing" | "complete" | "failed"; pendingHead?: string; base?: string };
 };
@@ -81,7 +83,9 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   }
   for (const c of store.load()) {
     if (c.reviewFix?.state === "running") save({ ...c, reviewFix: { ...c.reviewFix, state: "failed" } }, "review-fix-interrupted");
-    else if (["claiming", "running", "developing", "publishing"].includes(c.phase)) save({ ...c, phase: "uncertain" }, "restart");
+    else if (["claiming", "running", "developing", "publishing"].includes(c.phase)) {
+      save({ ...c, phase: "uncertain", ...(c.phase === "claiming" ? { claimUncertain: true } : {}) }, "restart");
+    }
     else {
       claims.set(c.number, c);
       queueRetry(c);
@@ -154,7 +158,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       void job.finally(() => jobs.delete(job));
     } catch (error) {
       if (claims.get(c.number)?.phase === "conflict") throw error;
-      save({ ...c, phase: "uncertain" }, "reconcile");
+      save({ ...c, phase: "uncertain", claimUncertain: true }, "reconcile");
       throw new IssueActionError(503, "认领结果待核对，请刷新 GitHub 状态。");
     }
   }
@@ -278,7 +282,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     dispatchReviewFix();
     for (const c of claims.values()) {
       if (jobs.size >= maxActive) break;
-      if (c.phase !== "waiting" || !c.delivery) continue;
+      if (c.phase !== "waiting" || !c.delivery || c.requestId === pending?.id) continue;
       if (c.approval && !delivery.conversation) continue;
       if (delivery.requireQuality && !qualityBindingCurrent(c.approval?.quality)) {
         save({ ...c, phase: "uncertain" }, "quality-check-required");
@@ -348,9 +352,11 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       if (!delivery?.conversation) return [];
       const rows = await tracker.candidates(new Set(claims.keys()));
       const issues = await Promise.all(rows.slice(0, 8).map(row => tracker.read(row.number)));
-      return issues.filter(issue => issue.state === "OPEN" && !issue.assignees.length && !issue.pulls.length && !claims.has(issue.number));
+      return issues.filter(issue => issue.state === "OPEN" && !issue.assignees.length && !issue.pulls.length
+        && !claims.has(issue.number) && !hasPublicationMarker(issue.body));
     },
-    async claimApproved(id: string, actor: string, specs: ReadonlyMap<number, DeliverySpec & { issueRevision: string }>, approval: Omit<NonNullable<Claim["approval"]>, "issueRevision">) {
+    async claimApproved(id: string, actor: string, specs: ReadonlyMap<number, DeliverySpec & { issueRevision: string }>,
+      approval: Omit<NonNullable<Claim["approval"]>, "issueRevision">, recovering = false) {
       if (!delivery?.conversation || !permits(actor)) throw new IssueActionError(403, "当前成员未获交付权限。");
       if (delivery.requireQuality && !qualityBindingCurrent(approval.quality)) throw new IssueActionError(409, "工单缺少当前质量校验。");
       if (pending) throw new IssueActionError(409, "已有成员正在认领，请重试。");
@@ -358,16 +364,29 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
         const connection = memberTrackers.get(actor) ?? tracker;
         const account = await connection.account();
         const issues = await Promise.all([...specs.keys()].map(number => connection.read(number)));
-        if (issues.some(item => claims.has(item.number) || item.state !== "OPEN" || item.assignees.length || item.pulls.length
-          || issueRevision(item) !== specs.get(item.number)?.issueRevision)) {
-          throw new IssueActionError(409, "工单状态或内容已变化，请重新规划。");
-        }
-        for (const issue of issues) {
+        const ready = issues.map(issue => {
           const spec = specs.get(issue.number);
-          if (spec) {
-            const { issueRevision, ...deliverySpec } = spec;
-            await acquire(id, actor, connection, account, issue, deliverySpec, { ...approval, issueRevision });
+          if (!spec || issueRevision(issue) !== spec.issueRevision) throw new IssueActionError(409, "工单内容已变化，请重新规划。");
+          const { issueRevision: revision, ...deliverySpec } = spec;
+          const authorization = { ...approval, issueRevision: revision };
+          const prior = claims.get(issue.number);
+          if (prior && recovering && prior.requestId === id && prior.claimedBy === actor
+            && prior.account.toLowerCase() === account.toLowerCase()
+            && isDeepStrictEqual(prior.delivery, deliverySpec) && isDeepStrictEqual(prior.approval, authorization)) {
+            if (prior.phase === "uncertain" && prior.claimUncertain && stillAssignee(prior, issue)) {
+              return { issue, resume: prior, deliverySpec, authorization };
+            }
+            if (["waiting", "developing", "publishing", "submitted", "deliveryFailed"].includes(prior.phase)) return undefined;
           }
+          if (prior || issue.state !== "OPEN" || issue.assignees.length || issue.pulls.length) {
+            throw new IssueActionError(409, "工单状态已变化，请重新规划。");
+          }
+          return { issue, deliverySpec, authorization };
+        });
+        for (const entry of ready) {
+          if (!entry) continue;
+          if (entry.resume) save({ ...entry.resume, ...remoteIssue(entry.issue), phase: "waiting", claimUncertain: false }, "claim-recovered");
+          else await acquire(id, actor, connection, account, entry.issue, entry.deliverySpec, entry.authorization);
         }
       })().finally(() => { pending = undefined; });
       pending = { id, actor, task };

@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { scrubAuditText } from "../audit/activity-store.mts";
 import { createGitHubDelivery, githubPull, githubPullFields } from "./github-delivery.mts";
-import type { DeliveryTracker, IssueDetail } from "./issue-tracker.mts";
+import { maxIssueBodyCharacters, type DeliveryTracker, type IssueDetail } from "./issue-tracker.mts";
 
 const exec = promisify(execFile);
 const repoPattern = /^[a-z\d][a-z\d-]*\/[a-z\d_.-]+$/i;
@@ -48,13 +48,36 @@ export function createGitHubIssues(workspace: string, repo: string, login?: stri
     const item = data.repository.issue;
     if (item?.number !== number) throw Error("未找到对应的 Issue。");
     const pulls = item.closedByPullRequestsReferences.nodes as (Parameters<typeof githubPull>[1] & { repository: {nameWithOwner: string} })[];
-    return { number, title: scrubAuditText(item.title), body: scrubAuditText(item.body).slice(0, 8000), state: item.state,
+    return { number, title: scrubAuditText(item.title), body: scrubAuditText(item.body).slice(0, maxIssueBodyCharacters), state: item.state,
       url: `${root}/issues/${number}`, assignees: item.assignees.nodes.map((a: {login: string}) => a.login),
       pulls: pulls.filter(pr => pr.repository.nameWithOwner.toLowerCase() === repo.toLowerCase())
         .map(pr => githubPull(repo, pr)) };
   }
   return {
     repo, read, delivery: createGitHubDelivery(repo, gh, credentialEnv),
+    creation: {
+      async create({ title, body }) {
+        const number = Number(await gh(["--method", "POST", `repos/${repo}/issues`,
+          "-f", `title=${title}`, "-f", `body=${body}`, "--jq", ".number"]));
+        if (!Number.isSafeInteger(number) || number < 1) throw Error("GitHub 未返回有效的 Issue 编号。");
+        return number;
+      },
+      async findCreated(marker, creator, since) {
+        const result = new Set<number>();
+        for (let page = 1; ; page++) {
+          const query = new URLSearchParams({ state: "all", creator, since, sort: "created",
+            direction: "asc", per_page: "100", page: String(page) });
+          const rows = JSON.parse(await gh([`repos/${repo}/issues?${query}`,
+            "--jq", "map({number,body,pull_request,creator:.user.login})"])) as
+            { number: number; body: string | null; pull_request?: object; creator?: string }[];
+          for (const row of rows) {
+            if (!row.pull_request && row.creator?.toLowerCase() === creator.toLowerCase()
+              && row.body?.split("\n").includes(marker)) result.add(row.number);
+          }
+          if (rows.length < 100) return [...result];
+        }
+      },
+    },
     async candidates(exclude, allowed) {
       // Issues REST 列表也可能包含 PR，先过滤，再从最早创建的无人负责工单中选择。
       const items = [];

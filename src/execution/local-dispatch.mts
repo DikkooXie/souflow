@@ -8,13 +8,13 @@ import { type BusinessEvent, type Checkpoint, scrubAuditText } from "../audit/ac
 import { dispatchTicketOutputBytes } from "../config/runtime.mts";
 import { currentDevelopmentPlan, type Flow } from "../planning/conversation-flow.mts";
 import { acceptanceCriteria, planningDigest, qualityBlock, qualityCurrent, qualityPacket, readVerification, reviewQuality,
-  verificationSchema, type QualityReceipt, type QualityReviewer, type Verification } from "../planning/dispatch-quality.mts";
+  verificationSchema, type QualityReceipt, type QualityReviewer, type QualityTicket, type Verification } from "../planning/dispatch-quality.mts";
 import { type TicketDraft, validateTicketPlan } from "../planning/validate-ticket-plan.mts";
 import { startCodexQuestionAttempt, startCodexReadOnlyTask } from "./codex-command-attempt.mts";
 import { type AccountAssignment, type CodexAccountDispatch, withCodexAccount } from "./codex-account-dispatch.mts";
 import type { DispatchMonitor } from "./dispatch-monitor.mts";
 import { qualitySources } from "./codex-quality-review.mts";
-import { applyLocalCodeChanges, codeResultSchema, type LocalCodePatch, readEditableFile, readLocalCodePatch, replayLocalCodePatch } from "./local-code-changes.mts";
+import { applyLocalCodeChanges, codeResultSchema, deliveryPath, maxSourceBytes, type LocalCodePatch, readEditableFile, readLocalCodePatch, replayLocalCodePatch } from "./local-code-changes.mts";
 
 const exec = promisify(execFile);
 const maxReportLength = 8000;
@@ -243,12 +243,14 @@ function reviewedBatch(run: Run) {
 }
 
 type Start = typeof startCodexReadOnlyTask;
-async function evidenceCatalog(workspace: string, revision: string) {
-  const entries = (await exec("git", ["-C", workspace, "ls-tree", "-r", "-z", revision, "--", "docs", "src", "tests"])).stdout;
+async function evidenceCatalog(workspace: string, revision: string, github = false) {
+  const entries = (await exec("git", ["-C", workspace, "ls-tree", "-r", "-z", "-l", revision, "--", "docs", "src", "tests"])).stdout;
   const catalog = new Map<string, string>();
   for (const entry of entries.split("\0")) {
-    const match = /^100(?:644|755) blob ([a-f0-9]{40,64})\t((?:src|docs|tests)\/[a-zA-Z0-9._/-]+\.(?:md|mts|mjs|html|css))$/.exec(entry);
-    if (match?.[1] && match[2]) catalog.set(match[2], match[1]);
+    const match = /^100(?:644|755) blob ([a-f0-9]{40,64}) +([0-9]+)\t((?:src|docs|tests)\/[a-zA-Z0-9._/-]+\.(?:md|mts|mjs|html|css))$/.exec(entry);
+    if (match?.[1] && match[3] && (!github || (deliveryPath.test(match[3]) && Number(match[2]) <= maxSourceBytes))) {
+      catalog.set(match[3], match[1]);
+    }
   }
   return catalog;
 }
@@ -336,9 +338,7 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
     }
   }
 
-  async function prepare(current: Flow, run: Run) {
-    try {
-      const flow = structuredClone(current);
+  async function planTickets(flow: Flow, run: Run, github = false) {
       const context = planFor(flow);
       const reviewer = run.kind === "code" ? qualityReviewer : undefined;
       if (!context || (reviewer && !planningDigest(flow))) throw Error("工单校验未通过：规划产物或上游版本不完整。");
@@ -346,16 +346,18 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
         (await exec("git", ["-C", workspace, "rev-parse", "--verify", "HEAD"])).stdout.trim();
       if (!/^[a-f0-9]{40,64}$/.test(revision) || shutdown.signal.aborted) throw Error("无法取得仓库版本。");
       run.revision = revision;
-      const catalog = await evidenceCatalog(workspace, revision);
+      const catalog = await evidenceCatalog(workspace, revision, github);
       if (shutdown.signal.aborted) throw Error("本地工作台已关闭。");
       // 按完整验收文本约束拆分，模型不得自行修改本轮目标。
       const criteria = acceptanceCriteria(flow);
       if (criteria.length > 24) throw Error("工单校验未通过（验收项过多，请缩小本轮范围）。");
       const prompt = [
-        run.kind === "code"
+        github ? "把已生成的开发计划拆成独立可验收的新 GitHub Issue，说明执行优先顺序。上游必须等对应 PR 合并后才能满足依赖。"
+          : run.kind === "code"
           ? "把已生成的开发计划拆成本地代码工单，每单可以单独验证产物。只有确实需要前置补丁时才声明工单依赖。"
           : "把已生成的 souflow 开发计划拆成可独立验收的本地核验工单。工单只根据提供的资料和前置报告产出核验报告。",
-        run.kind === "code"
+        github ? "每单 editPaths 从可执行的现有文件中列出 1 到 4 个路径。首批 GitHub 工单的可编辑范围须互斥。sources 填送审所需的已有资料路径。"
+          : run.kind === "code"
           ? "每单 editPaths 列出需改动的 1 到 4 个现有文件。无依赖的工单填写空 dependsOn。修改同一文件的工单必须按依赖串行。下游只在前置补丁获人工批准后开始。sources 可列出辅助参考文件或为空，路径均从 availableSources 选择。"
           : "前置报告为必须输入时才填写 dependsOn。若需求明确说两张独立核验之后汇总，拆出两个无依赖节点和一个同时依赖它们的汇总节点。从 availableSources 指定一到四份资料，汇总单可只依赖报告。",
         "复用计划范围，必须覆盖每个固定验收 ID。每项 instructions 写明交付目标、参考资料及验收方法。工单 ID 用大写字母开头，仅含大写字母、数字和连字符。",
@@ -380,10 +382,22 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
       }, session);
       run.jobs = readDispatchTickets(output, criteria.map(item => item.id), new Set(catalog.keys()), run.kind, routing, !!reviewer, ticketOutputMaxBytes)
         .map(ticket => ({ ...ticket, status: "queued" }));
+      return { revision, reviewer };
+  }
+
+  function qualityTickets(jobs: readonly Job[]): QualityTicket[] {
+    return jobs.map(job => ({ id: job.id, title: scrubAuditText(job.title), instructions: scrubAuditText(job.instructions),
+      criteria: job.criteria, dependsOn: job.dependsOn, sources: job.sources, validation: job.validation ?? [], paths: job.editPaths ?? [] }));
+  }
+
+  async function prepare(current: Flow, run: Run) {
+    try {
+      const flow = structuredClone(current);
+      const { revision, reviewer } = await planTickets(flow, run);
       if (reviewer) {
-        const tickets = run.jobs.map(job => ({ ...job, validation: job.validation ?? [], paths: job.editPaths ?? [] }));
+        const tickets = qualityTickets(run.jobs);
         const evidence = await qualitySources(workspace, revision,
-          tickets.flatMap(ticket => [...ticket.sources, ...ticket.paths]), shutdown.signal);
+          tickets.flatMap(ticket => [...(ticket.sources ?? []), ...ticket.paths]), shutdown.signal);
         const packet = qualityPacket(flow, revision, run.id, tickets, evidence);
         const receipt = await reviewQuality(packet, reviewedBatch(run), reviewer, shutdown.signal);
         if (receipt.flowDigest !== planningDigest(current)) throw Error("工单校验未通过：规划版本已变化，请重新准备。");
@@ -534,6 +548,16 @@ export function createLocalDispatch(workspace: string, concurrency: number, {
 
   return {
     list: () => [...runs.values()],
+    async planGitHub(flow: Flow, id: string) {
+      const plan = currentDevelopmentPlan(flow);
+      if (!plan || !qualityReviewer) throw Error("工单校验未通过：GitHub 建单需要有效的开发计划和质量复核。");
+      const run: Run = { id, flowId: flow.id, plan, kind: "code", status: "preparing", jobs: [] };
+      await planTickets(flow, run, true);
+      const tickets = qualityTickets(run.jobs);
+      const files = tickets.flatMap(ticket => ticket.paths.map(path => path.toLowerCase()));
+      if (new Set(files).size !== files.length) throw Error("工单校验未通过：此轮 GitHub 工单的编辑范围重叠。");
+      return tickets;
+    },
     isRunning: (flowId: string) => [...runs.values()].some(run => run.flowId === flowId && (active(run) || run.status === "paused")),
     reviews: pendingReviews,
     async review(id: string, body: unknown, flows: readonly Flow[], actor?: string) {

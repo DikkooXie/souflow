@@ -11,12 +11,19 @@ export type IssueDetail = IssueSummary & {
   pulls: IssuePull[];
   body: string;
 };
+export type IssueCreation = { title: string; body: string };
+export const maxIssueBodyCharacters = 8000;
+export type IssueCreator = {
+  create(input: IssueCreation): Promise<number>;
+  findCreated(marker: string, creator: string, since: string): Promise<number[]>;
+};
 export type IssueTracker = {
   repo: string;
   candidates(exclude?: ReadonlySet<number>, allowed?: ReadonlySet<number>): Promise<IssueSummary[]>;
   read(number: number): Promise<IssueDetail>;
   account(): Promise<string>;
   assign(number: number, login: string): Promise<void>;
+  creation?: IssueCreator;
 };
 
 export type IssuePublisher = {

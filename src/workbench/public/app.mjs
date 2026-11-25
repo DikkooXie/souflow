@@ -21,6 +21,8 @@ const welcome = document.querySelector("#welcome");
 const conversation = document.querySelector("#conversation");
 const conversationMessage = document.querySelector("#conversation-message");
 const conversationStatus = document.querySelector("#conversation-status");
+const conversationIssues = document.querySelector("#conversation-issues");
+const conversationIssueList = document.querySelector("#conversation-issue-list");
 const conversationQuality = document.querySelector("#conversation-quality");
 const resumeWorkflow = document.querySelector("#resume-workflow");
 const interruptedDecisions = document.querySelector("#interrupted-decisions");
@@ -255,30 +257,52 @@ function renderConversation(flow, pending) {
   renderQualityDetails(conversationQuality, node, flow?.status === "ready" ? proposal?.quality : undefined);
   if (!flow) return;
   const retrySelection = ["uncertain", "blocked"].includes(proposal?.status) && !proposal.approved;
-  resumeWorkflow.hidden = !live || member?.id === "reviewer" || (flow.status !== "interrupted" && !retrySelection);
-  resumeWorkflow.textContent = retrySelection ? "重新选单并校验" : "继续规划";
+  const retryPublication = proposal?.status === "uncertain" && proposal.approved && proposal.createsIssues;
+  resumeWorkflow.hidden = !live || member?.id === "reviewer" || (flow.status !== "interrupted" && !retrySelection && !retryPublication);
+  resumeWorkflow.textContent = retryPublication ? "核对建单并继续派发" : retrySelection ? "重新准备并校验工单" : "继续规划";
   resumeWorkflow.dataset.subject = flow.id;
   renderInterruptedDecisions(flow);
   if (conversationMessage.textContent !== flow.prompt) conversationMessage.textContent = flow.prompt;
   const waiting = pending.some(request => request.flowId === flow.id);
-  const deliveryStatus = { selecting: "正在从 GitHub 选择适合本轮计划的工单…",
+  const deliveryStatus = { selecting: "正在根据开发计划准备工单…",
     reviewing: "正在复核项目文档和 GitHub 工单…",
     blocked: "GitHub 工单未通过质量校验。",
-    pending: "已选好 GitHub 工单。请在「待决策」确认授权范围。",
-    authorizing: "授权已记录，正在认领 GitHub 工单…",
+    pending: proposal?.createsIssues ? "新工单已复核。请在「待决策」核对建单和派发范围。" : "已选好 GitHub 工单。请在「待决策」确认授权范围。",
+    authorizing: proposal?.createsIssues ? "授权已记录，正在创建并认领 GitHub Issue…" : "授权已记录，正在认领 GitHub 工单…",
     submitted: "已派发到 GitHub 工单，可查看会话、依赖和 PR 进度。",
     declined: "本轮 GitHub 工单未授权执行。",
     empty: "这轮计划暂无符合条件的未认领 GitHub 工单。",
-    uncertain: "GitHub 工单状态待核对。请查看工单列表。",
+    uncertain: proposal?.createsIssues && proposal.approved ? "" : "GitHub 工单状态待核对。请查看工单列表。",
   };
   const note = flow.status === "ready" ? [deliveryStatus[proposal?.status] ?? "项目文档已就绪。", proposal?.error].filter(Boolean).join(" ")
     : flow.status === "interrupted" ? "规划已中断，已完成的项目文档已保留。"
       : flow.status === "failed" ? "这项需求暂未完成。"
         : waiting ? "有一个问题需要你决定。" : "正在推进你的需求…";
   if (conversationStatus.textContent !== note) conversationStatus.textContent = note;
+  renderPublishedIssues(flow, proposal);
   renderProjectSources(flow);
   openArchive.hidden = !flow.outputs.some(output => output.artifacts.length);
   openArchive.dataset.subject = flow.id;
+}
+
+function renderPublishedIssues(flow, proposal) {
+  const repo = flow.project?.github.repo;
+  const issues = proposal?.createsIssues ? proposal.issues : [];
+  conversationIssues.hidden = !repo || !issues.length;
+  const key = JSON.stringify([flow.id, repo, issues]);
+  if (conversationIssues.dataset.key === key) return;
+  conversationIssues.dataset.key = key;
+  if (conversationIssues.dataset.flow !== flow.id) conversationIssues.open = false;
+  conversationIssues.dataset.flow = flow.id;
+  conversationIssueList.replaceChildren(...issues.map(number => {
+    const link = node("a", "", `#${number}`);
+    link.href = `https://github.com/${repo}/issues/${number}`;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    const item = node("li");
+    item.append(link);
+    return item;
+  }));
 }
 
 function renderInterruptedDecisions(flow) {
@@ -544,7 +568,8 @@ dialog.addEventListener("close", () => {
 });
 resumeWorkflow.addEventListener("click", () => {
   const proposal = issuePlans.find(item => item.flowId === selectedFlow);
-  const action = ["uncertain", "blocked"].includes(proposal?.status) && !proposal.approved ? "github-selection/retry" : "resume";
+  const action = proposal?.status === "uncertain" && proposal.approved && proposal.createsIssues ? "github-publication/resume"
+    : ["uncertain", "blocked"].includes(proposal?.status) && !proposal.approved ? "github-selection/retry" : "resume";
   if (selectedFlow) void post(`/api/workflows/${selectedFlow}/${action}`);
 });
 openArchive.addEventListener("click", () => archive.show(flows.find(entry => entry.id === selectedFlow)));

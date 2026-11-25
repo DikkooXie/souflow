@@ -47,6 +47,10 @@
         <p id="conversation-message" class="user-message"></p>
         <div class="conversation-reply">
           <p id="conversation-status" class="flow-status" role="status"></p>
+          <details id="conversation-issues" class="history project-context" hidden>
+            <summary>本轮创建的 GitHub Issue</summary>
+            <ul id="conversation-issue-list"></ul>
+          </details>
           <details id="conversation-quality" class="history project-context" hidden></details>
           <button type="button" id="resume-workflow" class="archive-entry" data-track="resume-workflow" hidden>继续未完成的规划</button>
           <details id="interrupted-decisions" class="history project-context" hidden>
