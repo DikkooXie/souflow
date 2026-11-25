@@ -242,6 +242,105 @@ test("two authenticated members return a code delivery and accept only the revis
   assert.doesNotMatch(JSON.stringify(audit), new RegExp(`${members.implementer}|${members.reviewer}`));
 });
 
+test("两名成员不能覆盖同版 PRD，旧开发计划不可派发，改版关系可在重启后回读", async t => {
+  const repo = await mkdtemp(join(tmpdir(), "souflow-document-revision-"));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const file = "docs/guide.md";
+  await mkdir(join(repo, "docs"));
+  await writeFile(join(repo, file), "设备接入说明\n");
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+  git("init", "-q");
+  git("add", file);
+  git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--no-gpg-sign", "-qm", "fixture");
+  const credentials = { implementer: "a".repeat(32), reviewer: "b".repeat(32), second: "c".repeat(32) };
+  const auth = (actor: keyof typeof credentials) => `Basic ${Buffer.from(`${actor}:${credentials[actor]}`).toString("base64")}`;
+  const terminal = { finished: Promise.resolve("completed" as const), close() {}, answerQuestions: () => false };
+  const launch = () => start(t, [repo, options => ({ ...terminal,
+    output: () => JSON.stringify(Object.fromEntries(((options.outputSchema?.required ?? []) as string[])
+      .map(field => [field, `原版 ${field}`]))),
+  })], { members: { implementer: credentials.implementer, reviewer: credentials.reviewer,
+    additionalImplementers: { second: credentials.second } }, dispatchAdapters: {
+    split: () => ({ ...terminal, output: () => JSON.stringify({ tickets: [{
+      id: "T1", title: "核验接入说明", instructions: "核对引导内容", criteria: ["AC-1"], dependsOn: [], sources: [file],
+    }] }) }),
+    execute: () => assert.fail("旧批次不得启动"),
+  } }, join(repo, "audit.sqlite"));
+  let server = await launch();
+  const send = (actor: keyof typeof credentials, path: string, body: object) => server.post(path, body, server.url, auth(actor));
+  const read = async () => (await server.read(auth("implementer"))).flows[0];
+  assert.equal((await send("implementer", "/api/workflows", { prompt: "新增设备绑定" })).status, 200);
+  let flow = await read();
+  for (let index = 0; flow?.status !== "ready" && index < 100; index++) {
+    await delay(20);
+    flow = await read();
+  }
+  assert.equal(flow?.status, "ready");
+  const entry = `/api/workflows/${flow.id}`;
+  const prdPath = `${entry}/prd/revise`;
+  const planPath = `${entry}/plan/revise`;
+  const originalPlan = currentDevelopmentPlan(flow);
+  const originalPrd = flow.outputs.flatMap(output => output.artifacts).find(artifact => artifact.kind === "prd");
+  assert.ok(originalPlan && originalPrd);
+  const dispatchPath = `${entry}/local-dispatch`;
+  assert.equal((await send("implementer", `${dispatchPath}/prepare`, { kind: "report" })).status, 200);
+  let batch = (await server.read(auth("implementer"))).dispatches[0];
+  for (let index = 0; batch?.status === "preparing" && index < 100; index++) {
+    await delay(20);
+    batch = (await server.read(auth("implementer"))).dispatches[0];
+  }
+  assert.equal(batch?.status, "ready");
+  assert.equal((await send("reviewer", prdPath, { version: 1, text: "越权写入" })).status, 403);
+  const options = ["# 第一个成员保存", "# 第二个成员保存"];
+  const results = await Promise.all(options.map((value, index) =>
+    send(index === 0 ? "implementer" : "second", prdPath, { version: 1, text: value })));
+  assert.deepEqual(results.map(result => result.status).sort(), [200, 409]);
+  const won = options[results.findIndex(result => result.status === 200)];
+  assert.equal((await send("implementer", `${dispatchPath}/prepare`, { kind: "report" })).status, 409);
+  assert.equal((await send("implementer", `${dispatchPath}/start`, { id: batch.id })).status, 409);
+  assert.equal((await send("implementer", planPath, { version: 1, prdVersion: 1, text: "旧版表单" })).status, 409);
+  assert.equal((await send("implementer", planPath, { version: 1, text: "缺少 PRD 版本" })).status, 409);
+  await server.close();
+  server = await launch();
+  const afterRestart = await read();
+  assert.ok(afterRestart);
+  assert.equal(currentDevelopmentPlan(afterRestart), undefined);
+  assert.equal(afterRestart.planHistory?.find(item => item.kind === "prd")?.sections[0]?.text, originalPrd.sections[0]?.text);
+  const prd = afterRestart.outputs.flatMap(output => output.artifacts).find(artifact => artifact.kind === "prd");
+  assert.deepEqual(prd?.upstream, originalPrd.upstream);
+  assert.deepEqual(prd?.replaces, { id: originalPrd.id, version: 1 });
+  assert.equal(prd?.sections[0]?.text, won);
+  const text = "# 与第二版 PRD 对齐的计划";
+  assert.equal((await send("implementer", planPath, { version: 1, prdVersion: 2, text })).status, 200);
+  const revised = await read();
+  assert.ok(revised);
+  const newPlan = currentDevelopmentPlan(revised);
+  assert.deepEqual(newPlan?.upstream, originalPlan.upstream.map(parent => parent.id === originalPrd.id ? { ...parent, version: 2 } : parent));
+  assert.equal(newPlan?.sections[0]?.text, text);
+  assert.deepEqual(newPlan?.replaces, { id: originalPlan.id, version: 1 });
+  assert.equal(revised.planHistory?.find(item => item.kind === "development-plan")?.upstream[0]?.version, 1);
+  assert.equal(revised.planHistory?.find(item => item.kind === "ticket-drafts")?.upstream[0]?.version, 1);
+});
+
+test("项目文档 Markdown 支持常用格式，内嵌 HTML 与图片无法加载", async t => {
+  const { url } = await start(t);
+  const asset = await fetch(`${url}/vendor/markdown-it.mjs`);
+  assert.equal(asset.status, 200);
+  assert.match(asset.headers.get("content-type") ?? "", /text\/javascript/);
+  const markdownModule = new URL("../src/workbench/public/document-markdown.mjs", import.meta.url).href;
+  const { createDocumentMarkdown } = await import(markdownModule);
+  const { default: MarkdownIt } = await import("markdown-it/browser");
+  const render = createDocumentMarkdown(MarkdownIt);
+  const formatted = render(["# 概要", "", "- 步骤", "", "| 工单 |", "| --- |", "| 接入 |", "", "    code",
+    "", "[文档](https://example.com)"].join("\n"));
+  for (const fragment of ["<h1>概要</h1>", "<li>步骤</li>", "<table>", "<pre><code>code", 'href="https://example.com"']) {
+    assert.ok(formatted.includes(fragment), fragment);
+  }
+  assert.equal(render("旧纯文本\n第二行"), "<p>旧纯文本<br>\n第二行</p>\n");
+  const safe = render("<script>示例</script> <img src=x onerror=example> ![图片](https://example.com/image) [链接](javascript&#x3a;example) [外部](file:///etc/example)");
+  assert.match(safe, /&lt;script&gt;示例&lt;\/script&gt;/);
+  assert.doesNotMatch(safe, /<(?:script|img)\b|href="(?:javascript|file):/i);
+});
+
 test("the decision inbox routes answers to the selected session and records one receipt", async t => {
   const { url, post, read } = await start(t);
   const page = await fetch(url);

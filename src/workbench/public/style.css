@@ -229,9 +229,19 @@ h1 { font-size: clamp(32px, 4.1vw, 54px); font-weight: 750; letter-spacing: -.04
 .plan-edit-button { margin-bottom: 14px; }
 .plan-edit-tools { margin-bottom: 10px; }
 .plan-editor { display: grid; gap: 9px; margin: 0 0 20px; }
-.plan-editor ~ .archive-text { display: none; }
 .plan-editor p { margin: 0; }
 .plan-editor textarea { width: 100%; min-height: 140px; resize: vertical; border: 1px solid var(--line); border-radius: 9px; padding: 10px; color: inherit; font: inherit; }
+.archive-markdown { max-width: 74ch; line-height: 1.65; overflow-wrap: anywhere; overflow-x: auto; }
+.archive-markdown h1, .archive-markdown h2, .archive-markdown h3, .archive-markdown h4 { margin: 1em 0 .45em; }
+.archive-markdown h1 { font-size: 1.5rem; }
+.archive-markdown h2 { font-size: 1.25rem; }
+.archive-markdown h3 { font-size: 1.08rem; }
+.archive-markdown p, .archive-markdown ul, .archive-markdown ol { margin: 0 0 1em; }
+.archive-markdown a { color: var(--accent); }
+.archive-markdown pre { overflow-x: auto; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.archive-markdown table { border-collapse: collapse; margin: 0 0 1em; }
+.archive-markdown th, .archive-markdown td { padding: 6px 10px; border: 1px solid var(--line); text-align: start; }
+.plan-editor ~ .archive-markdown { display: none; }
 .dispatch-body { overflow: auto; padding: 16px 24px; }
 .dispatch-body > p { margin: 0 0 12px; }
 .github-body { overflow: auto; padding: 20px 24px; }

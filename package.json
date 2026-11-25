@@ -2,7 +2,9 @@
   "name": "souflow",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22.17.1" },
+  "engines": {
+    "node": ">=22.17.1"
+  },
   "scripts": {
     "dev": "node --experimental-strip-types src/workbench/demo-server.mts",
     "dev:codex": "node --experimental-strip-types src/workbench/demo-server.mts --codex",
@@ -15,5 +17,8 @@
     "@biomejs/biome": "2.6.8",
     "@types/node": "22.17.1",
     "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "markdown-it": "15.0.3"
   }
 }

@@ -47,6 +47,7 @@ const files = [
   ["/github-issues.mjs", "github-issues.mjs", "text/javascript"],
   ["/app.mjs", "app.mjs", "text/javascript"],
   ["/archive.mjs", "archive.mjs", "text/javascript"],
+  ["/document-markdown.mjs", "document-markdown.mjs", "text/javascript"],
   ["/dispatch.mjs", "dispatch.mjs", "text/javascript"],
   ["/quality-details.mjs", "quality-details.mjs", "text/javascript"],
   ["/audit.mjs", "audit.mjs", "text/javascript"],
@@ -252,6 +253,9 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
   const assets = new Map<string, { content: Buffer; mime: string }>(files.map(([path, name, mime]) => [
     path, { content: readFileSync(new URL(`./public/${name}`, import.meta.url)), mime },
   ]));
+  assets.set("/vendor/markdown-it.mjs", {
+    content: readFileSync(new URL(import.meta.resolve("markdown-it/browser"))), mime: "text/javascript",
+  });
   const server = createServer(async (request, response) => {
     response.setHeader("Cache-Control", "no-store");
     response.setHeader("X-Content-Type-Options", "nosniff");
@@ -452,28 +456,33 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         const status = await issuePlanning.resumePublication(flow, githubActor);
         return status === 200 ? send(200, state()) : send(status, { ...state(), error: "GitHub 建单或认领回执仍待核对。" });
       }
-      const revisionFlow = /^\/api\/workflows\/([a-f0-9-]+)\/plan\/revise$/.exec(path)?.[1];
+      const revisionRoute = /^\/api\/workflows\/([a-f0-9-]+)\/(plan|prd)\/revise$/.exec(path);
+      const revisionFlow = revisionRoute?.[1];
       if (revisionFlow) {
-        if (!allowed("implementer", "plan.revise", revisionFlow)) return;
+        const isPrd = revisionRoute?.[2] === "prd";
+        const action = isPrd ? "prd.revise" : "plan.revise";
+        const label = isPrd ? "PRD" : "开发计划";
+        if (!allowed("implementer", action, revisionFlow)) return;
         const flow = flows.list().find(item => item.id === revisionFlow);
         if (!flow) return send(404, { error: "需求对话不存在。" });
         if (issuePlanning && flow.requestedBy && flow.requestedBy !== githubActor) {
-          audit.record({ kind: "member.denied", subject: revisionFlow, details: { actor: githubActor, action: "plan.revise" } });
-          return send(403, { error: "请由对话发起者修订 GitHub 交付计划。" });
+          audit.record({ kind: "member.denied", subject: revisionFlow, details: { actor: githubActor, action } });
+          return send(403, { error: "请由对话发起者修订 GitHub 交付文档。" });
         }
         const body = await readJson(request, jsonMetadataBudget + 6 * maxArtifactTextLength);
         if ("status" in body) return send(body.status, { error: body.error });
         const revision = readPlanRevision(body.value);
-        if (!revision) return send(422, { error: `请填写有效计划版本和 1 到 ${maxArtifactTextLength} 字的计划内容。` });
+        if (!revision) return send(422, { error: `请填写有效版本和 1 到 ${maxArtifactTextLength} 字的${label}内容。` });
         const decision = acceptance?.decision(flow, dispatch?.list() ?? []);
         const status = issuePlanning?.locks(flow.id) || dispatch?.isRunning(flow.id) || decision === "submitted" || decision === "accepted"
-          ? 409 : flows.revisePlan(flow, revision);
+          ? 409 : flows.reviseDocument(flow, isPrd ? "prd" : "development-plan", revision);
         if (status === 200 && member) audit.record({ kind: "member.revised", flowId: flow.id,
-          details: { actor: member.login ?? member.id, plan: currentDevelopmentPlan(flow)?.version } });
+          details: { actor: member.login ?? member.id, document: label, version: revision.version + 1,
+            ...(isPrd ? {} : { plan: revision.version + 1 }) } });
         return status === 200 ? send(200, state()) : send(status, {
           ...state(),
-          error: status === 409 ? "计划版本已变更，或当前批次仍在执行、待验收或已通过。"
-            : status === 503 ? "暂时无法保存计划。" : "计划内容没有变化。",
+          error: status === 409 ? "文档或引用的 PRD 版本已变更，或当前批次仍在执行、待验收或已通过。"
+            : status === 503 ? `暂时无法保存${label}。` : `${label}内容没有变化。`,
         });
       }
       const dispatchAction = /^\/api\/workflows\/([a-f0-9-]+)\/local-dispatch\/(prepare|start)$/.exec(path);
