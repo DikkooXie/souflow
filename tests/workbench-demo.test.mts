@@ -16,7 +16,7 @@ import type { createDecisionDemo } from "../src/workbench/demo-state.mts";
 import { passingQualityReview, qualityReviewOutput, validation } from "./fixtures/planning-quality.mts";
 
 type Snapshot = ReturnType<ReturnType<typeof createDecisionDemo>["snapshot"]> & {
-  flows: Flow[];
+  flows: (Flow & { canReplan?: boolean })[];
   dispatches: (ReturnType<ReturnType<typeof createLocalDispatch>["list"]>[number] & {
     acceptance?: { decision: string; actor: { id: string }; note: string }[];
   })[];
@@ -61,6 +61,66 @@ async function withAuditWriteBlocked(path: string, check: () => Promise<void>) {
     writer.close();
   }
 }
+
+test("复核拦截后只有原发起者能在同一对话重规划，旧批次无法启动", { timeout: 10000 }, async t => {
+  const repo = await mkdtemp(join(tmpdir(), "souflow-replan-"));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const file = "docs/guide.md";
+  await mkdir(join(repo, "docs"));
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: repo });
+  git("init", "-q");
+  async function revision(text: string) {
+    await writeFile(join(repo, file), text);
+    git("add", file);
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--no-gpg-sign", "-qm", text);
+    return git("rev-parse", "HEAD").toString().trim();
+  }
+  const oldBase = await revision("旧指引");
+  const keys = { implementer: "a".repeat(32), reviewer: "b".repeat(32), second: "c".repeat(32) };
+  const credential = (actor: keyof typeof keys) => `Basic ${Buffer.from(`${actor}:${keys[actor]}`).toString("base64")}`;
+  const terminal = { finished: Promise.resolve("completed" as const), close() {}, answerQuestions: () => false };
+  const server = await start(t, [repo, options => ({ ...terminal,
+    output: () => JSON.stringify(Object.fromEntries(((options.outputSchema?.required ?? []) as string[]).map(field => [field, `正文 ${field}`]))),
+  })], { members: { implementer: keys.implementer, reviewer: keys.reviewer, additionalImplementers: { second: keys.second } },
+    project: { planPath: file }, dispatchAdapters: {
+      split: () => ({ ...terminal, output: () => JSON.stringify({ tickets: [{ id: "T1", title: "修改指引", instructions: "补齐测试",
+        criteria: ["AC-1"], dependsOn: [], sources: [], editPaths: [file], validation }] }) }),
+      execute: () => assert.fail("旧批次不得启动"),
+    }, async qualityReviewer(packet) {
+      return JSON.stringify({ ...qualityReviewOutput(packet), scope: { status: "block", summary: "缺少前置登录入口",
+        evidence: [{ ref: "request", quote: "更新使用指引" }] } });
+    },
+  }, join(repo, "audit.sqlite"));
+  const post = (actor: keyof typeof keys, path: string, body?: object) => server.post(path, body, server.url, credential(actor));
+  const read = (actor: keyof typeof keys = "implementer") => server.read(credential(actor));
+  async function waitFor<T>(find: (snapshot: Snapshot) => T | undefined): Promise<T> {
+    for (let index = 0; index < 100; index++) {
+      const value = find(await read());
+      if (value !== undefined) return value;
+      await delay(20);
+    }
+    throw Error("等待重规划超时");
+  }
+  assert.equal((await post("implementer", "/api/workflows", { prompt: "更新使用指引" })).status, 200);
+  const flow = await waitFor(state => state.flows.find(item => item.status === "ready"));
+  assert.equal(flow.requestedBy, "implementer");
+  assert.equal(flow.project?.repository?.revision, oldBase);
+  const entry = `/api/workflows/${flow.id}`;
+  assert.equal((await post("implementer", `${entry}/local-dispatch/prepare`, { kind: "code" })).status, 200);
+  const run = await waitFor(state => state.dispatches.find(item => item.status === "failed"));
+  assert.equal((await read()).flows[0]?.canReplan, true);
+  assert.equal((await read("second")).flows[0]?.canReplan, undefined);
+  assert.equal((await post("second", `${entry}/replan`)).status, 409);
+  assert.equal((await post("reviewer", `${entry}/replan`)).status, 403);
+  const newBase = await revision("已有登录证据");
+  assert.equal((await post("implementer", `${entry}/replan`)).status, 200);
+  const updated = await waitFor(state => state.flows.find(item => item.status === "ready" && currentDevelopmentPlan(item)?.version === 2));
+  assert.equal(updated.id, flow.id);
+  assert.equal(updated.project?.repository?.revision, newBase);
+  assert.equal(updated.replan?.batchId, run.id);
+  assert.equal(updated.canReplan, undefined);
+  assert.equal((await post("implementer", `${entry}/local-dispatch/start`, { id: run.id })).status, 409);
+});
 
 test("two authenticated members return a code delivery and accept only the revised batch", { timeout: 10000 }, async t => {
   const repo = await mkdtemp(join(tmpdir(), "souflow-member-workbench-"));
