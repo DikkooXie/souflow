@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { setImmediate } from "node:timers/promises";
 import test from "node:test";
-import { createConversationFlows, makePhasePrompt, phases, readPhaseOutput } from "../src/planning/conversation-flow.mts";
+import { createConversationFlows, makePhasePrompt, phases, readPhaseOutput, type StoredFlow } from "../src/planning/conversation-flow.mts";
 
 test("runs phases in order and hands later phases the collected outputs", async () => {
   const manager = createConversationFlows(async (flow, phase) => {
@@ -85,4 +85,83 @@ test("accepts only nonempty bounded outputs for the selected phase", () => {
   for (const output of ["no json", "[]", '{"场景与已有依据":"场景"}', '{"场景与已有依据":"场景","待核实事项":" "}']) {
     assert.equal(readPhaseOutput(research, output), undefined);
   }
+});
+
+test("在原会话沿用答复重新规划，锁定新基线并保留旧版产物", async () => {
+  const saved = new Map<string, StoredFlow>();
+  const oldBase = "a".repeat(40);
+  const newBase = "b".repeat(40);
+  const clarification = { cardId: "card", questionId: "login", question: "执行账号", answer: "沿用设备自己的登录。" };
+  const corrected = { ...clarification, cardId: "updated-card", answer: "试用改用专用账号。" };
+  const planned: { version: number; base: string | undefined }[] = [];
+  const answers = [clarification];
+  let revision = oldBase;
+  let rejectWrite = false;
+  let interruption = false;
+  const manager = () => createConversationFlows(async (flow, phase, targets, planText) => {
+    if (flow.replan) {
+      const prompt = makePhasePrompt(flow, phase, targets, planText);
+      assert.ok(prompt.includes(clarification.answer));
+      assert.ok(prompt.includes("补齐登录前置"));
+      assert.ok(prompt.includes(`项目计划 ${newBase}`));
+      assert.ok(prompt.includes("保留旧版验收编号"));
+      if (interruption && phase.title === "需求澄清") return "interrupted";
+      if (phase.title === "需求澄清") answers.push(corrected);
+      if (phase.title === "技术选型") assert.ok(prompt.includes(corrected.answer));
+    }
+    return phase.fields.map(field => field === "验收条件" && !flow.replan ? "保留旧版验收编号"
+      : `${field} ${flow.project?.repository?.revision}`);
+  }, 1, undefined, async () => ({
+    evidence: { repository: { revision, commits: [] }, plan: { status: "read" }, github: { status: "unconfigured" } },
+    planText: `项目计划 ${revision}`,
+  }), { load: () => [...saved.values()].map(value => structuredClone(value)),
+    save(id, value) {
+      if (rejectWrite) return false;
+      saved.set(id, structuredClone(value));
+      return true;
+    },
+  }, flow => {
+    const plan = flow.outputs.flatMap(output => output.artifacts).find(artifact => artifact.kind === "development-plan");
+    assert.ok(plan);
+    planned.push({ version: plan.version, base: flow.project?.repository?.revision });
+    return true;
+  }, () => structuredClone(answers));
+
+  const first = manager();
+  const flow = first.begin("支持新人自行连接设备。", "owner");
+  assert.ok(flow);
+  await first.settled();
+  const originals = structuredClone(flow.outputs.flatMap(output => output.artifacts));
+  assert.equal(originals.length, 6);
+  assert.deepEqual(flow.clarifications, [clarification]);
+  revision = newBase;
+  const feedback = { batchId: "blocked-batch", findings: "补齐登录前置" };
+  assert.equal(first.replan(flow, feedback, "other"), 409);
+  rejectWrite = true;
+  assert.equal(first.replan(flow, feedback, "owner"), 503);
+  assert.equal(flow.project?.repository?.revision, oldBase);
+  assert.deepEqual(flow.outputs.flatMap(output => output.artifacts), originals);
+  rejectWrite = false;
+  interruption = true;
+  assert.equal(first.replan(flow, feedback, "owner"), 200);
+  assert.equal(first.replan(flow, feedback, "owner"), 409);
+  await first.settled();
+  assert.equal(flow.status, "interrupted");
+  assert.equal(flow.project?.repository?.revision, newBase);
+
+  const restarted = manager();
+  const resumed = restarted.list()[0];
+  assert.ok(resumed);
+  interruption = false;
+  assert.equal(restarted.resume(resumed), 200);
+  await restarted.settled();
+  assert.equal(resumed.id, flow.id);
+  assert.deepEqual(resumed.planHistory, originals);
+  assert.deepEqual(resumed.clarifications, [clarification, corrected]);
+  for (const artifact of resumed.outputs.flatMap(output => output.artifacts)) {
+    assert.equal(artifact.version, 2);
+    assert.deepEqual(artifact.replaces, { id: artifact.id, version: 1 });
+    assert.ok(artifact.upstream.every(ref => ref.version === (ref.id === resumed.source.id ? 1 : 2)));
+  }
+  assert.deepEqual(planned, [{ version: 1, base: oldBase }, { version: 2, base: newBase }]);
 });

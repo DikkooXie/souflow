@@ -218,6 +218,10 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
       const p = proposals.get(id);
       return p?.actor === actor && !!p.drafts && p.status === "uncertain" && p.approvedAt !== undefined;
     },
+    replanFeedback(flow: Flow, actor: string) {
+      const p = [...proposals.values()].reverse().find(item => item.flowId === flow.id && item.actor === actor && valid(item, flow));
+      if (p?.status === "blocked" && p.approvedAt === undefined && p.error) return { batchId: p.id, findings: p.error };
+    },
     locks(flowId: string) { return [...proposals.values()].some(p => p.flowId === flowId
       && p.approvedAt !== undefined); },
     async resumePublication(flow: Flow, actor: string) {

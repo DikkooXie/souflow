@@ -18,8 +18,8 @@ export function createArchive(node, reportView, post) {
   function render(flow) {
     displayedFlow = flow;
     const current = flow?.outputs.flatMap(output => output.artifacts) ?? [];
-    if (!current.length) return false;
     const archived = (flow.planHistory ?? []).toReversed();
+    if (!current.length && !archived.length) return false;
     const artifacts = [...current, ...archived];
     if (project.textContent !== flow.title) project.textContent = flow.title;
     const key = artifacts.map(versionKey).join(",");
@@ -46,7 +46,7 @@ export function createArchive(node, reportView, post) {
     }
     const selectedEntries = selection?.version === undefined ? current : archived;
     const artifact = selectedEntries.find(entry => entry.id === selection?.id && (selection?.version === undefined || entry.version === selection.version))
-      ?? current.find(entry => entry.kind === "prd") ?? current[0];
+      ?? current.find(entry => entry.kind === "prd") ?? current[0] ?? archived[0];
     const historical = archived.includes(artifact);
     selection = { id: artifact.id, version: historical ? artifact.version : undefined };
     const documentKey = `${versionKey(artifact)}:${historical}:${flow.status}:${canEdit}`;

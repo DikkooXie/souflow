@@ -198,6 +198,25 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       throw error;
     }
   })();
+  function replanFeedback(flow: ReturnType<typeof flows.list>[number], actor: string, member?: Member) {
+    if (!loadProject || !codex || flow.status !== "ready" || member?.id === "reviewer"
+      || (flow.requestedBy && flow.requestedBy !== actor) || (!flow.requestedBy && member)
+      || issuePlanning?.locks(flow.id) || dispatch?.isRunning(flow.id)) return;
+    const plan = currentDevelopmentPlan(flow);
+    if (!plan) return;
+    const runs = dispatch?.list() ?? [];
+    if (runs.some(run => run.flowId === flow.id && run.status === "preparing")) return;
+    const decision = acceptance?.decision(flow, runs);
+    if (decision === "submitted" || decision === "accepted") return;
+    const remote = issuePlanning?.replanFeedback(flow, actor);
+    if (remote) return remote;
+    const run = runs.reverse().find(item => item.flowId === flow.id && item.kind === "code"
+      && item.plan.id === plan.id && item.plan.version === plan.version);
+    if (run?.status === "failed" && run.error && run.quality
+      && Object.values(run.quality.checks).some(check => check.status === "block")) {
+      return { batchId: run.id, findings: run.error };
+    }
+  }
   const snapshot = (member?: Member) => {
     const conversations = flows.list();
     const reviewCards = dispatch?.reviews().map(({ run, job, artifact, patchPath, successors }): DecisionCard => ({
@@ -221,7 +240,9 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
     const issueCards = issuePlanning?.cards(conversations, actor) ?? [];
     return {
       ...state, requests: [...state.requests, ...reviewCards, ...issueCards],
-      ...(issuePlanning ? { issuePlans: issuePlanning.statuses(conversations, actor) } : {}), flows: conversations, phases: phases.map(phase => phase.title), inputLimits,
+      ...(issuePlanning ? { issuePlans: issuePlanning.statuses(conversations, actor) } : {}),
+      flows: conversations.map(flow => ({ ...flow, ...(replanFeedback(flow, actor, member) ? { canReplan: true } : {}) })),
+      phases: phases.map(phase => phase.title), inputLimits,
       member, githubEnabled: !!github,
       acceptanceNoteMaxLength: maxAcceptanceNote,
       planMaxLength: maxArtifactTextLength, dispatches: dispatch?.list().map(run =>
@@ -377,7 +398,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           return send(422, { error: `请填写不超过 ${promptMaxLength} 字的需求。` });
         }
         if (path === "/api/workflows") {
-          const flow = !codex || codex.canBegin() ? flows.begin(prompt.trim(), issuePlanning ? githubActor : undefined) : undefined;
+          const flow = !codex || codex.canBegin() ? flows.begin(prompt.trim(), codex ? githubActor : undefined) : undefined;
           if (flow === null) return send(503, { error: "暂时无法保存需求。" });
           return flow ? send(200, { ...state(), flowId: flow.id }) : send(409, {
             ...state(), error: "进行中的需求已达上限，请先处理待决策事项。",
@@ -400,9 +421,20 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         if (!allowed("implementer", "flow.resume", resumeFlow)) return;
         const flow = flows.list().find(item => item.id === resumeFlow);
         if (!flow) return send(404, { error: "需求对话不存在。" });
-        const status = codex.canBegin() ? flows.resume(flow) : 409;
+        const ownsReplan = !flow.replan || flow.requestedBy === githubActor;
+        const status = ownsReplan && codex.canBegin() ? flows.resume(flow) : 409;
         return status === 200 ? send(200, { ...state(), flowId: flow.id }) : send(status, {
           ...state(), error: status === 503 ? "暂时无法保存规划状态。" : "需求当前不可恢复，或进行中的会话已达上限。",
+        });
+      }
+      const replanFlow = /^\/api\/workflows\/([a-f0-9-]+)\/replan$/.exec(path)?.[1];
+      if (replanFlow && codex) {
+        if (!allowed("implementer", "flow.replan", replanFlow)) return;
+        const flow = flows.list().find(item => item.id === replanFlow);
+        const feedback = flow && replanFeedback(flow, githubActor, member);
+        const status = flow && feedback && codex.canBegin() ? flows.replan(flow, feedback, githubActor) : flow ? 409 : 404;
+        return status === 200 ? send(200, { ...state(), flowId: replanFlow }) : send(status, {
+          ...state(), error: status === 503 ? "暂时无法保存重规划状态。" : "当前对话无法重新规划，请核对批次和授权状态。",
         });
       }
       const retrySelection = /^\/api\/workflows\/([a-f0-9-]+)\/github-selection\/retry$/.exec(path)?.[1];

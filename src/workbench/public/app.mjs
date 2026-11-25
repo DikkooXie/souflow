@@ -249,6 +249,17 @@ function render() {
   renderDetail(current);
 }
 
+function workflowAction(flow, proposal) {
+  if (flow?.canReplan) return { path: "replan", label: "按当前版本重新规划" };
+  if (proposal?.status === "uncertain" && proposal.approved && proposal.createsIssues) {
+    return { path: "github-publication/resume", label: "核对建单并继续派发" };
+  }
+  if (["uncertain", "blocked"].includes(proposal?.status) && !proposal.approved) {
+    return { path: "github-selection/retry", label: "重新准备并校验工单" };
+  }
+  if (flow?.status === "interrupted") return { path: "resume", label: "继续规划" };
+}
+
 function renderConversation(flow, pending) {
   welcome.hidden = !!flow;
   conversation.hidden = !flow;
@@ -256,10 +267,9 @@ function renderConversation(flow, pending) {
   const proposal = issuePlans.find(item => item.flowId === flow?.id);
   renderQualityDetails(conversationQuality, node, flow?.status === "ready" ? proposal?.quality : undefined);
   if (!flow) return;
-  const retrySelection = ["uncertain", "blocked"].includes(proposal?.status) && !proposal.approved;
-  const retryPublication = proposal?.status === "uncertain" && proposal.approved && proposal.createsIssues;
-  resumeWorkflow.hidden = !live || member?.id === "reviewer" || (flow.status !== "interrupted" && !retrySelection && !retryPublication);
-  resumeWorkflow.textContent = retryPublication ? "核对建单并继续派发" : retrySelection ? "重新准备并校验工单" : "继续规划";
+  const action = workflowAction(flow, proposal);
+  resumeWorkflow.hidden = !live || member?.id === "reviewer" || !action;
+  if (action) resumeWorkflow.textContent = action.label;
   resumeWorkflow.dataset.subject = flow.id;
   renderInterruptedDecisions(flow);
   if (conversationMessage.textContent !== flow.prompt) conversationMessage.textContent = flow.prompt;
@@ -281,7 +291,7 @@ function renderConversation(flow, pending) {
   if (conversationStatus.textContent !== note) conversationStatus.textContent = note;
   renderPublishedIssues(flow, proposal);
   renderProjectSources(flow);
-  openArchive.hidden = !flow.outputs.some(output => output.artifacts.length);
+  openArchive.hidden = !flow.outputs.some(output => output.artifacts.length) && !flow.planHistory?.length;
   openArchive.dataset.subject = flow.id;
 }
 
@@ -324,9 +334,10 @@ function renderInterruptedDecisions(flow) {
 function renderProjectSources(flow) {
   const project = flow.project;
   projectContext.hidden = !project;
-  if (projectContext.dataset.flow === flow.id && projectContext.dataset.loaded === String(!!project)) return;
+  const key = JSON.stringify([flow.id, project?.repository?.revision, project?.plan, project?.github]);
+  if (projectContext.dataset.key === key) return;
+  projectContext.dataset.key = key;
   projectContext.dataset.flow = flow.id;
-  projectContext.dataset.loaded = String(!!project);
   projectContext.open = false;
   if (!project) return;
   const { repository, plan, github } = project;
@@ -567,10 +578,10 @@ dialog.addEventListener("close", () => {
   if (auditOpen) void audit.refresh();
 });
 resumeWorkflow.addEventListener("click", () => {
+  const flow = flows.find(item => item.id === selectedFlow);
   const proposal = issuePlans.find(item => item.flowId === selectedFlow);
-  const action = proposal?.status === "uncertain" && proposal.approved && proposal.createsIssues ? "github-publication/resume"
-    : ["uncertain", "blocked"].includes(proposal?.status) && !proposal.approved ? "github-selection/retry" : "resume";
-  if (selectedFlow) void post(`/api/workflows/${selectedFlow}/${action}`);
+  const action = workflowAction(flow, proposal);
+  if (flow && action) void post(`/api/workflows/${flow.id}/${action.path}`);
 });
 openArchive.addEventListener("click", () => archive.show(flows.find(entry => entry.id === selectedFlow)));
 promptBox.addEventListener("keydown", event => {
