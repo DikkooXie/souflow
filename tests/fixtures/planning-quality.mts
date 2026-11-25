@@ -12,6 +12,9 @@ export function qualityReviewOutput(packet: QualityPacket) {
       status: "pass", summary: "夹具验证通过", evidence: packet.planning.criteria.map(({ id }) =>
         quote(Object.keys(packet.references).find(ref => ref.startsWith("test:") && ref.endsWith(`:${id}`)) ?? "")),
     },
+    ...(packet.tickets.some(ticket => ticket.delivery) ? { breakdown: packet.tickets.map(ticket => ({
+      ticket: ticket.id, status: "pass", summary: "夹具可独立验证且顺序正确", evidence: [quote(`ticket:${ticket.id}`)],
+    })) } : {}),
   };
 }
 export const passingQualityReview: QualityReviewer = async packet => JSON.stringify(qualityReviewOutput(packet));

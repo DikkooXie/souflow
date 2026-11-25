@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { scrubAuditText } from "../audit/activity-store.mts";
 import type { Flow } from "./conversation-flow.mts";
+import { ticketDeliveryLines, type TicketDelivery } from "./ticket-delivery.mts";
 import { type TicketDraft, validateTicketPlan } from "./validate-ticket-plan.mts";
 
 const version = 1;
@@ -12,6 +13,7 @@ export const qualityReviewLimits = {
   quoteMinCharacters: 2,
   quoteCharacters: 240,
   references: { scope: 6, evidence: 6, verification: 24 },
+  breakdownReferences: 3,
 } as const;
 const requiredUpstream = {
   research: ["request"], requirements: ["research"], technology: ["requirements"], prd: ["requirements"],
@@ -21,14 +23,16 @@ const requiredUpstream = {
 export type Verification = { criterion: string; procedure: string; expected: string };
 export type QualityTicket = TicketDraft & {
   title: string; instructions: string; validation: readonly Verification[]; paths: readonly string[];
-  sources?: readonly string[]; issue?: { revision: string; text: string };
+  sources?: readonly string[]; issue?: { revision: string; text: string }; delivery?: TicketDelivery;
 };
+export type PlannedTicket = QualityTicket & { delivery: TicketDelivery };
 export type Quote = { ref: string; quote: string };
 type Finding = { status: "pass" | "block"; summary: string; evidence: Quote[] };
 export type QualityReceipt = {
   policy: number; flowDigest: string; batchDigest: string;
   documents: { kind: string; id: string; version: number }[];
   checks: Record<(typeof dimensions)[number], Finding>;
+  breakdown?: (Finding & { ticket: string })[];
 };
 export type QualityBinding = Pick<QualityReceipt, "policy" | "flowDigest" | "batchDigest">;
 export type QualityReviewer = (packet: QualityPacket, signal: AbortSignal) => Promise<string | undefined>;
@@ -115,7 +119,7 @@ export function qualityPacket(flow: Flow, revision: string, id: string, tickets:
     ...planning.documents.map(artifact => [artifact.kind, artifact.sections.map(section => section.text).join("\n")]),
     ...planning.criteria.map(({ id, text }) => [`criterion:${id}`, text]),
     ...tickets.flatMap(ticket => [
-      [`ticket:${ticket.id}`, [ticket.title, ticket.instructions].join("\n")],
+      [`ticket:${ticket.id}`, [ticket.title, ticket.instructions, ...(ticket.delivery ? ticketDeliveryLines(ticket.delivery) : [])].join("\n")],
       ...ticket.validation.map(({ criterion, procedure, expected }) => [`test:${ticket.id}:${criterion}`, `${procedure}\n${expected}`]),
       ...(ticket.issue ? [[`issue:${ticket.id}`, ticket.issue.text]] : []),
     ]),
@@ -126,17 +130,66 @@ export function qualityPacket(flow: Flow, revision: string, id: string, tickets:
 
 export type QualityPacket = ReturnType<typeof qualityPacket>;
 
-export const qualityReviewSchema = {
-  type: "object", additionalProperties: false, required: dimensions,
-  properties: Object.fromEntries(dimensions.map(key => [key, {
-    type: "object", additionalProperties: false, required: ["status", "summary", "evidence"],
-    properties: {
-      status: { type: "string", enum: ["pass", "block"] }, summary: { type: "string" },
-      evidence: { type: "array", items: { type: "object", additionalProperties: false, required: ["ref", "quote"],
-        properties: { ref: { type: "string" }, quote: { type: "string" } } } },
-    },
-  }])),
+const findingFields = {
+  status: { type: "string", enum: ["pass", "block"] }, summary: { type: "string" },
+  evidence: { type: "array", items: { type: "object", additionalProperties: false, required: ["ref", "quote"],
+    properties: { ref: { type: "string" }, quote: { type: "string" } } } },
 };
+
+export function qualityReviewSchema(ticketBreakdown: boolean) {
+  const finding = { type: "object", additionalProperties: false, required: Object.keys(findingFields), properties: findingFields };
+  const properties = {
+    ...Object.fromEntries(dimensions.map(key => [key, finding])),
+    ...(ticketBreakdown ? { breakdown: { type: "array", items: { ...finding,
+      required: ["ticket", ...finding.required], properties: { ticket: { type: "string" }, ...findingFields } } } } : {}),
+  };
+  return { type: "object", additionalProperties: false, required: Object.keys(properties), properties };
+}
+
+export function qualityReviewOutputBytes(packet: QualityPacket) {
+  const longest = Object.keys(packet.references).reduce((key, next) =>
+    Buffer.byteLength(JSON.stringify(next)) > Buffer.byteLength(JSON.stringify(key)) ? next : key, "");
+  // 用需要六字节转义的字符估算上限，并为模型输出的缩进留出空间。
+  const finding = (count: number) => ({ status: "block", summary: "\0".repeat(qualityReviewLimits.summaryCharacters),
+    evidence: Array.from({ length: count }, () => ({ ref: longest, quote: "\0".repeat(qualityReviewLimits.quoteCharacters) })) });
+  const documents = Object.fromEntries(dimensions.map(dimension => [dimension, finding(qualityReviewLimits.references[dimension])]));
+  const breakdown = packet.tickets.some(ticket => ticket.delivery)
+    ? packet.tickets.map(ticket => ({ ticket: ticket.id, ...finding(qualityReviewLimits.breakdownReferences) })) : undefined;
+  return Buffer.byteLength(JSON.stringify({ ...documents, breakdown }, undefined, 2));
+}
+
+function readFinding(value: unknown, packet: QualityPacket, referenceLimit: number): Finding {
+  const row = object(value);
+  if (!row || (row.status !== "pass" && row.status !== "block") || typeof row.summary !== "string"
+    || !row.summary.trim() || row.summary.length > qualityReviewLimits.summaryCharacters || !Array.isArray(row.evidence)
+    || !row.evidence.length || row.evidence.length > referenceLimit) {
+    throw Error("质量复核结论缺少依据，可以重试。");
+  }
+  const evidence = row.evidence.map(entry => {
+    const { ref, quote } = object(entry) ?? {};
+    if (typeof ref !== "string" || typeof quote !== "string" || quote.trim().length < qualityReviewLimits.quoteMinCharacters
+      || quote.length > qualityReviewLimits.quoteCharacters
+      || !Object.hasOwn(packet.references, ref) || !packet.references[ref]?.includes(quote)) {
+      throw Error("质量复核引用无法在本轮资料找到，可以重试。");
+    }
+    return { ref, quote: scrubAuditText(quote) };
+  });
+  return { status: row.status, summary: scrubAuditText(row.summary), evidence };
+}
+
+function readBreakdown(raw: unknown, packet: QualityPacket) {
+  const remaining = new Set(packet.tickets.map(ticket => ticket.id));
+  if (!Array.isArray(raw) || raw.length !== remaining.size) throw Error("质量复核缺少逐单拆分结论，可以重试。");
+  return raw.map(row => {
+    const ticket = object(row)?.ticket;
+    if (typeof ticket !== "string" || !remaining.delete(ticket)) throw Error("质量复核的逐单结论未对应本轮工单。");
+    const finding = readFinding(row, packet, qualityReviewLimits.breakdownReferences);
+    if (!finding.evidence.some(({ ref }) => ref === `ticket:${ticket}`)) {
+      throw Error(`质量复核未引用 ${ticket} 的拆分依据。`);
+    }
+    return { ticket, ...finding };
+  });
+}
 
 export async function reviewQuality(packet: QualityPacket, payload: unknown, reviewer: QualityReviewer, signal: AbortSignal): Promise<QualityReceipt> {
   const flowDigest = hash(packet.planning);
@@ -144,46 +197,38 @@ export async function reviewQuality(packet: QualityPacket, payload: unknown, rev
   const output = await reviewer(packet, signal);
   signal.throwIfAborted();
   const parsed = object(JSON.parse(output ?? "null"));
-  if (!parsed || Object.keys(parsed).length !== dimensions.length) throw Error("质量复核未返回完整结果，可以重试。");
+  const planned = packet.tickets.some(ticket => ticket.delivery);
+  if (!parsed || Object.keys(parsed).length !== dimensions.length + Number(planned)) {
+    throw Error("质量复核未返回完整结果，可以重试。");
+  }
   const entries = dimensions.map(key => {
-    const row = object(parsed[key]);
-    if (!row || (row.status !== "pass" && row.status !== "block") || typeof row.summary !== "string"
-      || !row.summary.trim() || row.summary.length > qualityReviewLimits.summaryCharacters || !Array.isArray(row.evidence)
-      || !row.evidence.length || row.evidence.length > qualityReviewLimits.references[key]) {
-      throw Error("质量复核结论缺少依据，可以重试。");
-    }
-    const evidence = row.evidence.map(entry => {
-      const { ref, quote } = object(entry) ?? {};
-      if (typeof ref !== "string" || typeof quote !== "string" || quote.trim().length < qualityReviewLimits.quoteMinCharacters
-        || quote.length > qualityReviewLimits.quoteCharacters
-        || !Object.hasOwn(packet.references, ref) || !packet.references[ref]?.includes(quote)) {
-        throw Error("质量复核引用无法在本轮资料找到，可以重试。");
-      }
-      return { ref, quote: scrubAuditText(quote) };
-    });
-    if (row.status === "pass" && key === "verification" && packet.planning.criteria.some(({ id }) =>
-      !evidence.some(item => item.ref.startsWith("test:") && item.ref.endsWith(`:${id}`)))) {
+    const finding = readFinding(parsed[key], packet, qualityReviewLimits.references[key]);
+    if (finding.status === "pass" && key === "verification" && packet.planning.criteria.some(({ id }) =>
+      !finding.evidence.some(item => item.ref.startsWith("test:") && item.ref.endsWith(`:${id}`)))) {
       throw Error("质量复核未给出每项验收的验证依据，可以重试。");
     }
-    const finding: Finding = { status: row.status, summary: scrubAuditText(row.summary), evidence };
     return [key, finding] as const;
   });
   const { source, documents } = packet.planning;
   return { policy: version, flowDigest, batchDigest,
     documents: [source, ...documents].map(({ kind, id, version }) => ({ kind, id, version })),
-    checks: Object.fromEntries(entries) as QualityReceipt["checks"] };
+    checks: Object.fromEntries(entries) as QualityReceipt["checks"],
+    ...(planned ? { breakdown: readBreakdown(parsed.breakdown, packet) } : {}) };
 }
 
 export function qualityBlock(receipt: QualityReceipt) {
-  return dimensions.flatMap(key => {
+  const documents = dimensions.flatMap(key => {
     const check = receipt.checks[key];
     return check.status === "block" ? [`${details[key]}：${check.summary}`] : [];
-  }).join("\n");
+  });
+  const tickets = receipt.breakdown?.filter(finding => finding.status === "block").map(finding => `${finding.ticket}：${finding.summary}`) ?? [];
+  return [...documents, ...tickets].join("\n");
 }
 
 export function qualityCurrent(receipt: QualityReceipt | undefined, flow: Flow | undefined, payload: unknown) {
   return !!receipt && qualityBindingCurrent(receipt) && !!flow && receipt.flowDigest === planningDigest(flow)
-    && receipt.batchDigest === hash(payload) && dimensions.every(key => receipt.checks?.[key]?.status === "pass");
+    && receipt.batchDigest === hash(payload) && dimensions.every(key => receipt.checks?.[key]?.status === "pass")
+    && (receipt.breakdown?.every(finding => finding.status === "pass") ?? true);
 }
 
 export function qualityBindingCurrent(binding: QualityBinding | undefined) {

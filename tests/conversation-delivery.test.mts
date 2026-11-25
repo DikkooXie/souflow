@@ -318,8 +318,11 @@ test("从新需求复核和授权，创建 Issue 后认领派发，重启后能�
   const makeService = () => createConversationDelivery(github, store(proposals), async () => "new", passingQualityReview,
     async (_revision, paths) => Object.fromEntries(paths.map(path => [path, "冻结的源码"])), {
       draft: async () => [
-        { id: "T2", title: "下游工单", instructions: "在合并后验证。", paths: down.files, dependsOn: ["T1"], criteria: up.criteria, validation },
-        { id: "T1", title: "上游工单", instructions: "实现新需求。", paths: up.files, dependsOn: [], criteria: up.criteria, validation },
+        { id: "T1", title: "上游工单", instructions: "实现新需求。", paths: up.files, dependsOn: [], criteria: up.criteria, validation,
+          delivery: { outcome: "用户能看到待确认纪要", priorityReason: "先交付确认入口", prerequisites: [] } },
+        { id: "T2", title: "下游工单", instructions: "在合并后验证。", paths: down.files, dependsOn: ["T1"], criteria: up.criteria, validation,
+          delivery: { outcome: "用户反复确认仍只收到一条待办", priorityReason: "复用上游确认入口",
+            prerequisites: [{ ticket: "T1", reason: "需要上游合并后的确认操作入口" }] } },
       ],
       publish: createPlannedIssuePublication(store(receipts)), connection: actor => actor === "member" ? tracker : undefined,
     });
@@ -331,6 +334,9 @@ test("从新需求复核和授权，创建 Issue 后认领派发，重启后能�
     const card = initial.cards([flow], "member")[0];
     assert.ok(card);
     assert.match(card.prompt, /T2 · 下游工单/);
+    assert.match(card.prompt, /可演示结果：用户能看到待确认纪要/);
+    assert.match(card.prompt, /前置 T1：需要上游合并后的确认操作入口/);
+    assert.deepEqual(initial.statuses([flow], "member")[0]?.quality?.breakdown?.map(finding => finding.ticket), ["T1", "T2"]);
     const answer = { authorization: "授权创建 Issue、执行并开草稿 PR" };
     const changedFlow = { ...flow, prompt: "授权后改变的原始需求" };
     assert.equal(await initial.answer(card.id, "member", answer, [changedFlow]), 409);
@@ -349,10 +355,11 @@ test("从新需求复核和授权，创建 Issue 后认领派发，重启后能�
     visible = true;
     assert.equal(await restarted.resumePublication(flow, "member"), 200);
     await setImmediate();
-    assert.deepEqual(writes, ["创建 10", "创建 11", "认领 11", "认领 10", "开发 10"]);
+    assert.deepEqual(writes, ["创建 10", "创建 11", "认领 10", "认领 11", "开发 10"]);
     assert.match(read(11).body, /^依赖 #10$/m);
+    assert.match(read(11).body, /可演示结果：用户反复确认仍只收到一条待办/);
     assert.equal(claims.get("11")?.phase, "waiting");
-    assert.deepEqual(restarted.statuses([flow], "member")[0]?.issues, [11, 10]);
+    assert.deepEqual(restarted.statuses([flow], "member")[0]?.issues, [10, 11]);
     assert.equal(await restarted.resumePublication(flow, "member"), 409);
     await github.refresh();
     assert.equal(writes.includes("开发 11"), false);
@@ -437,6 +444,7 @@ test("Issue 正文超出回读上限时不生成授权卡，原计划仍可修�
   async () => "new", async () => assert.fail("无效草稿不得进入复核"), async () => ({}), {
     draft: async () => [{ id: "T1", title: "过长工单", instructions: "说明".repeat(1_000),
       paths: up.files, dependsOn: [], criteria: up.criteria,
+      delivery: { outcome: "用户完成一次确认", priorityReason: "完成核心流程", prerequisites: [] },
       validation: Array.from({ length: 10 }, (_, i) => ({
         criterion: `AC-${i + 1}`, procedure: "验证".repeat(250), expected: "结果".repeat(150),
       })) }],
@@ -449,6 +457,30 @@ test("Issue 正文超出回读上限时不生成授权卡，原计划仍可修�
     assert.match(service.statuses([flow], "member")[0]?.error ?? "", /T1.*正文/);
     assert.equal(service.locks(flow.id), false);
     assert.equal(service.begin(flow, "首版", true), true);
+  } finally { await service.close(); }
+});
+
+test("旧待授权的新建工单续办前需要重新拆单，已授权回执仍可核对", async () => {
+  const flow = await readyQualityFlow();
+  const plan = currentDevelopmentPlan(flow);
+  assert.ok(plan);
+  const previous = { id: "old", flowId: flow.id, actor: "member", planId: plan.id, version: plan.version, base: "a".repeat(40),
+    items: [], drafts: [{ id: "T1", title: "旧草稿", instructions: "旧执行范围", paths: up.files,
+      dependsOn: [], criteria: up.criteria, validation }], status: "pending" as const, createdAt: 1 };
+  const saved = new Map<string, IssueProposal>([[previous.id, previous], ["authorized", {
+    ...previous, id: "authorized", status: "authorizing", approvedAt: 2,
+  }]]);
+  const service = createConversationDelivery({
+    permits: () => true, suggest: async () => [], claimApproved: async () => assert.fail("旧草稿不能触发重派"),
+  }, { load: () => [...saved.values()], save(id, proposal) { saved.set(id, structuredClone(proposal)); return true; } },
+  async () => [], passingQualityReview, async () => ({}));
+  try {
+    assert.deepEqual(service.cards([flow], "member"), []);
+    assert.equal(saved.get(previous.id)?.status, "uncertain");
+    assert.match(saved.get(previous.id)?.error ?? "", /旧工单缺少逐单拆分依据/);
+    assert.equal(saved.get("authorized")?.approvedAt, 2);
+    assert.deepEqual(saved.get("authorized")?.drafts, previous.drafts);
+    assert.equal(service.publicationNeedsCheck("authorized", "member"), true);
   } finally { await service.close(); }
 });
 

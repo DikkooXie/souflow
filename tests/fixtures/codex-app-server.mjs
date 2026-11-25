@@ -73,7 +73,7 @@ input.on("line", line => {
       }
       return;
     case "thread/start":
-      if (expectedModel && (message.params.model !== expectedModel || message.params.allowProviderModelFallback !== false)) {
+      if (scenario !== "quality-result" && expectedModel && (message.params.model !== expectedModel || message.params.allowProviderModelFallback !== false)) {
         send({ id: message.id, error: { code: -32602 } });
         return;
       }
@@ -85,10 +85,11 @@ input.on("line", line => {
       send({ id: message.id, result: { thread: { id: threadId }, model: scenario === "question-model-mismatch" ? "fixture" : message.params.model ?? "fixture" } });
       return;
     case "turn/start": {
-      if (scenario === "long-code-result") {
-        const item = { type: "agentMessage", phase: "final_answer", text: JSON.stringify({
+      if (scenario === "long-code-result" || scenario === "quality-result") {
+        const text = scenario === "quality-result" ? process.argv[3] : JSON.stringify({
           report: "代码替换", edits: [{ path: "src/demo.mts", before: "original", after: "x".repeat(18_000) }],
-        }) };
+        });
+        const item = { type: "agentMessage", phase: "final_answer", text };
         send({ id: message.id, result: { turn: { id: turnId } } },
           { method: "item/completed", params: { threadId, turnId, item } },
           { method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed" } } });

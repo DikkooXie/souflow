@@ -4,8 +4,9 @@ import { issueRevision } from "../connections/issue-tracker.mts";
 import type { DeliverySpec } from "../execution/issue-delivery.mts";
 import { currentDevelopmentPlan, type Flow } from "../planning/conversation-flow.mts";
 import { planningDigest, qualityBlock, qualityCurrent, qualityPacket, reviewQuality,
-  type QualityReceipt, type QualityReviewer, type QualityTicket } from "../planning/dispatch-quality.mts";
+  type PlannedTicket, type QualityReceipt, type QualityReviewer, type QualityTicket } from "../planning/dispatch-quality.mts";
 import type { Selection, SelectGitHubIssues } from "../planning/github-selection.mts";
+import { ticketDeliveryLines } from "../planning/ticket-delivery.mts";
 import type { DecisionCard } from "./demo-state.mts";
 import type { createIssueDispatch } from "./issue-dispatch.mts";
 import { type createPlannedIssuePublication, type PlannedIssueBatch, preparePlannedIssues } from "./planned-issue-publication.mts";
@@ -28,13 +29,15 @@ const valid = (p: IssueProposal, flow: Flow | undefined) => {
 };
 const reviewedSelection = (p: IssueProposal) => ({ id: p.id, base: p.base, items: p.drafts ?? p.items });
 const validated = (p: IssueProposal, flow: Flow | undefined) => valid(p, flow)
-  && qualityCurrent(p.quality, flow, reviewedSelection(p));
+  && qualityCurrent(p.quality, flow, reviewedSelection(p))
+  && (!p.drafts?.some(ticket => ticket.delivery)
+    || p.drafts.every(ticket => p.quality?.breakdown?.some(finding => finding.ticket === ticket.id && finding.status === "pass")));
 
 export function createConversationDelivery(github: Pick<ReturnType<typeof createIssueDispatch>, "permits" | "suggest" | "claimApproved">, store: Checkpoint<IssueProposal>,
   select: SelectGitHubIssues, review: QualityReviewer,
   readSources: (revision: string, paths: string[], signal: AbortSignal) => Promise<Record<string, string>>,
   planned?: {
-    draft: (flow: Flow, id: string) => Promise<QualityTicket[]>;
+    draft: (flow: Flow, id: string) => Promise<PlannedTicket[]>;
     publish: ReturnType<typeof createPlannedIssuePublication>;
     connection: (actor: string) => Parameters<ReturnType<typeof createPlannedIssuePublication>>[1] | undefined;
   }) {
@@ -46,15 +49,20 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
       actor, status: p.status, approvedAt: p.approvedAt, planId: p.planId, version: p.version, base: p.base,
       quality: p.quality, reason: p.error,
       issues: p.items.map(({ number, files, dependsOn, sourcePaths }) => ({ number, files, dependsOn, sourcePaths })),
-      ...(p.drafts ? { drafts: p.drafts.map(({ id, dependsOn, paths }) => ({ id, dependsOn, paths })), published: p.published } : {}),
+      ...(p.drafts ? { drafts: p.drafts.map(({ id, dependsOn, paths, delivery }) => ({ id, dependsOn, paths, delivery })), published: p.published } : {}),
     } })) return false;
     proposals.set(p.id, p);
     return true;
   }
   for (const p of store.load()) {
-    if (p.status === "selecting" || p.status === "reviewing" || p.status === "authorizing" || (p.status === "pending" && !p.quality)) {
+    const incompleteDrafts = p.approvedAt === undefined && p.drafts?.some(ticket => !ticket.delivery);
+    if (p.status === "selecting" || p.status === "reviewing" || p.status === "authorizing"
+      || (p.status === "pending" && (!p.quality || incompleteDrafts))) {
       if (!save({ ...p, status: "uncertain", error: p.drafts && p.approvedAt !== undefined
-        ? "建单或派发结果待核对，可以沿用本轮授权续办。" : "请选择重新核对本轮 GitHub 工单。" })) throw Error("无法恢复 GitHub 选单。");
+        ? "建单或派发结果待核对，可以沿用本轮授权续办。"
+        : incompleteDrafts ? "旧工单缺少逐单拆分依据，请重新核对后授权。" : "请选择重新核对本轮 GitHub 工单。" })) {
+        throw Error("无法恢复 GitHub 选单。");
+      }
     } else proposals.set(p.id, p);
   }
   function begin(flow: Flow, planText?: string, retry = false) {
@@ -126,7 +134,10 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
   }
   const verificationText = (validation: QualityTicket["validation"]) =>
     validation.map(({ criterion, procedure, expected }) => `${criterion}：${procedure} → ${expected}`);
-  const draftText = (draft: QualityTicket) => [draft.instructions, "", `允许修改：${draft.paths.join("、")}`,
+  const draftInstructions = (draft: QualityTicket) => [
+    ...(draft.delivery ? ticketDeliveryLines(draft.delivery) : []), draft.instructions,
+  ].join("\n");
+  const draftText = (draft: QualityTicket) => [draftInstructions(draft), "", `允许修改：${draft.paths.join("、")}`,
     ...verificationText(draft.validation)].join("\n");
   const publicationBatch = (proposal: IssueProposal, drafts: readonly QualityTicket[]): PlannedIssueBatch => ({
     ...proposal, drafts: drafts.map(draft => ({ id: draft.id, title: draft.title, body: draftText(draft), dependsOn: draft.dependsOn })),
@@ -152,7 +163,7 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
           const issue = issued.get(draft.id);
           if (!issue) throw Error("已审核的工单缺少创建回执。");
           return { number: issue.number, title: issue.title, reason: "", revision: issueRevision(issue),
-            files: [...draft.paths], instructions: draft.instructions, dependsOn: draft.dependsOn.map(numberFor),
+            files: [...draft.paths], instructions: draftInstructions(draft), dependsOn: draft.dependsOn.map(numberFor),
             criteria: [...draft.criteria], validation: [...draft.validation], issueText: issue.body,
             ...(draft.sources ? { sourcePaths: [...draft.sources] } : {}) };
         });
