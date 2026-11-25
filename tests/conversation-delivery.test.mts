@@ -317,6 +317,48 @@ test("源码引用超出复核预算时保留重试入口，不生成授权卡",
   } finally { await service.close(); }
 });
 
+test("逐单复核中断时仅为本版部分拦截意见开放原对话重规划", async () => {
+  const flow = await readyQualityFlow();
+  const plan = currentDevelopmentPlan(flow);
+  assert.ok(plan);
+  const base = "a".repeat(40);
+  const path = "src/main.mts";
+  flow.project = { repository: { revision: base, commits: [] }, plan: { status: "read" }, github: { status: "read" } };
+  const draft = { id: "T1", title: "核对发送", instructions: "核对真实调用", criteria: ["AC-1"],
+    dependsOn: [], paths: [path], validation };
+  const check = { ticket: "T1", revision: base, paths: [path], sourceDigest: "a".repeat(64), status: "block" as const,
+    summary: "缺少固定提交上的调用入口", evidence: [{ ref: `repo:${path}`, quote: "固定源码" }] };
+  const previous: IssueProposal = { id: "trial", flowId: flow.id, actor: "member", planId: plan.id, version: plan.version,
+    base, items: [], drafts: [draft], status: "uncertain", createdAt: 1, sourceReviewRequired: true, sourceFindings: [check],
+    error: "质量复核引用无法在本轮资料找到，可以重试。", sourceError: "第三张工单没有有效引文" };
+  const quality = await reviewQuality(qualityPacket(flow, base, "partial", [draft]),
+    { id: "partial", base, items: [draft] }, passingQualityReview, new AbortController().signal);
+  const { sourceFindings: _unset, ...withoutSourceFindings } = previous;
+  const records: IssueProposal[] = [
+    previous, { ...previous, id: "empty", actor: "no-evidence", sourceFindings: [] },
+    { ...withoutSourceFindings, id: "partial", actor: "quality-receipt", quality: { ...quality, sourceChecks: [check] } },
+    { ...previous, id: "stale", actor: "stale", sourceFindings: [{ ...check, revision: "b".repeat(40) }] },
+    { ...previous, id: "wrong-path", actor: "wrong-path", sourceFindings: [{ ...check, paths: ["src/other.mts"] }] },
+    { ...previous, id: "finished", actor: "approved", approvedAt: 2 },
+    { ...previous, id: "wrong-version", actor: "wrong-version", version: plan.version + 1 },
+  ];
+  const service = createConversationDelivery({
+    permits: () => true, suggest: async () => assert.fail(), claimApproved: async () => assert.fail(),
+  }, { load: () => records, save: () => assert.fail("读取反馈不改变批次") },
+  async () => assert.fail(), async () => assert.fail(), async () => ({}));
+  try {
+    const feedback = service.replanFeedback(flow, "member");
+    assert.equal(feedback?.batchId, previous.id);
+    assert.deepEqual(feedback?.sourcePaths, [path]);
+    assert.match(feedback?.findings ?? "", /引用无法在本轮资料找到[\s\S]*T1 源码：缺少固定提交上的调用入口/);
+    assert.deepEqual(service.replanFeedback(flow, "quality-receipt")?.sourcePaths, [path]);
+    assert.deepEqual(service.cards([flow], "member"), []);
+    for (const actor of ["other", "no-evidence", "stale", "wrong-path", "approved", "wrong-version"]) {
+      assert.equal(service.replanFeedback(flow, actor), undefined, actor);
+    }
+  } finally { await service.close(); }
+});
+
 test("保留原未授权草稿，十张工单分别核对固定源码，缺一份即不能授权", { timeout: 5000 }, async t => {
   const flow = await readyQualityFlow("继续实施已经确认的需求");
   const base = "a".repeat(40);
