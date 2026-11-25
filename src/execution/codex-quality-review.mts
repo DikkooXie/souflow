@@ -10,7 +10,7 @@ const exec = promisify(execFile);
 const sourceLimit = 12;
 export const qualitySourceFileBytes = 65_536;
 const sourceBudgetBytes = 128 * 1024;
-const regularPath = /^(?:docs|src|tests)\/[a-zA-Z0-9._/-]+\.(?:md|mts|mjs|html|css)$/;
+const regularPath = /^(?:(?:docs|src|tests)\/[a-zA-Z0-9._/-]+\.(?:md|mts|mjs|html|css)|AGENTS\.md)$/;
 
 export async function qualitySources(workspace: string, revision: string, paths: readonly string[], signal: AbortSignal) {
   if (!/^[a-f0-9]{40,64}$/.test(revision)) throw Error("工单校验未通过：缺少固定仓库提交。");

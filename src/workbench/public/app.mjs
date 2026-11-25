@@ -3,7 +3,7 @@ import { createAuditView } from "./audit.mjs";
 import { createDispatchPanel } from "./dispatch.mjs";
 import { createMonitorView } from "./dispatch-monitor.mjs";
 import { createGithubPanel } from "./github-issues.mjs";
-import { renderQualityDetails } from "./quality-details.mjs";
+import { renderDeliveryReviews, renderQualityDetails } from "./quality-details.mjs";
 
 const list = document.querySelector("#requests");
 const queue = document.querySelector("#decision-queue");
@@ -24,6 +24,7 @@ const conversationStatus = document.querySelector("#conversation-status");
 const conversationIssues = document.querySelector("#conversation-issues");
 const conversationIssueList = document.querySelector("#conversation-issue-list");
 const conversationQuality = document.querySelector("#conversation-quality");
+const conversationDeliveryReviews = document.querySelector("#conversation-delivery-reviews");
 const resumeWorkflow = document.querySelector("#resume-workflow");
 const interruptedDecisions = document.querySelector("#interrupted-decisions");
 const interruptedDecisionList = document.querySelector("#interrupted-decision-list");
@@ -266,6 +267,7 @@ function renderConversation(flow, pending) {
   promptBox.placeholder = flow ? "发起另一项需求…" : "描述你的需求…";
   const proposal = issuePlans.find(item => item.flowId === flow?.id);
   renderQualityDetails(conversationQuality, node, flow?.status === "ready" ? proposal?.quality : undefined);
+  renderDeliveryReviews(conversationDeliveryReviews, node, flow?.id, proposal?.reviews ?? []);
   if (!flow) return;
   const action = workflowAction(flow, proposal);
   resumeWorkflow.hidden = !live || member?.id === "reviewer" || !action;

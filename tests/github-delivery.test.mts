@@ -9,7 +9,8 @@ import { openActivityStore } from "../src/audit/activity-store.mts";
 import { githubPull } from "../src/connections/github-delivery.mts";
 import { type DeliveryTracker, issueRevision, type IssueDetail, type IssuePull } from "../src/connections/issue-tracker.mts";
 import { qualitySources } from "../src/execution/codex-quality-review.mts";
-import { checkoutReviewedIssueBase, type DeliveryFailure, isolatedCheckFailed, IssueDeliveryFailed, IssueDeliverySourcesChanged, parseDeliveryPlan } from "../src/execution/issue-delivery.mts";
+import { checkoutReviewedIssueBase, type DeliveryFailure, isolatedCheckFailed, IssueDeliveryFailed, IssueDeliverySourcesChanged, parseDeliveryPlan,
+  passingAcceptanceTests } from "../src/execution/issue-delivery.mts";
 import { type Claim, createIssueDispatch } from "../src/workbench/issue-dispatch.mts";
 
 const spec = { files: ["src/main.mts"], instructions: "修改校验逻辑。", dependsOn: [] };
@@ -77,6 +78,69 @@ test("只展示 PR 当前提交的 CI，合并 SHA 独立记录", () => {
   commit.oid = "current";
   assert.equal(githubPull("a/b", pull).ci, "SUCCESS");
   assert.equal(githubPull("a/b", pull).mergeCommit, "merged");
+});
+
+test("实际通过的验收测试回执去重，排除未执行和失败用例", () => {
+  assert.deepEqual(passingAcceptanceTests([
+    "ok 1 - [AC-1] 撤销后重连被拒绝", "ok 2 - [AC-2] 同一工单只创建一次 # SKIP requires GitHub",
+    "not ok 3 - [AC-3] 重启后恢复", "ok 4 - [AC-4] 返回版本 # TODO",
+    "ok 5 - 普通测试", "ok 6 - [AC-1] 撤销后重连被拒绝", "# 说明 AC-5",
+  ].join("\n")), ["[AC-1] 撤销后重连被拒绝"]);
+});
+
+test("交付复核按当前头和工单版本保存，旧提交回执保留为历史", async () => {
+  const originalHead = "a".repeat(40);
+  const nextHead = "b".repeat(40);
+  const hash = "c".repeat(64);
+  const mergeBase = "d".repeat(40);
+  const quality = { policy: 1, flowDigest: hash, batchDigest: hash };
+  const initialPull: IssuePull = { number: 53, url: "https://github.com/a/b/pull/53", state: "OPEN", head: originalHead, baseName: "main" };
+  const issue: IssueDetail = { number: 47, title: "核对重连", body: "保存重连状态", url: "https://github.com/a/b/issues/47",
+    state: "OPEN", assignees: ["member"], pulls: [initialPull] };
+  let remotePull = initialPull;
+  let body = issue.body;
+  let stored: Claim = { ...issue, pull: initialPull, target: { branch: "feat/47-123456789abc", head: originalHead },
+    requestId: "approved", claimedBy: "member", account: "member", phase: "submitted", syncedAt: 0,
+    approval: { flowId: "flow", planId: "plan", version: 1, issueRevision: issueRevision(issue), quality } };
+  const tracker: DeliveryTracker = {
+    repo: "a/b", candidates: async () => [], account: async () => "member", assign: async () => assert.fail(),
+    read: async () => ({ ...issue, body, pulls: [remotePull] }),
+    delivery: { checkout: async () => assert.fail(), publish: async () => assert.fail(), find: async () => remotePull,
+      reviewChanges: async () => assert.fail("测试只替换复核器") },
+  };
+  const seen: string[] = [];
+  const open = () => createIssueDispatch(tracker, { load: () => [stored], save(_id, item) { stored = structuredClone(item); return true; } },
+    async () => assert.fail(), () => true, 1, new Map(), {
+      specs: new Map(), conversation: true, pollMs: 60_000, prepare: async () => assert.fail(),
+      async review(claim) {
+        const head = claim.pull?.head;
+        assert.ok(head);
+        seen.push(head);
+        return { packetId: head, key: { repo: tracker.repo, issue: issue.number, issueRevision: issueRevision(issue), pull: initialPull.number,
+          head, mergeBase, plan: { id: "plan", version: 1, quality } }, status: head === originalHead ? "block" : "incomplete" };
+      },
+    });
+  const run = async (service: ReturnType<typeof open>) => {
+    await service.refresh();
+    await setImmediate();
+    assert.deepEqual(service.reviewStatus("flow", "other"), []);
+    return service.reviewStatus("flow", "member")[0];
+  };
+  const first = open();
+  try { assert.deepEqual((await run(first))?.reviews.map(item => [item.status, item.current]), [["block", true]]); }
+  finally { await first.close(); }
+  const restored = open();
+  try {
+    await run(restored);
+    assert.deepEqual(seen, [originalHead]);
+    remotePull = { ...initialPull, head: nextHead };
+    assert.deepEqual((await run(restored))?.reviews.map(item => [item.status, item.current]), [["block", false], ["incomplete", true]]);
+    body = "已经修改过的工单";
+    const updated = await run(restored);
+    assert.equal(updated?.unavailable, true);
+    assert.equal(updated?.reviews.some(item => item.current), false);
+    assert.deepEqual(seen, [originalHead, nextHead]);
+  } finally { await restored.close(); }
 });
 
 test("续修沿用批准范围和现有 PR，推送响应丢失时只回读", async t => {

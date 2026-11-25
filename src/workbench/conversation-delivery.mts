@@ -3,12 +3,13 @@ import type { Checkpoint } from "../audit/activity-store.mts";
 import { issueRevision } from "../connections/issue-tracker.mts";
 import type { DeliverySpec } from "../execution/issue-delivery.mts";
 import { currentDevelopmentPlan, type Flow } from "../planning/conversation-flow.mts";
-import { planningDigest, qualityBlock, qualityCurrent, qualityPacket, reviewQuality, reviewTicketSources,
+import type { DeliveryReviewScope } from "../planning/delivery-review.mts";
+import { acceptanceCriteria, planningDigest, qualityBlock, qualityCurrent, qualityPacket, reviewQuality, reviewTicketSources,
   type PlannedTicket, type QualityReceipt, type QualityReviewer, type QualityTicket, type TicketSourceReviewer } from "../planning/dispatch-quality.mts";
 import { IssueCoverageGap, type Selection, type SelectGitHubIssues } from "../planning/github-selection.mts";
 import { ticketDeliveryLines } from "../planning/ticket-delivery.mts";
 import type { DecisionCard } from "./demo-state.mts";
-import type { createIssueDispatch } from "./issue-dispatch.mts";
+import type { Claim, createIssueDispatch } from "./issue-dispatch.mts";
 import { type createPlannedIssuePublication, type PlannedIssueBatch, preparePlannedIssues } from "./planned-issue-publication.mts";
 
 export type IssueProposal = {
@@ -269,6 +270,26 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
       }));
     },
     has(id: string) { return proposals.has(id); },
+    reviewScope(claim: Pick<Claim, "number" | "requestId" | "claimedBy" | "approval">, flow: Flow | undefined): DeliveryReviewScope | undefined {
+      const p = proposals.get(claim.requestId);
+      const bound = claim.approval;
+      const receipt = p?.quality;
+      if (!p || p.approvedAt === undefined || p.actor !== claim.claimedBy || !bound?.quality || !flow || !receipt
+        || p.flowId !== bound.flowId || p.flowId !== flow.id || p.planId !== bound.planId || p.version !== bound.version
+        || bound.quality.policy !== receipt.policy || bound.quality.flowDigest !== receipt.flowDigest
+        || bound.quality.batchDigest !== receipt.batchDigest || !validated(p, flow)) return;
+      const selected = p.items.find(issue => issue.number === claim.number && issue.revision === bound.issueRevision);
+      const draft = p.drafts && p.published ? p.drafts[p.published.indexOf(claim.number)] : undefined;
+      const issue = draft ?? selected;
+      if (!issue) return;
+      const criteria = new Map(acceptanceCriteria(flow).map(({ id, text }) => [id, text]));
+      const mapped = issue.validation.flatMap(row => {
+        const text = criteria.get(row.criterion);
+        return text ? [{ ...row, text }] : [];
+      });
+      if (!mapped.length || mapped.length !== issue.validation.length) return;
+      return { request: flow.prompt, criteria: mapped, files: draft?.paths ?? selected?.files ?? [] };
+    },
     publicationNeedsCheck(id: string, actor: string) {
       const p = proposals.get(id);
       return p?.actor === actor && !!p.drafts && p.status === "uncertain" && p.approvedAt !== undefined;

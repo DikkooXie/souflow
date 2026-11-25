@@ -32,3 +32,44 @@ export function renderQualityDetails(details, node, quality) {
   details.append(node("summary", "", `质量复核依据 · ${blocked ? "已拦截" : incomplete ? "证据不足" : "已通过"}`),
     node("p", "", "绑定的产物版本"), documents, findings);
 }
+
+const reviewStates = { pass: "通过", block: "有阻塞", incomplete: "证据不完整" };
+
+export function renderDeliveryReviews(details, node, flowId, entries) {
+  details.hidden = !entries.length;
+  const key = JSON.stringify([flowId, entries]);
+  if (details.dataset.reviews === key) return;
+  if (details.dataset.flow !== flowId) details.open = false;
+  details.dataset.flow = flowId ?? "";
+  details.dataset.reviews = key;
+  details.replaceChildren();
+  if (!entries.length) return;
+
+  details.append(node("summary", "", "交付复核"));
+  for (const entry of entries) {
+    const current = entry.reviews.find(review => review.current);
+    const state = entry.running ? "正在复核" : current ? reviewStates[current.status] : entry.unavailable ? "证据暂不可用" : "等待复核";
+    details.append(node("p", "", `Issue #${entry.number} · PR #${entry.pull} · ${entry.head.slice(0, 8)} · ${state}`));
+    for (const review of [...entry.reviews].reverse()) {
+      const row = node("details");
+      const when = review.current ? "当前" : "历史";
+      row.append(node("summary", "", `${when} · ${review.key.head.slice(0, 8)} · 计划 v${review.key.plan.version} · ${reviewStates[review.status]}`));
+      row.append(reviewAxis(node, "代码与测试质量", review.implementation ? [["实现", review.implementation]] : []),
+        reviewAxis(node, "需求与验收", (review.requirements?.criteria ?? []).map(check => [check.criterion, check])));
+      details.append(row);
+    }
+  }
+}
+
+function reviewAxis(node, title, findings) {
+  const section = node("details");
+  section.append(node("summary", "", title));
+  if (!findings.length) section.append(node("p", "", "未取得可核查的复核结论。"));
+  for (const [label, finding] of findings) {
+    section.append(node("p", "archive-text", `${label} · ${reviewStates[finding.status]} · ${finding.summary}`));
+    const references = node("ul");
+    for (const { ref, quote } of finding.evidence) references.append(node("li", "archive-text", `${ref} · ${quote}`));
+    section.append(references);
+  }
+  return section;
+}
