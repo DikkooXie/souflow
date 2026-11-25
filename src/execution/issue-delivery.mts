@@ -51,7 +51,7 @@ export function isolatedCheckFailed(code: unknown) {
 export function passingAcceptanceTests(output: string) {
   // 只记录检查器报告已通过、且明确带验收编号的测试名。计划描述本身不构成运行证据。
   const names = output.split(/\r?\n/).flatMap(line => {
-    const match = /^ok \d+ - (.{1,240})$/.exec(line);
+    const match = /^[ \t]*ok \d+ - (.{1,240})$/.exec(line);
     const name = match?.[1];
     return name && /\bAC-\d+\b/.test(name) && !/\s+#\s*(?:SKIP|TODO)\b/i.test(name) ? [scrubAuditText(name)] : [];
   });
