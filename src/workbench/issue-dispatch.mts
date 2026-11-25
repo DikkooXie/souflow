@@ -89,7 +89,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     c.checked?.head === c.pull?.head ? c.checked : undefined]);
   const activeReviewScope = (c: Claim) => c.observedIssueRevision === c.approval?.issueRevision && c.observedReviewLink === true
     && (delivery?.reviewScopeCurrent?.(c) ?? true);
-  function currentRepair(c: Claim) {
+  function repairProposal(c: Claim) {
     if (!delivery?.publishRepair || !activeReviewScope(c) || !permits(c.claimedBy)) return;
     const connection = memberTrackers.get(c.claimedBy) ?? tracker;
     const remote = publisher(connection);
@@ -97,6 +97,10 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     const observed = reviewVersion(c);
     const receipt = c.deliveryReviews?.find(item => item.observed === observed)?.receipt;
     return receipt && repairFromReceipt(connection.repo, c, receipt);
+  }
+  function currentRepair(c: Claim) {
+    const proposal = repairProposal(c);
+    return proposal && "fix" in proposal ? proposal : undefined;
   }
   function repairDecisions(actor: string) {
     return [...claims.values()].flatMap(c => {
@@ -471,11 +475,13 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
         .map(c => {
           const observed = reviewVersion(c);
           const current = activeReviewScope(c);
+          const proposedRepair = repairProposal(c);
           const repairs = c.reviewRepairs?.filter(item => item.decision === "approved").map(({ head, issue, id, completedHead }) =>
             ({ head, issue, completedHead, state: c.reviewFix?.repairId === id ? c.reviewFix.state : completedHead ? "complete" : issue ? "linked" : "queued",
               ...(issue ? { url: `https://github.com/${tracker.repo}/issues/${issue}` } : {}) }));
           return { number: c.number, pull: c.pull?.number, head: c.pull?.head, running: reviewJobs.has(c.number),
             ...(repairs?.length ? { repairs } : {}),
+            ...(proposedRepair && "reason" in proposedRepair ? { repairUnavailable: proposedRepair.reason } : {}),
             unavailable: reviewUnavailable.get(c.number) === observed
               || !!c.observedIssueRevision && !current, reviews: (c.deliveryReviews ?? [])
               .map(({ receipt, observed: prior }) => ({ ...receipt, current: current && prior === observed })) };

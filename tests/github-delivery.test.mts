@@ -14,6 +14,7 @@ import { checkoutReviewedIssueBase, type DeliveryFailure, isolatedCheckFailed, I
   passingAcceptanceTests } from "../src/execution/issue-delivery.mts";
 import { type Claim, createIssueDispatch } from "../src/workbench/issue-dispatch.mts";
 import { createPlannedIssuePublication, type IssuePublication } from "../src/workbench/planned-issue-publication.mts";
+import { repairFromReceipt } from "../src/workbench/delivery-review-repair.mts";
 
 const spec = { files: ["src/main.mts"], instructions: "修改校验逻辑。", dependsOn: [] };
 
@@ -229,6 +230,27 @@ test("交付复核按当前头和工单版本保存，旧提交回执保留为�
     assert.equal(updated?.reviews.some(item => item.current), false);
     assert.deepEqual(seen, [originalHead, nextHead, nextHead]);
   } finally { await restored.close(); }
+});
+
+test("超长复核阻塞保留完整结论，禁止只授权部分修复", () => {
+  const head = "a".repeat(40);
+  const hash = "b".repeat(64);
+  const quality = { policy: 1, flowDigest: hash, batchDigest: hash };
+  const pull: IssuePull = { number: 53, url: "https://github.com/a/b/pull/53", state: "OPEN", head, baseName: "main" };
+  const issue: IssueDetail = { number: 47, url: "https://github.com/a/b/issues/47", title: "交付", body: "检查所有验收",
+    assignees: ["member"], pulls: [pull], state: "OPEN" };
+  const revision = issueRevision(issue);
+  const claim: Claim = { ...issue, pull, requestId: "approved", claimedBy: "member", account: "member", phase: "submitted", syncedAt: 0,
+    target: { branch: "feat/47-original", head }, delivery: { ...spec, baseRevision: head },
+    approval: { flowId: "flow", planId: "plan", version: 1, issueRevision: revision, quality } };
+  const finding = { status: "block" as const, summary: "独立阻塞".repeat(120), evidence: [] };
+  const result = repairFromReceipt("a/b", claim, {
+    packetId: hash, key: { repo: "a/b", issue: 47, issueRevision: revision, pull: 53, head,
+      mergeBase: head, plan: { id: "plan", version: 1, quality } },
+    status: "block", implementation: finding,
+    requirements: { criteria: Array.from({ length: 10 }, (_, index) => ({ ...finding, criterion: `AC-${index + 1}` })) },
+  });
+  assert.deepEqual(result, { reason: "复核问题超过单次续修的内容限制。请核对完整复核记录。" });
 });
 
 test("批准关联修复后安全回读建单结果，只续修同一 PR 并复核最新提交", async () => {

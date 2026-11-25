@@ -60,6 +60,7 @@ export function renderDeliveryReviews(details, node, flowId, entries) {
     const current = entry.reviews.find(review => review.current);
     const state = entry.running ? "正在复核" : current ? reviewStates[current.status] : entry.unavailable ? "证据暂不可用" : "等待复核";
     details.append(node("p", "", `Issue #${entry.number} · PR #${entry.pull} · ${entry.head.slice(0, 8)} · ${state}`));
+    if (entry.repairUnavailable) details.append(node("p", "", entry.repairUnavailable));
     for (const repair of entry.repairs ?? []) {
       const label = node("p", "", `修复 ${repair.head.slice(0, 8)} · ${repairStates[repair.state]}`);
       if (repair.url && repair.issue) {

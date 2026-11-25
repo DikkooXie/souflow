@@ -6,7 +6,7 @@ import type { DeliveryReviewReceipt } from "../planning/delivery-review.mts";
 import { approvedReviewFixInstructionLimit, type ApprovedReviewFix } from "./approved-review-fix.mts";
 import type { DecisionCard } from "./demo-state.mts";
 import type { Claim } from "./issue-dispatch.mts";
-import type { PlannedIssueBatch } from "./planned-issue-publication.mts";
+import { preparePlannedIssues, type PlannedIssueBatch } from "./planned-issue-publication.mts";
 
 const authorize = "授权创建修复 Issue 并续修";
 const decline = "拒绝本次续修";
@@ -20,13 +20,14 @@ const question = {
 };
 
 export type ReviewRepair = { id: string; fix: ApprovedReviewFix; batch: PlannedIssueBatch };
+type RepairUnavailable = { reason: string };
 
 export function readRepairDecision(input: unknown): "approved" | "declined" | undefined {
   const answer = readDecisionAnswers([question], input)?.authorization;
   return answer === authorize ? "approved" : answer === decline ? "declined" : undefined;
 }
 
-export function repairFromReceipt(repo: string, claim: Claim, receipt: DeliveryReviewReceipt): ReviewRepair | undefined {
+export function repairFromReceipt(repo: string, claim: Claim, receipt: DeliveryReviewReceipt): ReviewRepair | RepairUnavailable | undefined {
   const { approval, delivery, pull, target } = claim;
   const key = receipt.key;
   if (receipt.status !== "block" || !receipt.implementation || !receipt.requirements || !/^[a-f0-9]{64}$/.test(receipt.packetId)
@@ -41,7 +42,8 @@ export function repairFromReceipt(repo: string, claim: Claim, receipt: DeliveryR
   ].map(line => scrubAuditText(line.replace(/[\r\n]+/g, " ")));
   if (!findings.length) return;
   const scope = [...delivery.files];
-  const instructions = findings.join("\n").slice(0, approvedReviewFixInstructionLimit);
+  const instructions = findings.join("\n");
+  if (instructions.length > approvedReviewFixInstructionLimit) return { reason: "复核问题超过单次续修的内容限制。请核对完整复核记录。" };
   const body = [
     `原工单 #${claim.number} · 原 PR #${pull.number}`,
     `固定提交 ${key.head} · 开发计划 v${approval.version}`,
@@ -56,8 +58,11 @@ export function repairFromReceipt(repo: string, claim: Claim, receipt: DeliveryR
   const id = createHash("sha256").update(JSON.stringify([repo.toLowerCase(), claim.requestId, key, receipt.packetId, body]))
     .digest("hex");
   const fix = { issue: claim.number, pull: pull.number, head: key.head, base: pull.baseName, files: scope, instructions };
-  return { id, fix, batch: { id, actor: claim.claimedBy, flowId: approval.flowId, planId: approval.planId, version: approval.version,
-    drafts: [{ id: "REPAIR", title: `修复 #${claim.number} 的交付复核问题`, body, dependsOn: [] }] } };
+  const batch: PlannedIssueBatch = { id, actor: claim.claimedBy, flowId: approval.flowId, planId: approval.planId, version: approval.version,
+    drafts: [{ id: "REPAIR", title: `修复 #${claim.number} 的交付复核问题`, body, dependsOn: [] }] };
+  try { preparePlannedIssues(batch, repo); }
+  catch { return { reason: "完整修复工单无法发布。请核对复核结论和允许修改的文件。" }; }
+  return { id, fix, batch };
 }
 
 export function repairDecisionCard(repair: ReviewRepair, at: number): DecisionCard {
