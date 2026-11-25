@@ -418,6 +418,7 @@ function startAttempt(options: Options, mode: "commands" | "questions" | "local-
           skill_search: false, code_mode: false, sleep_tool: false, tool_suggest: false,
           request_permissions_tool: false, standalone_web_search: false, untrusted_as_tool_output: true,
         } } : {}),
+        ...(mode === "questions" && options.untrustedContext ? { features: { untrusted_as_tool_output: true } } : {}),
         ...(mode === "local-task" || options.disableWebSearch ? { web_search: "disabled" } : {}),
       });
     });
