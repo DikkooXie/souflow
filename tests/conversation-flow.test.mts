@@ -162,6 +162,8 @@ test("在原会话沿用答复重新规划，锁定新基线并保留旧版产�
     assert.equal(artifact.version, 2);
     assert.deepEqual(artifact.replaces, { id: artifact.id, version: 1 });
     assert.ok(artifact.upstream.every(ref => ref.version === (ref.id === resumed.source.id ? 1 : 2)));
+    const linked = artifact.kind === "research" ? [clarification] : [clarification, corrected];
+    assert.deepEqual(artifact.clarificationInputs, linked.map(({ cardId, questionId }) => ({ cardId, questionId })));
   }
   assert.deepEqual(planned, [{ version: 1, base: oldBase }, { version: 2, base: newBase }]);
 });

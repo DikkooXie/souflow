@@ -3,7 +3,7 @@ import { auditDecisionAnswers, type BusinessEvent, type Checkpoint, type RecordB
 import { readDecisionAnswers } from "../decisions/questions.mts";
 import { startCodexQuestionAttempt, type CodexAttemptEvent } from "../execution/codex-command-attempt.mts";
 import type { DispatchMonitor } from "../execution/dispatch-monitor.mts";
-import { type Flow, makePhasePrompt, type Phase, type PhaseTarget, readPhaseOutput } from "../planning/conversation-flow.mts";
+import { clarificationOrigin, type Flow, makePhasePrompt, type Phase, type PhaseTarget, readPhaseOutput } from "../planning/conversation-flow.mts";
 import type { DecisionCard } from "./demo-state.mts";
 
 type Attempt = ReturnType<typeof startCodexQuestionAttempt>;
@@ -59,7 +59,8 @@ export function createCodexInbox(workspace: string, options: {
     if (!transition(request, update.status, `工作台重启 · ${update.label}`)) throw Error("无法恢复决策历史。");
   }
 
-  function begin(prompt: string, step?: { flow: Flow; phase: Phase; complete: (output: string | undefined, interrupted: boolean) => void }): 200 | 409 | 503 {
+  function begin(prompt: string, step?: { flow: Flow; phase: Phase; targets: readonly PhaseTarget[];
+    complete: (output: string | undefined, interrupted: boolean) => void }): 200 | 409 | 503 {
     if (!canBegin()) return 409;
     const attemptId = randomUUID();
     const flowId = step?.flow.id;
@@ -73,15 +74,17 @@ export function createCodexInbox(workspace: string, options: {
     const onEvent = (event: CodexAttemptEvent) => {
       if (!("requestId" in event) || !active.has(attempt)) return;
       if (event.kind === "question-requested") {
+        const origin = step && clarificationOrigin(step.flow, step.phase, step.targets);
         const request: DecisionCard = {
           id: event.requestId, session: step?.phase.title ?? session, title: step?.flow.title ?? title,
           prompt: step?.flow.prompt ?? scrubAuditText(prompt), questions: event.questions,
           ...(step ? { flowId: step.flow.id } : {}),
+          ...(origin ? { clarificationOrigin: origin } : {}),
           attemptId,
           status: "pending", timeline: [at("Codex 已发出提问")],
         };
         if (!save(request, { kind: "decision.opened", ...trace, subject: event.requestId,
-          details: { phase: step?.phase.title, count: event.questions.length } })) {
+          details: { phase: step?.phase.title, count: event.questions.length, ...(origin ? { origin } : {}) } })) {
           unanswered = true;
           attempt.close();
           return;
@@ -141,7 +144,7 @@ export function createCodexInbox(workspace: string, options: {
     runPhase(flow: Flow, phase: Phase, targets: readonly PhaseTarget[], planText?: string) {
       return new Promise<string[] | "interrupted" | undefined>(resolve => {
         const status = begin(makePhasePrompt(flow, phase, targets, planText), {
-          flow, phase, complete: (output, interrupted) => resolve(interrupted ? "interrupted" : readPhaseOutput(phase, output)),
+          flow, phase, targets, complete: (output, interrupted) => resolve(interrupted ? "interrupted" : readPhaseOutput(phase, output)),
         });
         if (status !== 200) resolve(status === 409 ? "interrupted" : undefined);
       });
@@ -159,7 +162,7 @@ export function createCodexInbox(workspace: string, options: {
         timeline: [...request.timeline, at("已提交回答")] };
       // 先持久化答复意图。若进程在投递与确认之间退出，重启只显示待核对。
       if (!save(updated, { kind: "decision.answered", flowId: request.flowId, attemptId: request.attemptId,
-        subject: id, details: { answers: recordedAnswers } })) return 503;
+        subject: id, details: { answers: recordedAnswers, ...(request.clarificationOrigin ? { origin: request.clarificationOrigin } : {}) } })) return 503;
       Object.assign(request, updated);
       if (!attempt.answerQuestions(id, answers)) {
         transition(request, "uncertain", "原会话已不可答复");

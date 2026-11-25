@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { auditDecisionAnswers, type RecordBusiness } from "../audit/activity-store.mts";
 import { type DecisionQuestion, readDecisionAnswers } from "../decisions/questions.mts";
-import type { Flow, Phase } from "../planning/conversation-flow.mts";
+import type { ClarificationOrigin, Flow, Phase } from "../planning/conversation-flow.mts";
 
 export type Status = "pending" | "submitted" | "acknowledged" | "closed" | "expired" | "uncertain";
 export type DecisionCard = {
@@ -11,6 +11,7 @@ export type DecisionCard = {
   title: string;
   flowId?: string;
   attemptId?: string;
+  clarificationOrigin?: ClarificationOrigin;
   prompt: string;
   questions: readonly DecisionQuestion[];
   status: Status;
