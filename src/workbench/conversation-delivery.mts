@@ -8,7 +8,7 @@ import { planningDigest, qualityBlock, qualityCurrent, qualityPacket, reviewQual
 import type { Selection, SelectGitHubIssues } from "../planning/github-selection.mts";
 import type { DecisionCard } from "./demo-state.mts";
 import type { createIssueDispatch } from "./issue-dispatch.mts";
-import type { createPlannedIssuePublication } from "./planned-issue-publication.mts";
+import { type createPlannedIssuePublication, type PlannedIssueBatch, preparePlannedIssues } from "./planned-issue-publication.mts";
 
 export type IssueProposal = {
   id: string; flowId: string; actor: string; planId: string; version: number; base: string;
@@ -88,6 +88,11 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
           return;
         }
         draft = { ...p, items, ...(drafts ? { drafts } : {}), status: "reviewing" };
+        if (drafts) {
+          const connection = planned?.connection(actor);
+          if (!connection?.creation) throw Error("工单校验未通过：当前 GitHub 连接不支持创建 Issue。");
+          preparePlannedIssues(publicationBatch(draft, drafts), connection.repo);
+        }
         if (!save(draft)) throw Error("无法保存待复核工单。");
         const sourcePaths = drafts ? drafts.flatMap(item => [...item.paths, ...(item.sources ?? [])])
           : items.flatMap(item => [...item.files, ...(item.sourcePaths ?? [])]);
@@ -123,6 +128,9 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
     validation.map(({ criterion, procedure, expected }) => `${criterion}：${procedure} → ${expected}`);
   const draftText = (draft: QualityTicket) => [draft.instructions, "", `允许修改：${draft.paths.join("、")}`,
     ...verificationText(draft.validation)].join("\n");
+  const publicationBatch = (proposal: IssueProposal, drafts: readonly QualityTicket[]): PlannedIssueBatch => ({
+    ...proposal, drafts: drafts.map(draft => ({ id: draft.id, title: draft.title, body: draftText(draft), dependsOn: draft.dependsOn })),
+  });
 
   async function deliver(p: IssueProposal, flow: Flow | undefined, actor: string) {
     const quality = p.quality;
@@ -134,10 +142,7 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
       if (p.drafts) {
         const connection = planned?.connection(actor);
         if (!connection || !planned) throw Error("当前成员未连接可用于建单的 GitHub 账号。");
-        const drafts = p.drafts.map(draft => ({
-          id: draft.id, title: draft.title, body: draftText(draft), dependsOn: draft.dependsOn,
-        }));
-        const issued = await planned.publish({ ...p, drafts }, connection, abort.signal);
+        const issued = await planned.publish(publicationBatch(p, p.drafts), connection, abort.signal);
         const numberFor = (id: string) => {
           const issue = issued.get(id);
           if (!issue) throw Error("已审核的工单缺少创建回执。");

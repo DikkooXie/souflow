@@ -30,6 +30,32 @@ function render(batch: PlannedIssueBatch, draft: PlannedIssueDraft, marker: stri
   };
 }
 
+export function preparePlannedIssues(batch: PlannedIssueBatch, repo: string) {
+  const drafts = new Map(batch.drafts.map(draft => [draft.id, draft]));
+  if (drafts.size !== batch.drafts.length) throw Error("工单校验未通过：工单编号重复。");
+  const remaining = new Set(drafts.keys());
+  const sorted: PlannedIssueDraft[] = [];
+  while (remaining.size) {
+    const ready = batch.drafts.filter(draft => remaining.has(draft.id) && draft.dependsOn.every(id => !remaining.has(id) && drafts.has(id)));
+    if (!ready.length) throw Error("工单校验未通过：依赖缺失或有环。");
+    for (const draft of ready) {
+      remaining.delete(draft.id);
+      sorted.push(draft);
+    }
+  }
+  return sorted.map(draft => {
+    const key = digest(JSON.stringify([repo.toLowerCase(), batch.id, draft.id]));
+    const marker = `<!-- souflow-issue:${key} -->`;
+    // 审核时还没有 GitHub 编号，按最多可能的位数验证完整发布正文。
+    const maximum = render(batch, draft, marker, draft.dependsOn.map(() => "9".repeat(maxIssueNumberCharacters)));
+    if (!maximum.title || /[\r\n\0]/.test(maximum.title) || maximum.body.includes("\0")
+      || maximum.body.length > maxIssueBodyCharacters || draft.body.includes("<!-- souflow-issue:")) {
+      throw Error(`工单校验未通过：${draft.id} 的 Issue 标题、正文或发布标记无效。`);
+    }
+    return { draft, key, marker };
+  });
+}
+
 export function createPlannedIssuePublication(store: Checkpoint<IssuePublication>) {
   const receipts = new Map(store.load().map(record => [record.key, record]));
   const active = new Set<string>();
@@ -50,29 +76,8 @@ export function createPlannedIssuePublication(store: Checkpoint<IssuePublication
     active.add(batch.id);
     try {
       const account = await tracker.account();
-      const drafts = new Map(batch.drafts.map(draft => [draft.id, draft]));
+      const prepared = preparePlannedIssues(batch, tracker.repo);
       const published = new Map<string, IssueDetail>();
-      if (drafts.size !== batch.drafts.length) throw Error("工单编号重复，无法创建 Issue。");
-      const sorted: PlannedIssueDraft[] = [];
-      const remaining = new Set(drafts.keys());
-      while (remaining.size) {
-        const ready = batch.drafts.filter(draft => remaining.has(draft.id) && draft.dependsOn.every(id => !remaining.has(id) && drafts.has(id)));
-        if (!ready.length) throw Error("工单依赖未通过校验，无法创建 Issue。");
-        for (const draft of ready) {
-          remaining.delete(draft.id);
-          sorted.push(draft);
-        }
-      }
-      const prepared = sorted.map(draft => {
-        const key = digest(JSON.stringify([tracker.repo.toLowerCase(), batch.id, draft.id]));
-        const marker = `<!-- souflow-issue:${key} -->`;
-        const maximum = render(batch, draft, marker, draft.dependsOn.map(() => "9".repeat(maxIssueNumberCharacters)));
-        if (!maximum.title || /[\r\n\0]/.test(maximum.title) || maximum.body.includes("\0")
-          || maximum.body.length > maxIssueBodyCharacters || draft.body.includes("<!-- souflow-issue:")) {
-          throw Error("工单标题、正文或发布标记无效，无法创建 Issue。");
-        }
-        return { draft, key, marker };
-      });
       for (const { draft, key, marker } of prepared) {
         signal.throwIfAborted();
         const dependencies = draft.dependsOn.map(id => {

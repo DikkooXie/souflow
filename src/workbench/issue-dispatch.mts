@@ -351,9 +351,17 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     async suggest() {
       if (!delivery?.conversation) return [];
       const rows = await tracker.candidates(new Set(claims.keys()));
-      const issues = await Promise.all(rows.slice(0, 8).map(row => tracker.read(row.number)));
-      return issues.filter(issue => issue.state === "OPEN" && !issue.assignees.length && !issue.pulls.length
-        && !claims.has(issue.number) && !hasPublicationMarker(issue.body));
+      const available: IssueDetail[] = [];
+      const limit = 8;
+      let offset = 0;
+      while (offset < rows.length && available.length < limit) {
+        const batch = rows.slice(offset, offset + limit - available.length);
+        const issues = await Promise.all(batch.map(row => tracker.read(row.number)));
+        available.push(...issues.filter(issue => issue.state === "OPEN" && !issue.assignees.length && !issue.pulls.length
+          && !claims.has(issue.number) && !hasPublicationMarker(issue.body)));
+        offset += batch.length;
+      }
+      return available;
     },
     async claimApproved(id: string, actor: string, specs: ReadonlyMap<number, DeliverySpec & { issueRevision: string }>,
       approval: Omit<NonNullable<Claim["approval"]>, "issueRevision">, recovering = false) {
