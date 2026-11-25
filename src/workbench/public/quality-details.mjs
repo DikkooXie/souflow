@@ -1,7 +1,7 @@
 const labels = { scope: "范围", evidence: "依据", verification: "验证" };
 
-export function renderQualityDetails(details, node, quality) {
-  const key = quality ? JSON.stringify([quality.batchDigest, quality.sourceChecks]) : "";
+export function renderQualityDetails(details, node, quality, batchAcceptance = []) {
+  const key = quality ? JSON.stringify([quality.batchDigest, quality.sourceChecks, batchAcceptance]) : "";
   details.hidden = !quality;
   if (details.dataset.batch === key) return;
   details.dataset.batch = key;
@@ -31,6 +31,14 @@ export function renderQualityDetails(details, node, quality) {
   }
   details.append(node("summary", "", `质量复核依据 · ${blocked ? "已拦截" : incomplete ? "证据不足" : "已通过"}`),
     node("p", "", "绑定的产物版本"), documents, findings);
+  if (batchAcceptance.length) {
+    const pending = node("ul");
+    for (const { criterion, owner, issue, procedure, expected } of batchAcceptance) {
+      const location = owner === "batch" ? "整批验收" : `关联 Issue #${issue}`;
+      pending.append(node("li", "archive-text", `${criterion} · ${location} · ${procedure} → ${expected}`));
+    }
+    details.append(node("p", "", "另行待验收（不建 Issue）"), pending);
+  }
 }
 
 const reviewStates = { pass: "通过", block: "有阻塞", incomplete: "证据不完整" };

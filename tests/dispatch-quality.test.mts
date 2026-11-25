@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { currentDevelopmentPlan } from "../src/planning/conversation-flow.mts";
 import {
-  qualityBlock, qualityCurrent, qualityPacket, type QualityTicket, reviewQuality,
+  type BatchAcceptance, qualityBlock, qualityCurrent, qualityPacket, type QualityTicket, reviewQuality,
 } from "../src/planning/dispatch-quality.mts";
 import { passingQualityReview, qualityReviewOutput, readyQualityFlow } from "./fixtures/planning-quality.mts";
 
@@ -48,6 +48,41 @@ test("通过的复审记录保留幂等验收及其验证依据", async () => {
   });
   assert.equal(qualityBlock(receipt), "");
   assert.equal(qualityCurrent(receipt, structuredClone(flow), structuredClone(payload)), true);
+});
+
+test("另行待验收仍须覆盖所有条件，且关联闭单证据随批次绑定", async () => {
+  const { flow, signal } = await qualityFixture();
+  const url = "https://github.com/a/b/issues/8";
+  flow.project = { plan: { status: "read" }, repository: { revision, commits: [] }, github: { status: "read", repo: "a/b" },
+    relatedIssues: [{ number: 8, url, status: "read", state: "CLOSED", assigned: false,
+      source: { number: 8, title: "确认前禁止发送", body: "等待人工确认后再发送纪要待办。", revision: "8".repeat(64) } }] };
+  const [first, second] = ticket.validation;
+  assert.ok(first && second);
+  const onlyNew = { ...ticket, criteria: ["AC-1"], validation: [first] };
+  const related: BatchAcceptance = { ...second, owner: "related-issue", issue: 8, basis: "等待人工确认后再发送纪要待办" };
+  const input = (checks: BatchAcceptance[], tickets: QualityTicket[] = [onlyNew]) =>
+    qualityPacket(flow, revision, "trial", tickets, {}, checks);
+  assert.throws(() => input([]), /uncovered:AC-2/);
+  assert.throws(() => input([related, related]), /唯一编号/);
+  assert.throws(() => input([{ ...related, issue: 9 }]), /已读正文/);
+  assert.throws(() => input([{ ...related, basis: "未经确认也可以发送" }]), /已读正文/);
+  assert.throws(() => input([related], [ticket]), /unknown-criterion:send-todo:AC-2/);
+  const packet = input([related]);
+  assert.deepEqual(packet.batchAcceptance, [related]);
+  assert.equal(packet.references["github:issue:8"], "确认前禁止发送\n等待人工确认后再发送纪要待办。");
+  const payload = { tickets: [onlyNew], batchAcceptance: [related] };
+  const receipt = await reviewQuality(packet, payload, passingQualityReview, signal);
+  const invalid = qualityReviewOutput(packet);
+  invalid.verification.evidence.pop();
+  await assert.rejects(reviewQuality(packet, payload, async () => JSON.stringify(invalid), signal), /每项验收的验证依据/);
+  const unsupported = qualityReviewOutput(packet);
+  unsupported.evidence.evidence.pop();
+  await assert.rejects(reviewQuality(packet, payload, async () => JSON.stringify(unsupported), signal), /未引用 AC-2 的关联 Issue 正文/);
+  assert.equal(qualityCurrent(receipt, flow, payload), true);
+  assert.equal(qualityCurrent(receipt, flow, { ...payload, batchAcceptance: [{ ...related, expected: "另一种预期" }] }), false);
+  const changed = structuredClone(flow);
+  if (changed.project) changed.project.relatedIssues = [];
+  assert.equal(qualityCurrent(receipt, changed, payload), false);
 });
 
 test("工单引用不存在的验收项时拒绝准备复审", async () => {

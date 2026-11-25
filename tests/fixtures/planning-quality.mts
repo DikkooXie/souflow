@@ -7,10 +7,11 @@ export function qualityReviewOutput(packet: QualityPacket) {
   const quote = (ref: string) => ({ ref, quote: packet.references[ref]?.slice(0, 40) ?? "" });
   return {
     scope: { status: "pass", summary: "夹具范围通过", evidence: [quote("request")] },
-    evidence: { status: "pass", summary: "夹具依据通过", evidence: [quote("prd")] },
+    evidence: { status: "pass", summary: "夹具依据通过", evidence: [quote("prd"), ...packet.batchAcceptance.flatMap(item =>
+      item.owner === "related-issue" ? [{ ref: `github:issue:${item.issue}`, quote: item.basis }] : [])] },
     verification: {
       status: "pass", summary: "夹具验证通过", evidence: packet.planning.criteria.map(({ id }) =>
-        quote(Object.keys(packet.references).find(ref => ref.startsWith("test:") && ref.endsWith(`:${id}`)) ?? "")),
+        quote(Object.keys(packet.references).find(ref => ref === `batch-test:${id}` || ref.startsWith("test:") && ref.endsWith(`:${id}`)) ?? "")),
     },
     ...(packet.tickets.some(ticket => ticket.delivery) ? { breakdown: packet.tickets.map(ticket => ({
       ticket: ticket.id, status: "pass", summary: "夹具可独立验证且顺序正确", evidence: [quote(`ticket:${ticket.id}`)],

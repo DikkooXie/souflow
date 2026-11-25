@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { QualityReceipt } from "../src/planning/dispatch-quality.mts";
+import type { BatchAcceptance, QualityReceipt } from "../src/planning/dispatch-quality.mts";
 
 class Element {
   dataset: Record<string, string> = {};
@@ -18,7 +18,7 @@ const node = (_tag: string, _className?: string, text?: string) => new Element(t
 
 test("质量依据使用纯文本，轮询保留展开状态，切换批次或缺回执时清理旧详情", async () => {
   const { renderQualityDetails }: {
-    renderQualityDetails(details: Element, createNode: typeof node, quality?: QualityReceipt): void;
+    renderQualityDetails(details: Element, createNode: typeof node, quality?: QualityReceipt, batchAcceptance?: BatchAcceptance[]): void;
   } = await import(new URL("../src/workbench/public/quality-details.mjs", import.meta.url).href);
   const pass = { status: "pass" as const, summary: "符合验收要求", evidence: [{ ref: "request", quote: "<b>引用原文</b>" }] };
   const quality: QualityReceipt = {
@@ -44,6 +44,10 @@ test("质量依据使用纯文本，轮询保留展开状态，切换批次或�
   assert.equal(details.open, false);
   assert.match(details.children[0]?.text ?? "", /已拦截/);
   assert.match(details.textContent, /范围 · 拦截 · 超出范围/);
+  renderQualityDetails(details, node, quality, [
+    { criterion: "AC-2", owner: "related-issue", issue: 3, basis: "已有能力证据", procedure: "查看已有能力", expected: "回放一次验证" },
+  ]);
+  assert.match(details.textContent, /另行待验收（不建 Issue）.*AC-2 · 关联 Issue #3/);
   renderQualityDetails(details, node);
   assert.equal(details.hidden, true);
   assert.deepEqual(details.children, []);

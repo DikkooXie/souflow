@@ -8,7 +8,7 @@ import { setImmediate } from "node:timers/promises";
 import { issueRevision, type DeliveryTracker, type IssueDetail } from "../src/connections/issue-tracker.mts";
 import { currentDevelopmentPlan } from "../src/planning/conversation-flow.mts";
 import { createGitHubSelector, readGitHubSelection } from "../src/planning/github-selection.mts";
-import { type PlannedTicket, qualityPacket, reviewQuality } from "../src/planning/dispatch-quality.mts";
+import { type BatchAcceptance, type PlannedTicket, qualityPacket, reviewQuality } from "../src/planning/dispatch-quality.mts";
 import { snapshotIssueCandidates } from "../src/planning/project-context.mts";
 import { createConversationDelivery, type IssueProposal } from "../src/workbench/conversation-delivery.mts";
 import { type Claim, createIssueDispatch } from "../src/workbench/issue-dispatch.mts";
@@ -472,7 +472,20 @@ test("一次授权批量认领后，只派发就绪工单，合并后接续下�
 
 test("从新需求复核和授权，创建 Issue 后认领派发，重启后能找回丢失的建单回执", async () => {
   const flow = await readyQualityFlow("实现一个尚未建单的新需求。");
-  flow.project = { repository: { revision: "a".repeat(40), commits: [] }, plan: { status: "read" }, github: { status: "read" } };
+  const existing = { ...makeIssue(3, "支持 Markdown 预览并保持原文。"), state: "CLOSED" as const };
+  const [source] = snapshotIssueCandidates([existing]);
+  assert.ok(source);
+  flow.project = { repository: { revision: "a".repeat(40), commits: [] }, plan: { status: "read" }, github: { status: "read" },
+    relatedIssues: [{ number: existing.number, url: existing.url, status: "read", state: existing.state, assigned: false, source }] };
+  const acceptance = flow.outputs.flatMap(output => output.artifacts).find(artifact => artifact.kind === "requirements")
+    ?.sections.find(section => section.title === "验收条件");
+  assert.ok(acceptance);
+  acceptance.text += "\n上游合并后下游自动启动\n项目文档的 Markdown 保持可预览";
+  const batchAcceptance: BatchAcceptance[] = [
+    { criterion: "AC-2", owner: "batch", issue: null, basis: null, procedure: "等待并合并上游 PR", expected: "下游只启动一次" },
+    { criterion: "AC-3", owner: "related-issue", issue: 3, basis: "支持 Markdown 预览并保持原文。",
+      procedure: "打开已交付的 Markdown 预览", expected: "格式正确，原文不变" },
+  ];
   const proposals = new Map<string, IssueProposal>();
   const receipts = new Map<string, IssuePublication>();
   const claims = new Map<string, Claim>();
@@ -526,13 +539,13 @@ test("从新需求复核和授权，创建 Issue 后认领派发，重启后能�
     });
   const makeService = () => createConversationDelivery(github, store(proposals), async () => "new", passingQualityReview,
     async (_revision, paths) => Object.fromEntries(paths.map(path => [path, "冻结的源码"])), {
-      draft: async () => [
+      draft: async () => ({ batchAcceptance, tickets: [
         { id: "T1", title: "上游工单", instructions: "实现新需求。", paths: up.files, dependsOn: [], criteria: up.criteria, validation,
           delivery: { outcome: "用户能看到待确认纪要", priorityReason: "先交付确认入口", prerequisites: [] } },
         { id: "T2", title: "下游工单", instructions: "在合并后验证。", paths: down.files, dependsOn: ["T1"], criteria: up.criteria, validation,
           delivery: { outcome: "用户反复确认仍只收到一条待办", priorityReason: "复用上游确认入口",
             prerequisites: [{ ticket: "T1", reason: "需要上游合并后的确认操作入口" }] } },
-      ],
+      ] }),
       publish: createPlannedIssuePublication(store(receipts)), connection: actor => actor === "member" ? tracker : undefined,
     });
   const initial = makeService();
@@ -545,6 +558,9 @@ test("从新需求复核和授权，创建 Issue 后认领派发，重启后能�
     assert.match(card.prompt, /T2 · 下游工单/);
     assert.match(card.prompt, /可演示结果：用户能看到待确认纪要/);
     assert.match(card.prompt, /前置 T1：需要上游合并后的确认操作入口/);
+    assert.match(card.prompt, /AC-2 · 整批验收 · 等待并合并上游 PR/);
+    assert.match(card.prompt, /AC-3 · 关联 Issue #3/);
+    assert.deepEqual(initial.statuses([flow], "member")[0]?.batchAcceptance, batchAcceptance);
     assert.deepEqual(initial.statuses([flow], "member")[0]?.quality?.breakdown?.map(finding => finding.ticket), ["T1", "T2"]);
     const answer = { authorization: "授权创建 Issue、执行并开草稿 PR" };
     const changedFlow = { ...flow, prompt: "授权后改变的原始需求" };
@@ -567,8 +583,10 @@ test("从新需求复核和授权，创建 Issue 后认领派发，重启后能�
     assert.deepEqual(writes, ["创建 10", "创建 11", "认领 10", "认领 11", "开发 10"]);
     assert.match(read(11).body, /^依赖 #10$/m);
     assert.match(read(11).body, /可演示结果：用户反复确认仍只收到一条待办/);
+    assert.doesNotMatch(read(11).body, /AC-2|AC-3|Markdown/);
     assert.equal(claims.get("11")?.phase, "waiting");
     assert.deepEqual(restarted.statuses([flow], "member")[0]?.issues, [10, 11]);
+    assert.deepEqual(restarted.statuses([flow], "member")[0]?.batchAcceptance, batchAcceptance);
     assert.equal(await restarted.resumePublication(flow, "member"), 409);
     await github.refresh();
     assert.equal(writes.includes("开发 11"), false);
@@ -651,12 +669,12 @@ test("Issue 正文超出回读上限时不生成授权卡，原计划仍可修�
     permits: () => true, suggest: async () => [], claimApproved: async () => assert.fail("不得派发"),
   }, { load: () => [...saved.values()], save(id, proposal) { saved.set(id, structuredClone(proposal)); return true; } },
   async () => "new", async () => assert.fail("无效草稿不得进入复核"), async () => ({}), {
-    draft: async () => [{ id: "T1", title: "过长工单", instructions: "说明".repeat(1_000),
+    draft: async () => ({ batchAcceptance: [], tickets: [{ id: "T1", title: "过长工单", instructions: "说明".repeat(1_000),
       paths: up.files, dependsOn: [], criteria: up.criteria,
       delivery: { outcome: "用户完成一次确认", priorityReason: "完成核心流程", prerequisites: [] },
       validation: Array.from({ length: 10 }, (_, i) => ({
         criterion: `AC-${i + 1}`, procedure: "验证".repeat(250), expected: "结果".repeat(150),
-      })) }],
+      })) }] }),
     publish: async () => assert.fail("未授权不得发布"), connection: () => tracker,
   });
   try {
