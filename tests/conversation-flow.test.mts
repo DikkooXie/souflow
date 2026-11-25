@@ -45,6 +45,8 @@ test("records each artifact and its exact upstream versions for independently st
     const prompt = prompts.get(flow.id) ?? "";
     assert.ok(prompt.includes(JSON.stringify({ ...flow.source, text: flow.prompt })));
     assert.ok(prompt.includes(JSON.stringify({ kind: "development-plan", ...ref("development-plan"), upstream: [ref("prd"), ref("technology")] })));
+    assert.match(prompt, /区分开工条件和交付证据/);
+    assert.match(prompt, /由本工单建立的测试环境和实现后才有的请求、审计或交付回执，写成验收步骤/);
   }
   assert.notEqual(first.source.id, second.source.id);
 });
@@ -103,6 +105,7 @@ test("在原会话沿用答复重新规划，锁定新基线并保留旧版产�
       const prompt = makePhasePrompt(flow, phase, targets, planText);
       assert.ok(prompt.includes(clarification.answer));
       assert.ok(prompt.includes("补齐登录前置"));
+      assert.match(prompt, /真实权限、外部访问限制和必须先合入的依赖继续核查/);
       assert.ok(prompt.includes(`项目计划 ${newBase}`));
       assert.ok(prompt.includes("保留旧版验收编号"));
       if (interruption && phase.title === "需求澄清") return "interrupted";
