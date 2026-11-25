@@ -267,7 +267,7 @@ function renderConversation(flow, pending) {
   conversation.hidden = !flow;
   promptBox.placeholder = flow ? "发起另一项需求…" : "描述你的需求…";
   const proposal = issuePlans.find(item => item.flowId === flow?.id);
-  renderQualityDetails(conversationQuality, node, flow?.status === "ready" ? proposal?.quality : undefined);
+  renderQualityDetails(conversationQuality, node, flow?.status === "ready" ? proposal?.quality : undefined, proposal?.batchAcceptance);
   renderDeliveryReviews(conversationDeliveryReviews, node, flow?.id, deliveryReviews.find(entry => entry.flowId === flow?.id)?.reviews ?? []);
   if (!flow) return;
   const action = workflowAction(flow, proposal);

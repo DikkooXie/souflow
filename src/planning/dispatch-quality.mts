@@ -21,11 +21,14 @@ const requiredUpstream = {
 } as const;
 
 export type Verification = { criterion: string; procedure: string; expected: string };
+export type BatchAcceptance = Verification & (
+  { owner: "batch"; issue: null; basis: null } | { owner: "related-issue"; issue: number; basis: string });
 export type QualityTicket = TicketDraft & {
   title: string; instructions: string; validation: readonly Verification[]; paths: readonly string[];
   sources?: readonly string[]; issue?: { revision: string; text: string }; delivery?: TicketDelivery;
 };
 export type PlannedTicket = QualityTicket & { delivery: TicketDelivery };
+export type PlannedTicketBatch = { tickets: PlannedTicket[]; batchAcceptance: BatchAcceptance[] };
 export type Quote = { ref: string; quote: string };
 type Finding = { status: "pass" | "block"; summary: string; evidence: Quote[] };
 export type QualityReceipt = {
@@ -41,6 +44,12 @@ export const verificationSchema = {
   type: "array", items: { type: "object", additionalProperties: false, required: ["criterion", "procedure", "expected"],
     properties: { criterion: { type: "string" }, procedure: { type: "string" }, expected: { type: "string" } } },
 };
+export const batchAcceptanceSchema = { type: "array", items: {
+  ...verificationSchema.items,
+  required: [...verificationSchema.items.required, "owner", "issue", "basis"],
+  properties: { ...verificationSchema.items.properties, owner: { type: "string", enum: ["batch", "related-issue"] },
+    issue: { type: ["integer", "null"] }, basis: { type: ["string", "null"] } },
+} };
 
 const hash = (item: unknown) => createHash("sha256").update(JSON.stringify(item)).digest("hex");
 
@@ -75,6 +84,24 @@ export function readVerification(raw: unknown, criteria: readonly string[], tick
       throw new VerificationMappingError(`工单校验未通过：${subject}${criterion} 缺少有效验证步骤或预期结果。`);
     }
     return { criterion, procedure: scrubAuditText(procedure.trim()), expected: scrubAuditText(expected.trim()) };
+  });
+}
+
+export function readBatchAcceptance(raw: unknown, flow: Flow, criteria: readonly string[]): BatchAcceptance[] {
+  const invalid = () => new VerificationMappingError("工单校验未通过：每项整批或关联 Issue 验收需要唯一编号、步骤和预期。关联 Issue 必须逐字引用本轮冻结的已读正文，整批验收的 issue 和 basis 填 null。");
+  if (!Array.isArray(raw) || raw.length > criteria.length) throw invalid();
+  const allowed = new Set(criteria);
+  return raw.map(item => {
+    const { criterion, owner, issue, basis } = object(item) ?? {};
+    if (typeof criterion !== "string" || !allowed.delete(criterion)) throw invalid();
+    const [verification] = readVerification([item], [criterion]);
+    if (!verification) throw invalid();
+    if (owner === "batch" && issue === null && basis === null) return { ...verification, owner, issue, basis };
+    if (owner !== "related-issue" || typeof issue !== "number" || !Number.isSafeInteger(issue)
+      || typeof basis !== "string" || basis.trim().length < qualityReviewLimits.quoteMinCharacters || basis.length > qualityReviewLimits.quoteCharacters
+      || !flow.project?.relatedIssues?.some(source => source.number === issue && source.status === "read"
+        && source.source.body?.includes(basis) && /^[a-f0-9]{64}$/.test(source.source.revision ?? ""))) throw invalid();
+    return { ...verification, owner, issue, basis };
   });
 }
 
@@ -126,9 +153,12 @@ export function planningDigest(flow: Flow) {
 }
 
 export function qualityPacket(flow: Flow, revision: string, id: string, tickets: readonly QualityTicket[],
-  sources: Readonly<Record<string, string>> = {}) {
+  sources: Readonly<Record<string, string>> = {}, batchAcceptance: readonly BatchAcceptance[] = []) {
   const planning = planningDocuments(flow);
-  const errors = validateTicketPlan(planning.criteria.map(item => item.id), tickets);
+  const criteria = planning.criteria.map(item => item.id);
+  const accepted = readBatchAcceptance(batchAcceptance, flow, criteria);
+  const outsideTickets = new Set(accepted.map(item => item.criterion));
+  const errors = validateTicketPlan(criteria.filter(item => !outsideTickets.has(item)), tickets);
   if (errors.length || planning.criteria.length > 24 || !/^[a-f0-9]{40,64}$/.test(revision)
     || (flow.project?.repository && flow.project.repository.revision !== revision)) {
     throw Error(`工单校验未通过：${errors.join("、") || "验收项或仓库版本不匹配"}。`);
@@ -148,9 +178,10 @@ export function qualityPacket(flow: Flow, revision: string, id: string, tickets:
       ...ticket.validation.map(({ criterion, procedure, expected }) => [`test:${ticket.id}:${criterion}`, `${procedure}\n${expected}`]),
       ...(ticket.issue ? [[`issue:${ticket.id}`, ticket.issue.text]] : []),
     ]),
+    ...accepted.map(({ criterion, procedure, expected }) => [`batch-test:${criterion}`, `${procedure}\n${expected}`]),
     ...Object.entries(sources).map(([path, text]) => [`repo:${path}`, text]),
   ]);
-  return { planning, references, revision, id, tickets };
+  return { planning, references, revision, id, tickets, batchAcceptance: accepted };
 }
 
 export type QualityPacket = ReturnType<typeof qualityPacket> & { sourceReviewMode?: "per-ticket" };
@@ -257,11 +288,19 @@ export async function reviewQuality(packet: QualityPacket, payload: unknown, rev
   const entries = dimensions.map(key => {
     const finding = readFinding(parsed[key], packet, qualityReviewLimits.references[key]);
     if (finding.status === "pass" && key === "verification" && packet.planning.criteria.some(({ id }) =>
-      !finding.evidence.some(item => item.ref.startsWith("test:") && item.ref.endsWith(`:${id}`)))) {
+      !finding.evidence.some(item => item.ref === `batch-test:${id}` || item.ref.startsWith("test:") && item.ref.endsWith(`:${id}`)))) {
       throw Error("质量复核未给出每项验收的验证依据，可以重试。");
     }
     return [key, finding] as const;
   });
+  if (entries.every(([, finding]) => finding.status === "pass")) {
+    const reviewed = entries.flatMap(([, finding]) => finding.evidence);
+    const related = packet.batchAcceptance.filter(item => item.owner === "related-issue");
+    const supported = new Set(related.filter(item => reviewed.some(({ ref, quote }) => ref === `github:issue:${item.issue}`
+      && (item.basis.includes(quote) || quote.includes(item.basis)))).map(item => item.issue));
+    const missing = related.find(item => !supported.has(item.issue));
+    if (missing) throw Error(`质量复核未引用 ${missing.criterion} 的关联 Issue 正文，可以重试。`);
+  }
   const { source, documents } = packet.planning;
   return { policy: version, flowDigest, batchDigest,
     documents: [source, ...documents].map(({ kind, id, version }) => ({ kind, id, version })),

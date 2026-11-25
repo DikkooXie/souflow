@@ -59,14 +59,14 @@ test("GitHub 拆单从固定提交区分只读资料和编辑文件，来源错�
       const response = responses.shift();
       assert.ok(response);
       return { finished: Promise.resolve("completed"), close() {}, answerQuestions: () => false,
-        output: () => JSON.stringify({ tickets: [response] }) };
+        output: () => JSON.stringify({ tickets: [response], batchAcceptance: [] }) };
     },
     qualityReviewer: passingQualityReview,
     execute: () => assert.fail("拆单阶段不能执行代码工单"),
   });
   const planned = await dispatch.planGitHub(flow, "trial");
-  assert.deepEqual(planned[0]?.sources, [guide, large]);
-  assert.deepEqual(planned[0]?.paths, [editable]);
+  assert.deepEqual(planned.tickets[0]?.sources, [guide, large]);
+  assert.deepEqual(planned.tickets[0]?.paths, [editable]);
   const snapshot = JSON.parse(prompts[0]?.split("\n\n").at(-1) ?? "{}");
   assert.deepEqual(snapshot.availableSources, [guide, editable, large]);
   assert.deepEqual(snapshot.availableEditPaths, [editable]);
