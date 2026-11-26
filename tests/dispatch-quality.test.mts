@@ -131,16 +131,42 @@ test("逐单源码复核只重查格式不合格的回执，沿用固定资料�
   const path = "src/minutes/confirmation.mts";
   const source = "现有服务未核对可信成员身份。";
   const block = { status: "block", summary: "缺少可信成员映射", evidence: [{ ref: `repo:${path}`, quote: source }] };
-  for (const malformed of ["{", JSON.stringify({ ...block, summary: "字".repeat(qualityReviewLimits.summaryCharacters + 1) })]) {
+  const cases = [
+    { output: undefined, field: /未返回结构化输出/ },
+    { output: "{", field: /未返回可解析的 JSON/ },
+    { output: JSON.stringify({ ...block, summary: "字".repeat(qualityReviewLimits.summaryCharacters + 1) }), field: /summary 超长/ },
+    { output: JSON.stringify({ ...block, evidence: Array(4).fill(block.evidence[0]) }), field: /evidence.*本次返回 4 条/ },
+    { overflow: true, output: undefined, field: /输出超过字节预算/ },
+  ];
+  for (const malformed of cases) {
     const packets: (string | undefined)[] = [];
     const reviewer = createCodexTicketSourceReviewer(process.cwd(), undefined, 1000, options => {
       packets.push(options.untrustedContext);
       assert.equal(options.localLoginOnly, true);
       assert.equal(options.disableWebSearch, true);
-      if (packets.length === 1) assert.doesNotMatch(options.prompt, /上一份结论未通过/);
-      else assert.match(options.prompt, /上一份结论未通过格式或引文校验.*同一份固定资料.*原标准判断是否阻塞/);
-      return { finished: Promise.resolve("completed"), close() {},
-        output: () => packets.length === 1 ? malformed : JSON.stringify(block) };
+      if (packets.length === 1) {
+        assert.doesNotMatch(options.prompt, /上一份结论未通过/);
+        if (malformed.overflow) options.onOutputOverflow?.((options.outputMaxBytes ?? 0) + 1);
+      } else {
+        assert.match(options.prompt, /上一份结论未通过格式或引文校验.*同一份固定资料.*原标准判断是否阻塞/);
+        assert.match(options.prompt, malformed.field);
+      }
+      assert.deepEqual(options.outputSchema, {
+        type: "object", additionalProperties: false, required: ["status", "summary", "evidence"],
+        properties: {
+          status: { type: "string", enum: ["pass", "block"] },
+          summary: { type: "string", minLength: 1, maxLength: qualityReviewLimits.summaryCharacters },
+          evidence: { type: "array", minItems: 1, maxItems: qualityReviewLimits.breakdownReferences, items: {
+            type: "object", additionalProperties: false, required: ["ref", "quote"],
+            properties: {
+              ref: { type: "string", enum: [`repo:${path}`] },
+              quote: { type: "string", minLength: qualityReviewLimits.quoteMinCharacters, maxLength: qualityReviewLimits.quoteCharacters },
+            },
+          } },
+        },
+      });
+      const output = packets.length === 1 ? malformed.output : JSON.stringify(block);
+      return { finished: Promise.resolve("completed"), close() {}, output: () => output };
     });
     const result = await reviewTicketSources(packet, ticket, { [path]: source }, reviewer, signal);
     assert.equal(result.status, "block");
@@ -160,7 +186,7 @@ test("逐单源码复核不会接纳两次不实引用或重试已有效的拦�
     calls++;
     if (calls === 2) assert.match(correction ?? "", /引用无法在本轮资料找到/);
     return JSON.stringify({ ...block, evidence: [{ ref: `repo:${path}`, quote: "源码中不存在的引文" }] });
-  }, signal), /引用无法在本轮资料找到/);
+  }, signal), new RegExp(`工单 ${ticket.id} 的源码复核输出无效。.*evidence\\[0\\]\\.quote`));
   assert.equal(calls, 2);
   const receipt = await reviewTicketSources(packet, ticket, { [path]: source }, async (_packet, _signal, correction) => {
     assert.equal(correction, undefined);
