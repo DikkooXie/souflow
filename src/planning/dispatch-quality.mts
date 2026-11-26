@@ -108,9 +108,8 @@ export function readBatchAcceptance(raw: unknown, flow: Flow, criteria: readonly
 
 export async function prepareVerifiedDraft<T>(generate: (feedback?: string) => Promise<string | undefined>,
   parse: (output: string | undefined) => T, extraFeedback?: (error: unknown) => string | undefined): Promise<T> {
-  const output = await generate();
   try {
-    return parse(output);
+    return parse(await generate());
   } catch (error) {
     const feedback = error instanceof VerificationMappingError ? error.message : extraFeedback?.(error);
     if (feedback === undefined) throw error;
@@ -209,9 +208,24 @@ const findingFields = {
   evidence: { type: "array", items: { type: "object", additionalProperties: false, required: ["ref", "quote"],
     properties: { ref: { type: "string" }, quote: { type: "string" } } } },
 };
-export const ticketSourceReviewSchema = {
-  type: "object", additionalProperties: false, required: Object.keys(findingFields), properties: findingFields,
-};
+export function ticketSourceReviewReferenceLimit(packet: Pick<TicketSourcePacket, "handoff">) {
+  return Math.max(qualityReviewLimits.breakdownReferences, packet.handoff?.changedPaths.length ?? 0);
+}
+
+export function ticketSourceReviewSchema(references: string[], referenceLimit: number) {
+  const quote = findingFields.evidence.items;
+  return {
+    type: "object", additionalProperties: false, required: Object.keys(findingFields),
+    properties: {
+      ...findingFields,
+      summary: { type: "string", minLength: 1, maxLength: qualityReviewLimits.summaryCharacters },
+      evidence: { type: "array", minItems: 1, maxItems: referenceLimit, items: { ...quote, properties: {
+        ref: { type: "string", enum: references },
+        quote: { type: "string", minLength: qualityReviewLimits.quoteMinCharacters, maxLength: qualityReviewLimits.quoteCharacters },
+      } } },
+    },
+  };
+}
 
 export function qualityReviewSchema(ticketBreakdown: boolean) {
   const finding = { type: "object", additionalProperties: false, required: Object.keys(findingFields), properties: findingFields };
@@ -235,23 +249,36 @@ export function qualityReviewOutputBytes(packet: QualityPacket) {
   return Buffer.byteLength(JSON.stringify({ ...documents, breakdown }, undefined, 2));
 }
 
-class ReviewFindingFormatError extends Error {}
+export class ReviewFindingFormatError extends Error {}
 
 function readFinding(value: unknown, packet: Pick<QualityPacket, "references">, referenceLimit: number): Finding {
   const row = object(value);
-  if (!row || (row.status !== "pass" && row.status !== "block") || typeof row.summary !== "string"
-    || !row.summary.trim() || row.summary.length > qualityReviewLimits.summaryCharacters || !Array.isArray(row.evidence)
-    || !row.evidence.length || row.evidence.length > referenceLimit) {
-    throw new ReviewFindingFormatError(
-      `质量复核结论缺少依据，可以重试。结论须为 pass 或 block，summary 为 1 至 ${qualityReviewLimits.summaryCharacters} 字，evidence 为 1 至 ${referenceLimit} 条。`);
+  if (!row) throw new ReviewFindingFormatError("质量复核需要返回 JSON 对象。");
+  if (row.status !== "pass" && row.status !== "block") {
+    throw new ReviewFindingFormatError("质量复核 status 必须为 pass 或 block。");
   }
-  const evidence = row.evidence.map(entry => {
+  if (typeof row.summary !== "string" || !row.summary.trim()) {
+    throw new ReviewFindingFormatError("质量复核 summary 必须为非空字符串。");
+  }
+  if (row.summary.length > qualityReviewLimits.summaryCharacters) {
+    throw new ReviewFindingFormatError(`质量复核 summary 超长（${row.summary.length} / ${qualityReviewLimits.summaryCharacters} 字符）。`);
+  }
+  if (!Array.isArray(row.evidence) || !row.evidence.length || row.evidence.length > referenceLimit) {
+    const count = Array.isArray(row.evidence) ? `，本次返回 ${row.evidence.length} 条` : "";
+    throw new ReviewFindingFormatError(`质量复核结论缺少依据。evidence 必须是包含 1 至 ${referenceLimit} 条引用的数组${count}。`);
+  }
+  const evidence = row.evidence.map((entry, index) => {
     const { ref, quote } = object(entry) ?? {};
-    if (typeof ref !== "string" || typeof quote !== "string" || quote.trim().length < qualityReviewLimits.quoteMinCharacters
-      || quote.length > qualityReviewLimits.quoteCharacters
-      || !Object.hasOwn(packet.references, ref) || !packet.references[ref]?.includes(quote)) {
+    if (typeof ref !== "string" || !Object.hasOwn(packet.references, ref)) {
+      throw new ReviewFindingFormatError(`质量复核引用无法在本轮资料找到。evidence[${index}].ref 必须是 references 中的键。`);
+    }
+    if (typeof quote !== "string" || quote.trim().length < qualityReviewLimits.quoteMinCharacters
+      || quote.length > qualityReviewLimits.quoteCharacters) {
       throw new ReviewFindingFormatError(
-        `质量复核引用无法在本轮资料找到，可以重试。ref 必须为 references 中的键，quote 须在该键对应的正文逐字出现，长度为 ${qualityReviewLimits.quoteMinCharacters} 至 ${qualityReviewLimits.quoteCharacters} 字。`);
+        `质量复核 evidence[${index}].quote 长度须为 ${qualityReviewLimits.quoteMinCharacters} 至 ${qualityReviewLimits.quoteCharacters} 字符。`);
+    }
+    if (!packet.references[ref]?.includes(quote)) {
+      throw new ReviewFindingFormatError(`质量复核引用无法在本轮资料找到。evidence[${index}].quote 必须逐字出现在 ref 对应的正文。`);
     }
     return { ref, quote: scrubAuditText(quote) };
   });
@@ -269,23 +296,30 @@ export async function reviewTicketSources(batch: QualityPacket, ticket: QualityT
     plan: batch.planning.documents.find(document => document.kind === "development-plan"),
     upstream: batch.tickets.filter(parent => ticket.dependsOn.includes(parent.id)),
     criteria: batch.planning.criteria.filter(item => ticket.criteria.includes(item.id)) };
-  const finding = await prepareVerifiedDraft(async correction => {
-    signal.throwIfAborted();
-    const output = await reviewer(packet, signal, correction);
-    signal.throwIfAborted();
-    return output;
-  }, raw => {
-    let value: unknown;
-    try { value = JSON.parse(raw ?? "null"); }
-    catch { throw new ReviewFindingFormatError("质量复核未返回可解析的 JSON 结论，可以重试。"); }
-    const changed = handoff?.changedPaths ?? [];
-    const finding = readFinding(value, packet, Math.max(qualityReviewLimits.breakdownReferences, changed.length));
-    if (finding.status === "pass" && changed.some(path => !finding.evidence.some(({ ref }) => ref === `repo:${path}`))) {
-      throw new ReviewFindingFormatError("质量复核缺少已变更交接路径的逐字依据。每条变更路径至少引用一次，可以重试。");
+  try {
+    const finding = await prepareVerifiedDraft(async correction => {
+      signal.throwIfAborted();
+      const output = await reviewer(packet, signal, correction);
+      signal.throwIfAborted();
+      return output;
+    }, raw => {
+      if (!raw?.trim()) throw new ReviewFindingFormatError("质量复核未返回结构化输出。");
+      let value: unknown;
+      try { value = JSON.parse(raw); }
+      catch { throw new ReviewFindingFormatError("质量复核未返回可解析的 JSON 结论。"); }
+      const finding = readFinding(value, packet, ticketSourceReviewReferenceLimit(packet));
+      if (finding.status === "pass" && handoff?.changedPaths.some(path => !finding.evidence.some(({ ref }) => ref === `repo:${path}`))) {
+        throw new ReviewFindingFormatError("质量复核缺少已变更交接路径的逐字依据。每条变更路径至少引用一次。");
+      }
+      return finding;
+    }, error => error instanceof ReviewFindingFormatError ? error.message : undefined);
+    return { ...finding, ticket: ticket.id, revision: batch.revision, paths, sourceDigest: hash(references) };
+  } catch (error) {
+    if (error instanceof ReviewFindingFormatError) {
+      throw new ReviewFindingFormatError(`工单 ${ticket.id} 的源码复核输出无效。${error.message}`);
     }
-    return finding;
-  }, error => error instanceof ReviewFindingFormatError ? error.message : undefined);
-  return { ...finding, ticket: ticket.id, revision: batch.revision, paths, sourceDigest: hash(references) };
+    throw error;
+  }
 }
 
 function readBreakdown(raw: unknown, packet: QualityPacket) {
