@@ -13,7 +13,7 @@ import type { IssueTracker } from "../connections/issue-tracker.mts";
 import { createIssueVerifier, type VerifyIssue } from "../execution/issue-verification.mts";
 import { createIssueDispatch, IssueActionError, type Claim, type IssueDeliveryOptions } from "./issue-dispatch.mts";
 import { createGitHubDeliveryReviewer } from "./github-delivery-review.mts";
-import { readApprovedReviewFix } from "./approved-review-fix.mts";
+import { readApprovedReviewFixes } from "./approved-review-fix.mts";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
 import { hostname } from "node:os";
@@ -178,6 +178,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           ...(issueDelivery.recoverDeviceTestAttempts ? { recoverDeviceTestAttempts: issueDelivery.recoverDeviceTestAttempts } : {}),
           ...(issueDelivery.recoverCheckedHeads ? { recoverCheckedHeads: issueDelivery.recoverCheckedHeads } : {}),
           ...(issueDelivery.reviewFix ? { reviewFix: issueDelivery.reviewFix } : {}),
+          ...(issueDelivery.reviewFixes ? { reviewFixes: issueDelivery.reviewFixes } : {}),
           ...(publishIssues ? { publishRepair: publishIssues } : {}),
           ...(remoteLink?.code ? { failedWorkerAttempt: remoteLink.code.failedAttempt } : {}),
           async reviewSourceHandoff(claim, proof, sources, signal) {
@@ -234,7 +235,10 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
             return answer === undefined ? [] : [{ cardId: card.id, questionId: question.id, question: scrubAuditText(question.prompt), answer,
               ...(card.clarificationOrigin ? { origin: card.clarificationOrigin } : {}) }];
           }) : []) : undefined);
-      reviewScope = claim => issuePlanning?.reviewScope(claim, flows.list().find(flow => flow.id === claim.approval?.flowId));
+      reviewScope = claim => {
+        const scope = issuePlanning?.reviewScope(claim, flows.list().find(flow => flow.id === claim.approval?.flowId));
+        return scope && { ...scope, files: [...scope.files, ...(claim.reviewTestFiles ?? [])] };
+      };
       if (issuePlanning) reviewSourceHandoff = (claim, proof, sources, signal) =>
         issuePlanning.reviewHandoff(claim, flows.list().find(flow => flow.id === claim.approval?.flowId), proof, sources, signal);
       flows.reopenReady();
@@ -759,7 +763,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     ...(recoverFailedIssue === undefined ? {} : { recoverFailedIssue }),
     ...(deviceTestAttempts.length ? { recoverDeviceTestAttempts: new Set(deviceTestAttempts) } : {}),
     recoverCheckedHeads,
-    ...(reviewFix === undefined ? {} : { reviewFix: readApprovedReviewFix(reviewFix) }),
+    ...(reviewFix === undefined ? {} : { reviewFixes: readApprovedReviewFixes(reviewFix) }),
     pollMs: integerSetting("SOULFLOW_GITHUB_POLL_MS", 20_000, 5000, 3_600_000),
     timeoutMs: runtimeInteger("SOULFLOW_GITHUB_DELIVERY_TIMEOUT_MS", 1000, 3_600_000),
   } : undefined;

@@ -41,7 +41,7 @@ export function repairFromReceipt(repo: string, claim: Claim, receipt: DeliveryR
     ...receipt.requirements.criteria.filter(item => item.status === "block").map(item => `${item.criterion} · ${item.summary}`),
   ].map(line => scrubAuditText(line.replace(/[\r\n]+/g, " ")));
   if (!findings.length) return;
-  const scope = [...delivery.files];
+  const scope = [...delivery.files, ...(claim.reviewTestFiles ?? [])];
   const instructions = findings.join("\n");
   if (instructions.length > approvedReviewFixInstructionLimit) return { reason: "复核问题超过单次续修的内容限制。请核对完整复核记录。" };
   const body = [
@@ -62,6 +62,25 @@ export function repairFromReceipt(repo: string, claim: Claim, receipt: DeliveryR
     drafts: [{ id: "REPAIR", title: `修复 #${claim.number} 的交付复核问题`, body, dependsOn: [] }] };
   try { preparePlannedIssues(batch, repo); }
   catch { return { reason: "完整修复工单无法发布。请核对复核结论和允许修改的文件。" }; }
+  return { id, fix, batch };
+}
+
+export function repairFromApproval(repo: string, claim: Claim, fix: ApprovedReviewFix): ReviewRepair | undefined {
+  if (!claim.approval || !fix.testFiles?.length) return;
+  const { flowId, planId, version } = claim.approval;
+  const id = createHash("sha256").update(JSON.stringify([repo.toLowerCase(), claim.requestId, claim.approval, fix])).digest("hex");
+  const batch: PlannedIssueBatch = { id, actor: claim.claimedBy, flowId, planId, version,
+    drafts: [{ id: "REPAIR", title: `补充 #${fix.issue} 的已授权回归测试`, dependsOn: [], body: [
+      `原工单 #${fix.issue} · 原 PR #${fix.pull}`,
+      `固定提交 ${fix.head} · 开发计划 v${version}`,
+      `原改动范围 ${fix.files.join("、")}`,
+      `补充批准的回归测试 ${fix.testFiles.join("、")}`,
+      "",
+      fix.instructions,
+      "通过隔离检查后更新原 PR，重新核对实现和各项验收。",
+    ].join("\n") }] };
+  try { preparePlannedIssues(batch, repo); }
+  catch { return; }
   return { id, fix, batch };
 }
 

@@ -18,8 +18,70 @@ import { checkoutReviewedIssueBase, createIssueDeveloper, type DeliveryFailure, 
 import { type Claim, createIssueDispatch } from "../src/workbench/issue-dispatch.mts";
 import { createPlannedIssuePublication, type IssuePublication } from "../src/workbench/planned-issue-publication.mts";
 import { repairFromReceipt } from "../src/workbench/delivery-review-repair.mts";
+import { readApprovedReviewFix, readApprovedReviewFixes } from "../src/workbench/approved-review-fix.mts";
 
 const spec = { files: ["src/main.mts"], instructions: "修改校验逻辑。", dependsOn: [] };
+
+test("补充续修配置仅允许明确的测试文件，拒绝混入源码或重复文件", () => {
+  const input = { issue: 7, pull: 8, head: "a".repeat(40), base: "main", files: spec.files, instructions: "补测试" };
+  const testFile = "tests/member.test.mts";
+  const parse = (testFiles: unknown) => readApprovedReviewFix(JSON.stringify({ ...input, testFiles }));
+  assert.deepEqual(parse([testFile]).testFiles, [testFile]);
+  assert.deepEqual(readApprovedReviewFixes(JSON.stringify([input, { ...input, issue: 9, pull: 10 }])).map(fix => fix.issue), [7, 9]);
+  assert.throws(() => readApprovedReviewFixes(JSON.stringify([input, input])), /同一工单/);
+  for (const files of [["src/access.test.mts"], ["tests/../src/main.test.mts"], [testFile, testFile], [], "test"]) {
+    assert.throws(() => parse(files), /维护者要求/);
+  }
+});
+
+test("已批准的补充测试由工作台建单并续修当前 PR，保存复核范围", async () => {
+  const head = "a".repeat(40);
+  const revised = "b".repeat(40);
+  const baseRevision = "c".repeat(40);
+  const hash = "d".repeat(64);
+  const testFile = "tests/member.test.mts";
+  let pull: IssuePull = { number: 8, state: "OPEN", url: "https://github.com/a/b/pull/8", head, baseName: "main" };
+  const issue: IssueDetail = { number: 7, title: "成员切换", body: "核对身份", state: "OPEN", assignees: ["member"],
+    url: "https://github.com/a/b/issues/7", pulls: [pull] };
+  let stored: Claim = { ...issue, pull, syncedAt: 0, requestId: "approval", claimedBy: "member", account: "member", phase: "submitted",
+    target: { branch: "feat/7-existing", head, base: "main" }, observedReviewLink: true, observedIssueRevision: issueRevision(issue),
+    delivery: { ...spec, baseRevision }, approval: { flowId: "flow", planId: "plan", version: 1, issueRevision: issueRevision(issue),
+      quality: { policy: 1, flowDigest: hash, batchDigest: hash } } };
+  const writes: string[] = [];
+  const tracker: DeliveryTracker = { repo: "a/b", candidates: async () => [], account: async () => "member",
+    read: async () => ({ ...issue, pulls: [pull] }), assign: async () => assert.fail(),
+    delivery: { checkout: async () => assert.fail(), publish: async () => assert.fail(), find: async () => pull,
+      checkoutPublished: async () => {}, async updatePublished({ from, head: next }) {
+        assert.equal(from, head);
+        assert.equal(stored.reviewFix?.pendingHead, revised);
+        writes.push("续修");
+        pull = { ...pull, head: next };
+        return pull;
+      } } };
+  const patch = createIssueDispatch(tracker, { load: () => [stored], save(_id, value) { stored = value; return true; } },
+    async () => "", () => true, 1, new Map(), { specs: new Map(), conversation: true, pollMs: 60_000, reviewScopeCurrent: () => true,
+      reviewFix: { issue: 7, pull: 8, head, base: "main", files: spec.files, testFiles: [testFile], instructions: "只补身份测试" },
+      async publishRepair(batch) {
+        assert.match(batch.drafts[0]?.body ?? "", /补充批准的回归测试 tests\/member\.test\.mts/);
+        writes.push("建单");
+        return new Map([["REPAIR", { ...issue, number: 9 }]]);
+      },
+      async prepare(input) {
+        assert.deepEqual(input.spec.files, [...spec.files, testFile]);
+        assert.equal(stored.reviewRepairs?.[0]?.issue, 9);
+        assert.equal(input.reviewTarget?.head, head);
+        return { workspace: "fixture", base: "main", branch: input.branch, head: revised };
+      } });
+  for (let i = 0; i < 3; i++) {
+    await patch.refresh();
+    await setImmediate();
+  }
+  await patch.close();
+  assert.deepEqual(writes, ["建单", "续修"]);
+  assert.deepEqual(stored.reviewTestFiles, [testFile]);
+  assert.equal(stored.reviewFix?.state, "complete");
+  assert.equal(stored.reviewRepairs?.[0]?.completedHead, revised);
+});
 
 test("恢复原设备已测试的提交，拒绝补丁摘要和文件范围不匹配", async t => {
   const root = await mkdtemp(join(tmpdir(), "souflow-checked-artifact-"));
