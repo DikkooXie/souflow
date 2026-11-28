@@ -7,6 +7,7 @@ import { currentDevelopmentPlan } from "../src/planning/conversation-flow.mts";
 import { qualityPacket, reviewQuality, type QualityTicket } from "../src/planning/dispatch-quality.mts";
 import { createConversationDelivery, type IssueProposal } from "../src/workbench/conversation-delivery.mts";
 import { createIssueDispatch, type Claim, type IssueDeliveryOptions } from "../src/workbench/issue-dispatch.mts";
+import { deviceWaitBinding } from "../src/workbench/device-wait.mts";
 import { createPlannedIssuePublication } from "../src/workbench/planned-issue-publication.mts";
 import type { Checkpoint } from "../src/audit/activity-store.mts";
 import { passingQualityReview, readyQualityFlow, validation } from "./fixtures/planning-quality.mts";
@@ -20,9 +21,11 @@ function memory<T extends object>(rows = new Map<string, T>()): Checkpoint<T> {
 }
 
 test("已修订工单的每个明确失败回执仅续派一次，保留原 4+2 文件授权", async t => {
-  for (const scenario of ["success", "fails-again", "no-request", "old-request", "wrong-revision", "wrong-version", "wrong-issue",
+  for (const deviceMode of [false, true]) for (const scenario of ["success", "fails-again", "no-request", "old-request", "wrong-revision", "wrong-version", "wrong-issue",
     "wrong-owner", "wrong-parent", "wrong-amendment", "scope-revoked", "review-blocked", "review-transient", "offer-save-failed",
-    "consumed-receipt", "unknown-lineage"] as const) await t.test(scenario, async () => {
+    "consumed-receipt", "unknown-lineage", "wrong-offer"] as const) {
+    if (!deviceMode && scenario === "wrong-offer") continue;
+    await t.test(`${deviceMode ? "设备等待标记" : "旧记录"}/${scenario}`, async () => {
     const flow = await readyQualityFlow();
     flow.project = { repository: { revision: base, commits: [] }, plan: { status: "read" }, github: { status: "read" } };
     const plan = currentDevelopmentPlan(flow);
@@ -52,6 +55,11 @@ test("已修订工单的每个明确失败回执仅续派一次，保留原 4+2 
         prePrAmendments: [amendment], ...(scenario === "consumed-receipt" ? { recoveredWorkerAttempts: [id(4)] } : {}),
         delivery: { baseRevision: base, files, dependsOn: [1], instructions: "下游", sourcePaths: [source], sourceFrom: [{ issue: 1, path: source }] } }],
     ]);
+    if (deviceMode) {
+      const claim = records.get("2");
+      assert.ok(claim);
+      claim.deviceWait = { version: 1, binding: deviceWaitBinding("a/b", claim), offered: scenario === "wrong-offer" ? id(99) : id(4) };
+    }
     const original = structuredClone(records.get("2"));
     const proposals = new Map<string, IssueProposal>([[id(1), { id: id(1), flowId: flow.id, actor: "member", planId: plan.id, version: plan.version,
       base, items: [], drafts, published: [1, 2], sourceHandoff: true, quality, status: "submitted", approvedAt: 1, createdAt: 0 }]]);
@@ -72,11 +80,13 @@ test("已修订工单的每个明确失败回执仅续派一次，保留原 4+2 
     for (let restart = 0; restart < 3; restart++) {
       let conversation: ReturnType<typeof createConversationDelivery>;
       const options: IssueDeliveryOptions = { specs: new Map(), pollMs: 60_000, conversation: true, requireQuality: true,
+        ...(deviceMode ? { executionMode: "device" as const, hasAnyWorkerAttempt: () => true } : {}),
         sourceRefresh: requested, recoverDeviceTestAttempts: recoveryRequests, hasWorkerAttempt: () => true,
         failedWorkerAttempt: () => ({ id: latestAttempt, failureStage: "patch" }),
         reviewScopeCurrent: c => scenario !== "scope-revoked" && !!conversation?.reviewScope(c, flow),
         reviewSourceHandoff: (c, proof, sources, signal) => conversation.reviewHandoff(c, flow, proof, sources, signal),
-        async prepare({ spec, sourceHandoff, revalidateWorker, workerOffered, branch, previousFailure }, _connected, signal) {
+        async prepare({ spec, sourceHandoff, revalidateWorker, workerOffered, branch, previousFailure, requireDevice }, connected, signal) {
+          assert.equal(requireDevice, deviceMode ? true : undefined);
           assert.ok(sourceHandoff);
           assert.equal(sourceHandoff.refreshRevision, revision);
           assert.equal(sourceHandoff.reuseApprovedRevision, true);
@@ -87,9 +97,17 @@ test("已修订工单的每个明确失败回执仅续派一次，保留原 4+2 
             Object.fromEntries([...files, ...testFiles, source].map(path => [path, "已批准源码"])), signal);
           await revalidateWorker?.(signal);
           sourceHandoff.ready();
+          assert.equal(records.get("2")?.phase, deviceMode ? "waitingDevice" : "developing");
           await revalidateWorker?.(signal);
           const offered = id(5 + starts);
           workerOffered?.(offered);
+          if (deviceMode) {
+            assert.equal(records.get("2")?.phase, "deviceOffered");
+            assert.equal(records.get("2")?.deviceWait?.offered, offered);
+            assert.equal(records.get("2")?.pendingWorkerAttempt, undefined);
+            connected(`thread-${offered}`);
+            assert.equal(records.get("2")?.phase, "developing");
+          }
           latestAttempt = offered;
           starts++;
           if (scenario === "fails-again") throw new IssueDeliveryFailed({ stage: "device", reason: "device-failed", workerStage: "patch" });
@@ -139,5 +157,6 @@ test("已修订工单的每个明确失败回执仅续派一次，保留原 4+2 
       assert.deepEqual(records.get("2")?.recoveredWorkerAttempts, expected === 2 ? [id(2), id(4), id(5)] : [id(2), id(4)]);
       assert.equal(records.get("2")?.pendingWorkerAttempt, undefined);
     }
-  });
+    });
+  }
 });

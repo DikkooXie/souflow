@@ -606,29 +606,35 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
               const recoveryScope = workerScope(connection.repo, claim);
               const sourceReady = claim.phase === "checkingSources" && claim.sourceRefresh?.state === "reviewing"
                 && claim.sourceHandoff?.finding.status === "pass"
-                || claim.phase === "developing" && claim.sourceRefresh?.state === "passed";
+                || (claim.phase === "developing" || claim.phase === "waitingDevice" && !!claim.deviceWait)
+                  && claim.sourceRefresh?.state === "passed";
               if (!recoveryScope || delivery.failedWorkerAttempt?.(recoveryScope)?.id !== claim.pendingWorkerAttempt
                 || !delivery.recoverDeviceTestAttempts?.has(claim.pendingWorkerAttempt)
+                || claim.deviceWait && claim.deviceWait.offered !== claim.pendingWorkerAttempt
                 || !sourceReady) throw new IssueDeliverySourcesChanged();
             }
             signal.throwIfAborted();
           } } : {}),
-        ...(c.deviceWait ? { workerOffered: (attemptId: string) => {
+        ...(c.pendingWorkerAttempt ? { workerOffered: (attemptId: string) => {
+          abort.signal.throwIfAborted();
+          const pendingAttempt = c.pendingWorkerAttempt;
+          const latest = current();
+          if (!pendingAttempt || latest.pendingWorkerAttempt !== pendingAttempt
+            || (latest.phase !== "developing" && !(latest.phase === "waitingDevice" && latest.deviceWait?.offered === pendingAttempt))
+            || latest.sourceRefresh?.state !== "passed") throw new IssueDeliverySourcesChanged();
+          const { pendingWorkerAttempt: _pendingWorkerAttempt, ...confirmed } = latest;
+          // 明确批准的失败回执沿原恢复门槛消费；新 offer 与旧回执在同次保存中交接。
+          save({ ...confirmed, retriedWorkerAttempt: pendingAttempt, recoveryDispatchAttempt: attemptId,
+            ...(latest.deviceWait ? { phase: "deviceOffered", deviceWait: { ...latest.deviceWait, offered: attemptId } } : {}),
+            recoveredWorkerAttempts: [...new Set([...(latest.recoveredWorkerAttempts ?? []),
+              ...(latest.recoveryDispatchAttempt && latest.retriedWorkerAttempt ? [latest.retriedWorkerAttempt] : []), pendingAttempt])],
+            retryCount: (latest.recoveryDispatchAttempt ? latest.retryCount ?? 0 : 0) + 1 }, "worker-redispatched");
+        } } : c.deviceWait ? { workerOffered: (attemptId: string) => {
           abort.signal.throwIfAborted();
           const latest = current();
           if (latest.phase !== "waitingDevice" || latest.deviceWait?.offered
             || latest.deviceWait?.binding !== deviceWaitBinding(connection.repo, latest)) throw new IssueDeliverySourcesChanged();
           save({ ...latest, phase: "deviceOffered", deviceWait: { ...latest.deviceWait, offered: attemptId } }, "device-offered");
-        } } : c.pendingWorkerAttempt ? { workerOffered: attemptId => {
-          const pendingAttempt = c.pendingWorkerAttempt;
-          const latest = current();
-          if (!pendingAttempt || latest.pendingWorkerAttempt !== pendingAttempt || latest.phase !== "developing"
-            || latest.sourceRefresh?.state !== "passed") throw new IssueDeliverySourcesChanged();
-          const { pendingWorkerAttempt: _pendingWorkerAttempt, ...confirmed } = latest;
-          save({ ...confirmed, retriedWorkerAttempt: pendingAttempt, recoveryDispatchAttempt: attemptId,
-            recoveredWorkerAttempts: [...new Set([...(latest.recoveredWorkerAttempts ?? []),
-              ...(latest.recoveryDispatchAttempt && latest.retriedWorkerAttempt ? [latest.retriedWorkerAttempt] : []), pendingAttempt])],
-            retryCount: (latest.recoveryDispatchAttempt ? latest.retryCount ?? 0 : 0) + 1 }, "worker-redispatched");
         } } : {}),
         ...(c.approval ? { flowId: c.approval.flowId, planVersion: c.approval.version } : {}) },
         sessionId => { if (current().sessionId !== sessionId) save({ ...current(), sessionId,
