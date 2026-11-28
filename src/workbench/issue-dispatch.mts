@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { scrubAuditText } from "../audit/activity-store.mts";
+import type { FailedReviewDraft } from "../execution/failed-review-draft.mts";
 import type { BusinessEvent, Checkpoint } from "../audit/activity-store.mts";
 import { issueRevision, type DeliveryTracker, type IssueDetail, type IssuePull, type IssueSummary, type IssueTracker } from "../connections/issue-tracker.mts";
 import type { AccountAssignment } from "../execution/codex-account-dispatch.mts";
@@ -46,7 +47,7 @@ export type Claim = Remote & {
   claimUncertain?: boolean;
   failure?: DeliveryFailure; retryCount?: number; retriedWorkerAttempt?: string; interruptedDevelopment?: boolean;
   reviewFix?: { from: string; state: "running" | "publishing" | "complete" | "failed"; pendingHead?: string; base?: string; repairId?: string;
-    testFiles?: string[]; retriedTests?: boolean; testFailureNote?: string; testCheckFailed?: boolean };
+    testFiles?: string[]; retriedTests?: boolean; testFailureNote?: string; testCheckFailed?: boolean; replayedDraft?: FailedReviewDraft };
   reviewTestFiles?: string[];
   reviewRepairs?: ReviewRepairDecision[];
   sourceHandoff?: { proof: SourceHandoff; finding: TicketSourceFinding };
@@ -330,20 +331,25 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     const repair = authorized?.repair ?? supplemental;
     const recorded = supplemental && c.reviewRepairs?.find(item => item.id === supplemental.id);
     const repeatLink = retry && supplemental && c.reviewFix?.repairId === supplemental.id && c.reviewFix.state === "failed" && !recorded?.issue;
-    const repeatTests = !!(fix.testFailureNote && recorded?.issue && supplemental && c.reviewFix?.from === fix.head
-      && c.reviewFix.repairId === supplemental.id && c.reviewFix.state === "failed" && !c.reviewFix.retriedTests
+    const priorTestFailure = !!(fix.testFailureNote && recorded?.issue && supplemental && c.reviewFix?.from === fix.head
+      && c.reviewFix.repairId === supplemental.id && c.reviewFix.state === "failed"
       && (c.reviewFix.testCheckFailed ?? delivery.legacyReviewTestFailure?.(subject(c.number), fix.head, supplemental.id)));
-    if ((fix.testFailureNote && !repeatTests) || (!authorized && c.reviewFix?.from === fix.head && !repeatLink && !repeatTests)) return;
+    const replayDraft = priorTestFailure && c.reviewFix?.retriedTests && !c.reviewFix.replayedDraft ? fix.failedDraft : undefined;
+    const repeatTests = priorTestFailure && !c.reviewFix?.retriedTests && !fix.failedDraft;
+    if ((fix.testFailureNote && !repeatTests && !replayDraft)
+      || (!authorized && c.reviewFix?.from === fix.head && !repeatLink && !repeatTests && !replayDraft)) return;
     const connection = memberTrackers.get(c.claimedBy) ?? tracker;
     const remote = publisher(connection);
     if (!remote?.checkoutPublished || !remote.updatePublished) return;
     const update = remote.updatePublished;
     const state = { from: fix.head, state: "running" as const, ...(repair ? { repairId: repair.id } : {}),
       ...(fix.testFiles ? { testFiles: fix.testFiles } : {}),
-      ...(repeatTests && fix.testFailureNote ? { retriedTests: true, testFailureNote: scrubAuditText(fix.testFailureNote) } : {}) };
+      ...((repeatTests || replayDraft) && fix.testFailureNote ? { retriedTests: true, testFailureNote: scrubAuditText(fix.testFailureNote) } : {}),
+      ...(replayDraft ? { replayedDraft: replayDraft } : {}) };
     if (supplemental && !recorded) save({ ...c, reviewRepairs: [...(c.reviewRepairs ?? []),
       { id: supplemental.id, head: fix.head, decision: "approved", at: Date.now() }] }, "review-repair-maintainer-approved");
-    save({ ...(claims.get(c.number) ?? c), reviewFix: state }, repeatTests ? "review-fix-test-retry-started" : "review-fix-started");
+    save({ ...(claims.get(c.number) ?? c), reviewFix: state },
+      replayDraft ? "review-fix-draft-replay-started" : repeatTests ? "review-fix-test-retry-started" : "review-fix-started");
     const current = () => claims.get(c.number) ?? c;
     const verify = async () => {
       const [account, issue, pull] = await Promise.all([
@@ -375,6 +381,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
             instructions: [`只处理本轮评审要求。\n${fix.instructions}`,
               ...(state.testFailureNote ? [`上次同一修订的隔离检查诊断（仅供纠正）：${state.testFailureNote}`] : [])].join("\n") },
           branch: target.branch, upstream: [], publisher: remote, reviewTarget: { ...target, base: fix.base },
+          ...(replayDraft && fix.testFiles ? { failedReviewDraft: { ...replayDraft, testFiles: fix.testFiles } } : {}),
           ...(c.approval ? { flowId: c.approval.flowId, planVersion: c.approval.version } : {}),
           repairing: diagnostic => save(current(), "patch-repair", diagnostic),
         }, sessionId => save({ ...current(), sessionId }, "review-fix-connected"), abort.signal,

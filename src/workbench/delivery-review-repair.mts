@@ -69,7 +69,7 @@ export function repairFromApproval(repo: string, claim: Claim, fix: ApprovedRevi
   if (!claim.approval || !fix.testFiles?.length) return;
   const { flowId, planId, version } = claim.approval;
   // 隔离检查的诊断只用于纠正原修订，不改变已发布修订单的身份或正文。
-  const { testFailureNote: _testFailureNote, ...approved } = fix;
+  const { testFailureNote: _testFailureNote, failedDraft: _failedDraft, ...approved } = fix;
   const id = createHash("sha256").update(JSON.stringify([repo.toLowerCase(), claim.requestId, claim.approval, approved])).digest("hex");
   const batch: PlannedIssueBatch = { id, actor: claim.claimedBy, flowId, planId, version,
     drafts: [{ id: "REPAIR", title: `补充 #${fix.issue} 的已授权回归测试`, dependsOn: [], body: [
