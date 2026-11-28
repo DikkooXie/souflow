@@ -1,0 +1,772 @@
+{
+  "status": "partial",
+  "fullAC3Acceptance": false,
+  "businessHead": "2f519e031eb1b57026594e3a0a37c7482256d460",
+  "runtimeIntegration": "8637bb3991bc36184529bec602980ec86ebe4ed9",
+  "taskBaseline": "deb294eb9d07ff491deb0ee4cfc427cb804f0dc5",
+  "sources": {
+    "http-2f519e03-binding.json": {
+      "revision": "2f519e031eb1b57026594e3a0a37c7482256d460",
+      "at": "2026-11-28T14:03:11.140Z",
+      "devices": [
+        {
+          "actor": "bob",
+          "name": "HTTP Bob 验收设备",
+          "id": "0e48c696-fd78-46ae-bef4-2d3165de428d",
+          "status": 201
+        },
+        {
+          "actor": "implementer",
+          "name": "HTTP 实施 验收设备",
+          "id": "b60e964f-7224-4a7f-a0d4-c579ea7e0d05",
+          "status": 201
+        }
+      ],
+      "results": [
+        {
+          "check": "other-member-confirm-denied",
+          "owner": "bob",
+          "actor": "implementer",
+          "status": 409
+        },
+        {
+          "check": "other-member-revoke-denied-owner-still-bound",
+          "owner": "bob",
+          "actor": "implementer",
+          "id": "0e48c696-fd78-46ae-bef4-2d3165de428d",
+          "status": 404
+        },
+        {
+          "check": "other-member-confirm-denied",
+          "owner": "implementer",
+          "actor": "bob",
+          "status": 409
+        },
+        {
+          "check": "other-member-revoke-denied-owner-still-bound",
+          "owner": "implementer",
+          "actor": "bob",
+          "id": "b60e964f-7224-4a7f-a0d4-c579ea7e0d05",
+          "status": 404
+        },
+        {
+          "check": "own-list-only",
+          "actor": "bob",
+          "ids": [
+            "0e48c696-fd78-46ae-bef4-2d3165de428d"
+          ],
+          "count": 1
+        },
+        {
+          "check": "own-list-only",
+          "actor": "implementer",
+          "ids": [
+            "b60e964f-7224-4a7f-a0d4-c579ea7e0d05"
+          ],
+          "count": 1
+        }
+      ],
+      "errors": [],
+      "businessTaskCreated": false,
+      "productionDevicesTouched": false
+    },
+    "http-2f519e03-revoked.json": {
+      "revision": "2f519e031eb1b57026594e3a0a37c7482256d460",
+      "results": [
+        {
+          "check": "cross-member-monitor-http-revoke-denied",
+          "actor": "implementer",
+          "id": "0e48c696-fd78-46ae-bef4-2d3165de428d",
+          "status": 404
+        },
+        {
+          "check": "owner-http-revoked",
+          "actor": "bob",
+          "id": "0e48c696-fd78-46ae-bef4-2d3165de428d",
+          "status": 200,
+          "at": "2026-11-28T14:05:34.678Z"
+        },
+        {
+          "check": "cross-member-monitor-http-revoke-denied",
+          "actor": "bob",
+          "id": "b60e964f-7224-4a7f-a0d4-c579ea7e0d05",
+          "status": 404
+        },
+        {
+          "check": "owner-http-revoked",
+          "actor": "implementer",
+          "id": "b60e964f-7224-4a7f-a0d4-c579ea7e0d05",
+          "status": 200,
+          "at": "2026-11-28T14:05:34.681Z"
+        }
+      ],
+      "method": "normal authenticated workbench HTTP endpoints",
+      "browserDriverNote": "Concurrent CDP sessions dismissed native confirm; no revoked request from that failed browser interaction; followed normal HTTP entry.",
+      "businessTaskCreated": false
+    },
+    "http-2f519e03-peer-events.json": {
+      "results": [
+        {
+          "actor": "bob",
+          "firstEvent": "2026-11-28T14:03:59.248Z",
+          "lastEvent": "2026-11-28T14:05:36.274Z",
+          "capacityReports": 6,
+          "offers": 0,
+          "taskStarts": 0
+        },
+        {
+          "actor": "implementer",
+          "firstEvent": "2026-11-28T14:03:59.248Z",
+          "lastEvent": "2026-11-28T14:05:36.275Z",
+          "capacityReports": 6,
+          "offers": 0,
+          "taskStarts": 0
+        }
+      ],
+      "at": "2026-11-28T14:10:35.066Z"
+    },
+    "http-concurrency.json": {
+      "businessHead": "2f519e031eb1b57026594e3a0a37c7482256d460",
+      "startedAt": "2026-11-28T14:15:11.504Z",
+      "expiresAt": 1795875611500,
+      "category": "actual-product-http",
+      "results": [
+        {
+          "check": "same-code-concurrent-confirm",
+          "statuses": [
+            201,
+            409
+          ],
+          "id": "16d7b854-bf2d-4e9c-ae6e-e4264f351768"
+        },
+        {
+          "check": "same-code-replay",
+          "status": 409
+        }
+      ],
+      "deviceId": "16d7b854-bf2d-4e9c-ae6e-e4264f351768"
+    },
+    "http-expiry-concurrency.json": {
+      "businessHead": "2f519e031eb1b57026594e3a0a37c7482256d460",
+      "startedAt": "2026-11-28T14:15:11.504Z",
+      "expiresAt": 1795875611500,
+      "category": "actual-product-http",
+      "results": [
+        {
+          "check": "same-code-concurrent-confirm",
+          "statuses": [
+            201,
+            409
+          ],
+          "id": "16d7b854-bf2d-4e9c-ae6e-e4264f351768"
+        },
+        {
+          "check": "same-code-replay",
+          "status": 409
+        },
+        {
+          "check": "actual-five-minute-expiry",
+          "status": 409,
+          "confirmedAt": "2026-11-28T14:20:12.504Z"
+        }
+      ],
+      "deviceId": "16d7b854-bf2d-4e9c-ae6e-e4264f351768"
+    },
+    "http-same-id-permitted.json": {
+      "businessHead": "2f519e031eb1b57026594e3a0a37c7482256d460",
+      "category": "actual-physical-mac",
+      "id": "16d7b854-bf2d-4e9c-ae6e-e4264f351768",
+      "owner": "bob",
+      "before": {
+        "selfCheckHttp": 403,
+        "selfCheckExit": 1,
+        "connectorExit": 1
+      },
+      "after": {
+        "online": true,
+        "ready": true,
+        "slots": "1/1",
+        "permitted": true
+      },
+      "at": "2026-11-28T14:20:40.831Z"
+    },
+    "http-concurrent-unpermitted-check.log": "接入文件有效。\n(node:53394) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the warning was created)\n设备 HTTPS 已响应，但接入失败（HTTP 403）。\n本机 Codex 已登录。\n",
+    "http-concurrent-unpermitted.log": "(node:53300) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the warning was created)\n代码设备未能继续。请检查接入文件、工作台许可和本机配置。\n",
+    "153-wrong-owner-waiting.json": {
+      "runtime": "8637bb3991bc36184529bec602980ec86ebe4ed9",
+      "issue": 153,
+      "rows": [
+        {
+          "at": "2026-11-28T14:07:53.336Z",
+          "progress": "等待可用的授权设备",
+          "devices": [
+            {
+              "id": "23911f2a-d8f9-4ad0-8607-645e2fd6a444",
+              "online": true,
+              "ready": true,
+              "slots": 1,
+              "count": 0
+            }
+          ],
+          "attempts": 0
+        },
+        {
+          "at": "2026-11-28T14:08:03.342Z",
+          "progress": "等待可用的授权设备",
+          "devices": [
+            {
+              "id": "23911f2a-d8f9-4ad0-8607-645e2fd6a444",
+              "online": true,
+              "ready": true,
+              "slots": 1,
+              "count": 0
+            }
+          ],
+          "attempts": 0
+        },
+        {
+          "at": "2026-11-28T14:08:13.348Z",
+          "progress": "等待可用的授权设备",
+          "devices": [
+            {
+              "id": "23911f2a-d8f9-4ad0-8607-645e2fd6a444",
+              "online": true,
+              "ready": true,
+              "slots": 1,
+              "count": 0
+            }
+          ],
+          "attempts": 0
+        },
+        {
+          "at": "2026-11-28T14:08:23.351Z",
+          "progress": "等待可用的授权设备",
+          "devices": [
+            {
+              "id": "23911f2a-d8f9-4ad0-8607-645e2fd6a444",
+              "online": true,
+              "ready": true,
+              "slots": 1,
+              "count": 0
+            }
+          ],
+          "attempts": 0
+        },
+        {
+          "at": "2026-11-28T14:08:33.360Z",
+          "progress": "等待可用的授权设备",
+          "devices": [
+            {
+              "id": "23911f2a-d8f9-4ad0-8607-645e2fd6a444",
+              "online": true,
+              "ready": true,
+              "slots": 1,
+              "count": 0
+            }
+          ],
+          "attempts": 0
+        },
+        {
+          "at": "2026-11-28T14:08:43.363Z",
+          "progress": "等待可用的授权设备",
+          "devices": [
+            {
+              "id": "23911f2a-d8f9-4ad0-8607-645e2fd6a444",
+              "online": true,
+              "ready": true,
+              "slots": 1,
+              "count": 0
+            }
+          ],
+          "attempts": 0
+        }
+      ]
+    },
+    "153-wrong-owner-peer.json": {
+      "actor": "bob",
+      "at": "2026-11-28T14:09:03.684Z",
+      "firstEvent": "2026-11-28T14:07:24.284Z",
+      "lastEvent": "2026-11-28T14:08:53.278Z",
+      "capacityReports": 5,
+      "offers": 0,
+      "taskStarts": 0
+    },
+    "153-recovered.json": {
+      "at": "2026-11-28T14:07:05.664Z",
+      "runtime": "8637bb3991bc36184529bec602980ec86ebe4ed9",
+      "issue": {
+        "number": 153,
+        "title": "最终 tested 回执原样重放只保存一次",
+        "url": "https://github.com/DikkooXie/souflow/issues/153",
+        "state": "OPEN",
+        "assignees": [
+          "huangqj73-test"
+        ],
+        "pulls": [],
+        "syncedAt": 1795873529233,
+        "claimedBy": "implementer",
+        "dependsOn": [],
+        "mode": "delivery",
+        "flowId": "b839a636-0ab4-4933-a041-c9f018eaff96",
+        "progress": "等待可用的授权设备"
+      },
+      "codeWorkers": {
+        "activityMs": 3000,
+        "devices": [],
+        "attempts": []
+      }
+    },
+    "153-peer-receipts.json": [
+      {
+        "event": "observer-started",
+        "pid": 52650,
+        "at": "2026-11-28T14:09:12.829Z"
+      },
+      {
+        "event": "actual-offer-received",
+        "id": "e2e1fd31-04ea-487d-a30e-cc1a2d0157bd",
+        "issue": 153,
+        "revision": "deb294eb9d07ff491deb0ee4cfc427cb804f0dc5",
+        "status": 200,
+        "at": "2026-11-28T14:09:15.926Z"
+      },
+      {
+        "event": "actual-receipt-ready",
+        "id": "e2e1fd31-04ea-487d-a30e-cc1a2d0157bd",
+        "phase": "accepted",
+        "bodySha256": "5239b9f0f54071c28b617ae190f0de5e6f5ea22c2d52ec655abe5a40892f7574",
+        "at": "2026-11-28T14:09:15.938Z"
+      },
+      {
+        "event": "actual-receipt-response",
+        "id": "e2e1fd31-04ea-487d-a30e-cc1a2d0157bd",
+        "phase": "accepted",
+        "status": 200,
+        "bodySha256": "5239b9f0f54071c28b617ae190f0de5e6f5ea22c2d52ec655abe5a40892f7574",
+        "at": "2026-11-28T14:09:16.031Z"
+      },
+      {
+        "event": "actual-codex-task-start",
+        "pid": 52702,
+        "at": "2026-11-28T14:09:17.726Z"
+      },
+      {
+        "event": "actual-receipt-ready",
+        "id": "e2e1fd31-04ea-487d-a30e-cc1a2d0157bd",
+        "phase": "started",
+        "bodySha256": "6e0c7032edb83b72bcbed23e471e40bf392394988d0815facb6990ebec019eec",
+        "at": "2026-11-28T14:09:17.750Z"
+      },
+      {
+        "event": "actual-receipt-response",
+        "id": "e2e1fd31-04ea-487d-a30e-cc1a2d0157bd",
+        "phase": "started",
+        "status": 200,
+        "bodySha256": "6e0c7032edb83b72bcbed23e471e40bf392394988d0815facb6990ebec019eec",
+        "at": "2026-11-28T14:09:17.854Z"
+      },
+      {
+        "event": "actual-receipt-ready",
+        "id": "e2e1fd31-04ea-487d-a30e-cc1a2d0157bd",
+        "phase": "tested",
+        "bodySha256": "15fc40c2f1b7c6e47d26804acf2643d01bea416d5ff94c57debc72267b46636b",
+        "at": "2026-11-28T14:09:58.641Z"
+      },
+      {
+        "event": "actual-tested-response-dropped",
+        "id": "e2e1fd31-04ea-487d-a30e-cc1a2d0157bd",
+        "status": 200,
+        "bodySha256": "15fc40c2f1b7c6e47d26804acf2643d01bea416d5ff94c57debc72267b46636b",
+        "at": "2026-11-28T14:09:58.709Z"
+      },
+      {
+        "event": "isolated-connector-network-paused",
+        "until": 1795875043709,
+        "durationMs": 45000,
+        "at": "2026-11-28T14:09:58.709Z"
+      },
+      {
+        "event": "isolated-connector-network-resumed",
+        "at": "2026-11-28T14:10:43.926Z"
+      },
+      {
+        "event": "actual-receipt-ready",
+        "id": "e2e1fd31-04ea-487d-a30e-cc1a2d0157bd",
+        "phase": "tested",
+        "bodySha256": "15fc40c2f1b7c6e47d26804acf2643d01bea416d5ff94c57debc72267b46636b",
+        "at": "2026-11-28T14:10:43.928Z"
+      },
+      {
+        "event": "actual-receipt-response",
+        "id": "e2e1fd31-04ea-487d-a30e-cc1a2d0157bd",
+        "phase": "tested",
+        "status": 200,
+        "bodySha256": "15fc40c2f1b7c6e47d26804acf2643d01bea416d5ff94c57debc72267b46636b",
+        "at": "2026-11-28T14:10:44.006Z"
+      }
+    ],
+    "153-terminal-dedup.json": {
+      "businessHead": "2f519e031eb1b57026594e3a0a37c7482256d460",
+      "runtimeIntegration": "8637bb3991bc36184529bec602980ec86ebe4ed9",
+      "taskBaseline": "deb294eb9d07ff491deb0ee4cfc427cb804f0dc5",
+      "issue": 153,
+      "pr": 160,
+      "prHead": "fed73338171f06690cd3f98f3fc6938b35cd9506",
+      "category": "actual-physical-mac",
+      "realTaskStarts": 1,
+      "terminalAuditCount": 1,
+      "terminalReceiptSha256": "15fc40c2f1b7c6e47d26804acf2643d01bea416d5ff94c57debc72267b46636b",
+      "events": [
+        {
+          "seq": 94,
+          "recordedAt": 1795873658704,
+          "kind": "remote.device",
+          "subject": "32159833-c928-4ab4-a1dc-a9f628ecda2b",
+          "details": {
+            "action": "pairing-started",
+            "name": "implementer 实体 Mac 任务验收",
+            "actor": "implementer",
+            "expiresAt": 1795873958704
+          }
+        },
+        {
+          "seq": 95,
+          "recordedAt": 1795873659764,
+          "kind": "remote.device",
+          "subject": "32159833-c928-4ab4-a1dc-a9f628ecda2b",
+          "details": {
+            "action": "paired",
+            "name": "implementer 实体 Mac 任务验收",
+            "actor": "implementer"
+          }
+        },
+        {
+          "seq": 106,
+          "recordedAt": 1795874954516,
+          "kind": "remote.code",
+          "subject": "32159833-c928-4ab4-a1dc-a9f628ecda2b",
+          "details": {
+            "action": "connected",
+            "direction": "from-device",
+            "device": "32159833-c928-4ab4-a1dc-a9f628ecda2b",
+            "repo": "dikkooxie/souflow",
+            "slots": 1
+          }
+        },
+        {
+          "seq": 107,
+          "recordedAt": 1795874955768,
+          "kind": "remote.code",
+          "subject": "e2e1fd31-04ea-487d-a30e-cc1a2d0157bd",
+          "details": {
+            "action": "offered",
+            "repo": "DikkooXie/souflow",
+            "issue": 153,
+            "revision": "deb294eb9d07ff491deb0ee4cfc427cb804f0dc5",
+            "device": "32159833-c928-4ab4-a1dc-a9f628ecda2b",
+            "digest": "cba7997a00188e5566a5b601556cc1a9aa36a11399f0a8e49c178d96dfcf1edc",
+            "assignedLoad": 0,
+            "slots": 1,
+            "at": 1795874955767,
+            "issueRevision": "4053719cc95c0d95d414e5e2e843d40e691708c2531c6c5ec553e34d3076bf82",
+            "planVersion": 1,
+            "batchDigest": "2914e617f7adc07f5584f95e73896a473435eb30556b54a8573634fe0fc0f385",
+            "direction": "to-device"
+          }
+        },
+        {
+          "seq": 109,
+          "recordedAt": 1795874955870,
+          "kind": "remote.code",
+          "subject": "e2e1fd31-04ea-487d-a30e-cc1a2d0157bd",
+          "details": {
+            "action": "accepted",
+            "repo": "DikkooXie/souflow",
+            "issue": 153,
+            "revision": "deb294eb9d07ff491deb0ee4cfc427cb804f0dc5",
+            "device": "32159833-c928-4ab4-a1dc-a9f628ecda2b",
+            "digest": "cba7997a00188e5566a5b601556cc1a9aa36a11399f0a8e49c178d96dfcf1edc",
+            "assignedLoad": 0,
+            "slots": 1,
+            "at": 1795874955869,
+            "issueRevision": "4053719cc95c0d95d414e5e2e843d40e691708c2531c6c5ec553e34d3076bf82",
+            "planVersion": 1,
+            "batchDigest": "2914e617f7adc07f5584f95e73896a473435eb30556b54a8573634fe0fc0f385",
+            "direction": "from-device",
+            "deviceAt": 1795874955937
+          }
+        },
+        {
+          "seq": 110,
+          "recordedAt": 1795874957760,
+          "kind": "remote.code",
+          "subject": "e2e1fd31-04ea-487d-a30e-cc1a2d0157bd",
+          "details": {
+            "action": "started",
+            "repo": "DikkooXie/souflow",
+            "issue": 153,
+            "revision": "deb294eb9d07ff491deb0ee4cfc427cb804f0dc5",
+            "device": "32159833-c928-4ab4-a1dc-a9f628ecda2b",
+            "digest": "cba7997a00188e5566a5b601556cc1a9aa36a11399f0a8e49c178d96dfcf1edc",
+            "assignedLoad": 0,
+            "slots": 1,
+            "at": 1795874957759,
+            "issueRevision": "4053719cc95c0d95d414e5e2e843d40e691708c2531c6c5ec553e34d3076bf82",
+            "planVersion": 1,
+            "batchDigest": "2914e617f7adc07f5584f95e73896a473435eb30556b54a8573634fe0fc0f385",
+            "direction": "from-device",
+            "deviceAt": 1795874957749,
+            "thread": "01a2227d-2908-7a32-ae2b-7c45aed6dd65"
+          }
+        },
+        {
+          "seq": 112,
+          "recordedAt": 1795874998614,
+          "kind": "remote.code",
+          "subject": "e2e1fd31-04ea-487d-a30e-cc1a2d0157bd",
+          "details": {
+            "action": "tested",
+            "repo": "DikkooXie/souflow",
+            "issue": 153,
+            "revision": "deb294eb9d07ff491deb0ee4cfc427cb804f0dc5",
+            "device": "32159833-c928-4ab4-a1dc-a9f628ecda2b",
+            "digest": "cba7997a00188e5566a5b601556cc1a9aa36a11399f0a8e49c178d96dfcf1edc",
+            "assignedLoad": 0,
+            "slots": 1,
+            "at": 1795874998614,
+            "issueRevision": "4053719cc95c0d95d414e5e2e843d40e691708c2531c6c5ec553e34d3076bf82",
+            "planVersion": 1,
+            "batchDigest": "2914e617f7adc07f5584f95e73896a473435eb30556b54a8573634fe0fc0f385",
+            "direction": "from-device",
+            "deviceAt": 1795874998635,
+            "thread": "01a2227d-2908-7a32-ae2b-7c45aed6dd65",
+            "patch": "3c1e3b26c9ad3f94a5ddd84b0dbfc07090268f7b691f458698c3570f6364fcea"
+          }
+        },
+        {
+          "seq": 117,
+          "recordedAt": 1795875044055,
+          "kind": "remote.code",
+          "subject": "32159833-c928-4ab4-a1dc-a9f628ecda2b",
+          "details": {
+            "action": "reconnected",
+            "direction": "from-device",
+            "device": "32159833-c928-4ab4-a1dc-a9f628ecda2b",
+            "repo": "dikkooxie/souflow",
+            "slots": 1
+          }
+        }
+      ]
+    },
+    "153-live-running.json": {
+      "at": "2026-11-28T14:12:46.821Z",
+      "progress": "已提交 PR",
+      "pulls": [
+        {
+          "number": 160,
+          "state": "OPEN",
+          "url": "https://github.com/DikkooXie/souflow/pull/160",
+          "draft": true,
+          "head": "fed73338171f06690cd3f98f3fc6938b35cd9506",
+          "baseName": "main",
+          "ci": "SUCCESS"
+        }
+      ],
+      "attempts": [
+        {
+          "id": "e2e1fd31-04ea-487d-a30e-cc1a2d0157bd",
+          "state": "tested",
+          "device": "32159833-c928-4ab4-a1dc-a9f628ecda2b",
+          "revision": "deb294eb9d07ff491deb0ee4cfc427cb804f0dc5",
+          "assignedAt": 1795874955767,
+          "receipt": {
+            "thread": "01a2227d-2908-7a32-ae2b-7c45aed6dd65",
+            "at": 1795874998635,
+            "patch": "3c1e3b26c9ad3f94a5ddd84b0dbfc07090268f7b691f458698c3570f6364fcea"
+          }
+        }
+      ],
+      "devices": [
+        {
+          "id": "23911f2a-d8f9-4ad0-8607-645e2fd6a444",
+          "online": true,
+          "ready": true,
+          "count": 0,
+          "slots": 1
+        },
+        {
+          "id": "32159833-c928-4ab4-a1dc-a9f628ecda2b",
+          "online": true,
+          "ready": true,
+          "count": 0,
+          "slots": 1
+        }
+      ]
+    },
+    "161-peer-receipts.json": [
+      {
+        "event": "observer-started",
+        "pid": 52535,
+        "at": "2026-11-28T14:07:24.284Z"
+      },
+      {
+        "event": "actual-offer-received",
+        "id": "79888211-bbe5-4c72-a0a1-adc7c2a5c265",
+        "issue": 161,
+        "revision": "deb294eb9d07ff491deb0ee4cfc427cb804f0dc5",
+        "status": 200,
+        "at": "2026-11-28T14:17:08.026Z"
+      },
+      {
+        "event": "actual-receipt-ready",
+        "id": "79888211-bbe5-4c72-a0a1-adc7c2a5c265",
+        "phase": "accepted",
+        "bodySha256": "e83bb57dc088a27164a0f99ae6675d6b23d35217aae7bd6ba06e80e33c6db0e4",
+        "at": "2026-11-28T14:17:08.053Z"
+      },
+      {
+        "event": "actual-accepted-held",
+        "id": "79888211-bbe5-4c72-a0a1-adc7c2a5c265",
+        "phase": "accepted",
+        "bodySha256": "e83bb57dc088a27164a0f99ae6675d6b23d35217aae7bd6ba06e80e33c6db0e4",
+        "at": "2026-11-28T14:17:08.054Z"
+      },
+      {
+        "event": "actual-wait-held-during-accepted",
+        "at": "2026-11-28T14:17:09.627Z"
+      },
+      {
+        "event": "actual-receipt-ready",
+        "id": "79888211-bbe5-4c72-a0a1-adc7c2a5c265",
+        "phase": "accepted",
+        "bodySha256": "e83bb57dc088a27164a0f99ae6675d6b23d35217aae7bd6ba06e80e33c6db0e4",
+        "at": "2026-11-28T14:17:15.511Z"
+      },
+      {
+        "event": "actual-accepted-held",
+        "id": "79888211-bbe5-4c72-a0a1-adc7c2a5c265",
+        "phase": "accepted",
+        "bodySha256": "e83bb57dc088a27164a0f99ae6675d6b23d35217aae7bd6ba06e80e33c6db0e4",
+        "at": "2026-11-28T14:17:15.513Z"
+      }
+    ],
+    "161-owner-revoked-before-accepted.json": {
+      "businessHead": "2f519e031eb1b57026594e3a0a37c7482256d460",
+      "runtimeIntegration": "8637bb3991bc36184529bec602980ec86ebe4ed9",
+      "taskBaseline": "deb294eb9d07ff491deb0ee4cfc427cb804f0dc5",
+      "issue": 161,
+      "attempt": "79888211-bbe5-4c72-a0a1-adc7c2a5c265",
+      "device": "23911f2a-d8f9-4ad0-8607-645e2fd6a444",
+      "actor": "bob",
+      "method": "normal-owner-personal-device-HTTP-revoke",
+      "stateBefore": "offered",
+      "status": 200,
+      "at": "2026-11-28T14:17:41.475Z"
+    },
+    "161-attempt-audit.json": [
+      {
+        "seq": 92,
+        "at": 1795873645800,
+        "subject": "23911f2a-d8f9-4ad0-8607-645e2fd6a444",
+        "details": {
+          "action": "pairing-started",
+          "name": "bob 实体 Mac 任务验收",
+          "actor": "bob",
+          "expiresAt": 1795873945800
+        }
+      },
+      {
+        "seq": 93,
+        "at": 1795873646002,
+        "subject": "23911f2a-d8f9-4ad0-8607-645e2fd6a444",
+        "details": {
+          "action": "paired",
+          "name": "bob 实体 Mac 任务验收",
+          "actor": "bob"
+        }
+      },
+      {
+        "seq": 104,
+        "at": 1795874845996,
+        "subject": "23911f2a-d8f9-4ad0-8607-645e2fd6a444",
+        "details": {
+          "action": "connected",
+          "direction": "from-device",
+          "device": "23911f2a-d8f9-4ad0-8607-645e2fd6a444",
+          "repo": "dikkooxie/souflow",
+          "slots": 1
+        }
+      },
+      {
+        "seq": 132,
+        "at": 1795875427939,
+        "subject": "79888211-bbe5-4c72-a0a1-adc7c2a5c265",
+        "details": {
+          "action": "offered",
+          "repo": "DikkooXie/souflow",
+          "issue": 161,
+          "revision": "deb294eb9d07ff491deb0ee4cfc427cb804f0dc5",
+          "device": "23911f2a-d8f9-4ad0-8607-645e2fd6a444",
+          "digest": "46b95d813d994018bc943634a34da46b066c03c10c4995613372705439e0a1c4",
+          "assignedLoad": 0,
+          "slots": 1,
+          "at": 1795875427939,
+          "issueRevision": "17d030004526e9cde170a3feead7f738d8689dd468f810eef0363ed80062668a",
+          "planVersion": 1,
+          "batchDigest": "25991afd4378f7078b031b2613f943d8dfa4599c3ee75411e1113357855d4ce3",
+          "direction": "to-device"
+        }
+      },
+      {
+        "seq": 136,
+        "at": 1795875461473,
+        "subject": "23911f2a-d8f9-4ad0-8607-645e2fd6a444",
+        "details": {
+          "action": "revoked",
+          "name": "bob 实体 Mac 任务验收",
+          "actor": "bob"
+        }
+      },
+      {
+        "seq": 137,
+        "at": 1795875461474,
+        "subject": "79888211-bbe5-4c72-a0a1-adc7c2a5c265",
+        "details": {
+          "action": "interrupted",
+          "repo": "DikkooXie/souflow",
+          "issue": 161,
+          "revision": "deb294eb9d07ff491deb0ee4cfc427cb804f0dc5",
+          "device": "23911f2a-d8f9-4ad0-8607-645e2fd6a444",
+          "digest": "46b95d813d994018bc943634a34da46b066c03c10c4995613372705439e0a1c4",
+          "assignedLoad": 0,
+          "slots": 1,
+          "at": 1795875461473,
+          "issueRevision": "17d030004526e9cde170a3feead7f738d8689dd468f810eef0363ed80062668a",
+          "planVersion": 1,
+          "batchDigest": "25991afd4378f7078b031b2613f943d8dfa4599c3ee75411e1113357855d4ce3",
+          "direction": "host"
+        }
+      }
+    ],
+    "http-2f519e03-implementer-old-credential.log": "(node:52573) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the warning was created)\n接入文件有效。\n设备 HTTPS 已响应，但接入失败（HTTP 401）。\n本机 Codex 已登录。\n",
+    "http-2f519e03-bob-old-credential.log": "(node:52572) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n(Use `node --trace-warnings ...` to show where the warning was created)\n接入文件有效。\n设备 HTTPS 已响应，但接入失败（HTTP 401）。\n本机 Codex 已登录。\n"
+  },
+  "redactions": [
+    {
+      "source": "http-2f519e03-binding.json",
+      "field": "devices[0].enrollmentFile",
+      "reason": "local enrollment file path omitted"
+    },
+    {
+      "source": "http-2f519e03-binding.json",
+      "field": "devices[1].enrollmentFile",
+      "reason": "local enrollment file path omitted"
+    }
+  ],
+  "notEstablished": [
+    "actual generated accepted released after owner revoke obtains server rejection",
+    "two independent member tasks both completed",
+    "cross-Mac PR merge handoff",
+    "first-release full acceptance"
+  ]
+}

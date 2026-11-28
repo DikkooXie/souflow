@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "repo": "DikkooXie/souflow",
+  "issue": 107,
+  "issueRevision": "1e046336ac4c24fce9f634ecf781897609bd360872b8f7d8044a3ca1fc6804bb",
+  "pull": 145,
+  "head": "2f519e031eb1b57026594e3a0a37c7482256d460",
+  "plan": {
+    "id": "5b62f311-ad41-42a8-81f3-674709117c14/development-plan",
+    "version": 14,
+    "quality": {
+      "policy": 1,
+      "flowDigest": "66213bb4244f59dd8c9b96a80858c2571f90cc7a7ce8732f4834511d4c3d6c4e",
+      "batchDigest": "125c38261d51b15a2be7b32ee952b5614f1e9cf7a6e3f14cd30c5f4e6aac3179"
+    }
+  },
+  "integration": "8637bb3991bc36184529bec602980ec86ebe4ed9",
+  "observedAt": "2026-11-28T14:25:46.919Z",
+  "expiresAt": "2026-12-05T14:25:46.919Z",
+  "verifiedBy": "souflow 验收维护者",
+  "environment": "两台实体 Mac，受保护的成员工作台和 Tailscale HTTPS，双成员配对另在固定业务头实测",
+  "publicSafe": true,
+  "files": [
+    {
+      "path": "AC3-PARTIAL-20261128.md",
+      "sha256": "116b892dbf7e7aaccd47bd61ea69cfeb9e46e6719146c90ddd57fc2c8f34ee5d"
+    },
+    {
+      "path": "8637bb39-153-pr160.png",
+      "sha256": "314de50fb4b9057cc01f3ac2268ebef3ee68c4e1ec47b753def32066a9955755"
+    },
+    {
+      "path": "8637bb39-161-interrupted.png",
+      "sha256": "d4ac9711ce5f1eafb211c345837ce156e288fa530356257327a1a6b0f6019e41"
+    },
+    {
+      "path": "http-2f519e03-same-id-permitted.png",
+      "sha256": "e2f5555b6c91f6ec23d5fb484b0d25f742e8fea71c182b2d3d1c9f46a17b218b"
+    }
+  ],
+  "results": [
+    {
+      "criterion": "AC-3",
+      "criterionDigest": "5c5ae0ab37079b608c2f94c7f04c08588ccc90a7f24c32e4511b026b04c11dbe",
+      "outcome": "partial",
+      "facts": "双成员 HTTP 实测，对方确认409、本人仍可201，跨成员撤销404、本人撤销200、旧凭据401。并发确认仅一次201、重放及自然到期409；名单外403且退出，名单更新后同一设备就绪。错主设备50秒零派发。本人 #153 在实体 Mac 上启动一次、测试并自动开 PR #160，断线45秒后同一终态回执再次获200，只有1条 tested 审计。另一工单 #161 设备真正生成受理请求，随后本人撤销200，任务启动0。但传输观察器超时，尚无撤销后放行同一请求所得的服务器拒绝响应。",
+      "files": [
+        "AC3-PARTIAL-20261128.md",
+        "8637bb39-153-pr160.png",
+        "8637bb39-161-interrupted.png",
+        "http-2f519e03-same-id-permitted.png"
+      ]
+    }
+  ]
+}
