@@ -99,7 +99,9 @@ export function createRepairContinuation(options: {
             stop("检查没有可在原批准测试内纠正的完整诊断。"); return;
           }
           const keys = [...new Set(selected.map(row => row?.key as string))].sort();
-          if (previous.rounds.some(round => round.diagnostics.some(key => keys.includes(key)))) {
+          const priorKeys = (claim.reviewFix?.testFailureNote?.split(" · ") ?? [])
+            .map(note => blockingTestDiagnostic(note.trim())?.key).filter((key): key is string => !!key);
+          if (priorKeys.some(key => keys.includes(key)) || previous.rounds.some(round => round.diagnostics.some(key => keys.includes(key)))) {
             stop("同一阻断诊断再次出现，停止自动续修。"); return;
           }
           const testFiles = [...new Set(selected.map(row => row?.path as string))];

@@ -28,7 +28,7 @@ test("正常派发入口从原批准修复单自动检查候选，有限修正�
   const oldLimit = process.env.SOULFLOW_GITHUB_REPAIR_MAX_ROUNDS;
   t.after(() => { if (oldLimit === undefined) delete process.env.SOULFLOW_GITHUB_REPAIR_MAX_ROUNDS;
     else process.env.SOULFLOW_GITHUB_REPAIR_MAX_ROUNDS = oldLimit; });
-  for (const scenario of ["different", "repeat", "budget", "configured-budget", "transient", "revoked", "changed-link", "changed-head", "outside", "info", "incomplete",
+  for (const scenario of ["different", "repeat", "prior-repeat", "budget", "configured-budget", "transient", "revoked", "changed-link", "changed-head", "outside", "info", "incomplete",
     "restart-started", "restart-preflight", "concurrent", "save-failed"] as const) await t.test(scenario, async () => {
     process.env.SOULFLOW_GITHUB_REPAIR_MAX_ROUNDS = scenario === "configured-budget" ? "2" : "3";
     const quality = { policy: 1, flowDigest: hash, batchDigest: hash };
@@ -68,7 +68,8 @@ test("正常派发入口从原批准修复单自动检查候选，有限修正�
     tracker.creation.create = async () => assert.fail("不能重新建单");
     stored.reviewRepairs = [{ id: repair.id, head, decision: "approved", at: 1, issue: 9 }];
     stored.reviewFix = { from: head, repairId: repair.id, state: "failed", testCheckFailed: true, retriedTests: true,
-      replayedDraft: { artifact: "issue-7-old", sha256: hash } };
+      replayedDraft: { artifact: "issue-7-old", sha256: hash },
+      ...(scenario === "prior-repeat" ? { testFailureNote: "隔离质量检查 · 命令失败 · 退出码 2 · tests/main.test.mts:1:1 TS1345" } : {}) };
     stored.failure = { stage: "tests", reason: "check-failed", candidateSnapshot: snapshot(0), candidatePatch: "PRIVATE PATCH", isolation: {
       step: "quality", outcome: "exit", exitCode: 1 } };
     for (let restart = 0; restart < 3; restart++) {
@@ -82,7 +83,7 @@ test("正常派发入口从原批准修复单自动检查候选，有限修正�
           if (scenario === "transient" && inspections === 1) throw Error("短暂环境故障");
           if (["restart-preflight", "concurrent"].includes(scenario) && inspections === 1) await held;
           if (scenario === "revoked") scopeCurrent = false;
-          const rule = scenario === "repeat" ? "TS1345" : `BIOME:error:lint/correctness/rule${starts}`;
+          const rule = ["repeat", "prior-repeat"].includes(scenario) ? "TS1345" : `BIOME:error:lint/correctness/rule${starts}`;
           const diagnostic = scenario === "outside" ? "src/main.mts:2:1 TS1345"
             : scenario === "info" ? "tests/main.test.mts:2:1 BIOME:info:lint/style/useTemplate"
               : `tests/main.test.mts:${starts + 2}:1 ${rule}`;
@@ -123,7 +124,7 @@ test("正常派发入口从原批准修复单自动检查候选，有限修正�
     assert.equal(stored.reviewRepairs?.[0]?.issue, 9);
     assert.deepEqual(stored.approval, approval);
     assert.ok(!JSON.stringify(events).includes("PRIVATE PATCH"));
-    if (["repeat", "budget", "configured-budget", "restart-started", "outside", "info", "incomplete", "changed-link", "revoked"].includes(scenario)) {
+    if (["repeat", "prior-repeat", "budget", "configured-budget", "restart-started", "outside", "info", "incomplete", "changed-link", "revoked"].includes(scenario)) {
       assert.ok(stored.repairContinuation?.stopped);
     }
   });
