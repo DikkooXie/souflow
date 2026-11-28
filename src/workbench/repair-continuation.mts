@@ -38,7 +38,8 @@ export function createRepairContinuation(options: {
   const maxRounds = repairContinuationLimit();
   const active = new Set<number>();
   const owns = (claim: Claim) => active.has(claim.number) || !!claim.repairContinuation
-    && claim.repairContinuation.repairId === claim.reviewFix?.repairId;
+    && claim.repairContinuation.repairId === claim.reviewFix?.repairId
+    && claim.repairContinuation.repairId === options.repair(claim)?.id;
   return {
     owns,
     enqueue(claim: Claim) {

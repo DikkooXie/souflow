@@ -9,6 +9,7 @@ import { IssueDeliveryFailed } from "../src/execution/issue-delivery.mts";
 import { createIssueDispatch, type Claim } from "../src/workbench/issue-dispatch.mts";
 import { repairFromReceipt } from "../src/workbench/delivery-review-repair.mts";
 import { createPlannedIssuePublication } from "../src/workbench/planned-issue-publication.mts";
+import { createRepairContinuation } from "../src/workbench/repair-continuation.mts";
 
 const head = "a".repeat(40), next = "b".repeat(40), hash = "c".repeat(64);
 const paths = ["src/main.mts", "tests/main.test.mts", "tests/other.test.mts"];
@@ -46,6 +47,13 @@ test("正常派发入口从原批准修复单自动检查候选，有限修正�
       deliveryReviews: [{ observed: JSON.stringify([8, head, "main", approval, revision, true, undefined]), receipt }] };
     const repair = repairFromReceipt("a/b", stored, receipt);
     assert.ok(repair && "fix" in repair);
+    if (scenario === "different") {
+      const previous: Claim = { ...stored, reviewFix: { from: head, repairId: "previous", state: "complete" },
+        repairContinuation: { head, repairId: "previous", rounds: [] } };
+      const continuation = createRepairContinuation({ current: () => previous, repair: () => repair,
+        signal: new AbortController().signal, start: assert.fail, connection: assert.fail, save: assert.fail, track: assert.fail });
+      assert.equal(continuation.owns(previous), false, "旧授权的续修记录不能挡住当前提交的新卡");
+    }
     let linked: IssueDetail | undefined;
     let published = false;
     let remotePull = { ...pull };
