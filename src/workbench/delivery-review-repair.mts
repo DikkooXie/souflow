@@ -68,7 +68,9 @@ export function repairFromReceipt(repo: string, claim: Claim, receipt: DeliveryR
 export function repairFromApproval(repo: string, claim: Claim, fix: ApprovedReviewFix): ReviewRepair | undefined {
   if (!claim.approval || !fix.testFiles?.length) return;
   const { flowId, planId, version } = claim.approval;
-  const id = createHash("sha256").update(JSON.stringify([repo.toLowerCase(), claim.requestId, claim.approval, fix])).digest("hex");
+  // 隔离检查的诊断只用于纠正原修订，不改变已发布修订单的身份或正文。
+  const { testFailureNote: _testFailureNote, ...approved } = fix;
+  const id = createHash("sha256").update(JSON.stringify([repo.toLowerCase(), claim.requestId, claim.approval, approved])).digest("hex");
   const batch: PlannedIssueBatch = { id, actor: claim.claimedBy, flowId, planId, version,
     drafts: [{ id: "REPAIR", title: `补充 #${fix.issue} 的已授权回归测试`, dependsOn: [], body: [
       `原工单 #${fix.issue} · 原 PR #${fix.pull}`,

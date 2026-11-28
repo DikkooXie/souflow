@@ -2,12 +2,13 @@ import { deliveryPath } from "../execution/local-code-changes.mts";
 
 export const approvedReviewFixInstructionLimit = 4000;
 export type ApprovedReviewFix = { issue: number; pull: number; head: string; base: string; files: string[]; instructions: string;
-  testFiles?: string[] };
+  testFiles?: string[]; testFailureNote?: string };
 const testPath = /^tests\/[\w./-]+\.test\.[cm]?[jt]s$/;
 
 export function readApprovedReviewFix(raw: string): ApprovedReviewFix {
   const value = JSON.parse(raw);
-  if (!value || typeof value !== "object" || Object.keys(value).length !== (Object.hasOwn(value, "testFiles") ? 7 : 6)
+  if (!value || typeof value !== "object" || Object.keys(value).length !== 6 + Number(Object.hasOwn(value, "testFiles"))
+      + Number(Object.hasOwn(value, "testFailureNote"))
     || ![value.issue, value.pull].every(number => Number.isSafeInteger(number) && number > 0)
     || typeof value.head !== "string" || !/^[a-f0-9]{40}$/.test(value.head)
     || typeof value.base !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,199}$/.test(value.base) || value.base.includes("..")
@@ -18,11 +19,14 @@ export function readApprovedReviewFix(raw: string): ApprovedReviewFix {
     || (value.testFiles !== undefined && (!Array.isArray(value.testFiles) || !value.testFiles.length
       || new Set([...value.files, ...value.testFiles]).size !== value.files.length + value.testFiles.length
       || value.files.length + value.testFiles.length > 16 || !value.testFiles.every((path: unknown) =>
-        typeof path === "string" && deliveryPath.test(path) && testPath.test(path))))) {
+        typeof path === "string" && deliveryPath.test(path) && testPath.test(path))))
+    || (value.testFailureNote !== undefined && (!value.testFiles || typeof value.testFailureNote !== "string"
+      || !value.testFailureNote.trim() || value.testFailureNote.length > approvedReviewFixInstructionLimit))) {
     throw Error("PR 续修需要指定 Issue、PR、提交、文件范围和维护者要求。");
   }
   return { issue: value.issue, pull: value.pull, head: value.head, base: value.base, files: value.files, instructions: value.instructions,
-    ...(value.testFiles ? { testFiles: value.testFiles } : {}) };
+    ...(value.testFiles ? { testFiles: value.testFiles } : {}),
+    ...(value.testFailureNote ? { testFailureNote: value.testFailureNote } : {}) };
 }
 
 export function readApprovedReviewFixes(raw: string): ApprovedReviewFix[] {

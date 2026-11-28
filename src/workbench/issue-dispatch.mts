@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { scrubAuditText } from "../audit/activity-store.mts";
 import type { BusinessEvent, Checkpoint } from "../audit/activity-store.mts";
 import { issueRevision, type DeliveryTracker, type IssueDetail, type IssuePull, type IssueSummary, type IssueTracker } from "../connections/issue-tracker.mts";
 import type { AccountAssignment } from "../execution/codex-account-dispatch.mts";
@@ -44,7 +45,7 @@ export type Claim = Remote & {
   claimUncertain?: boolean;
   failure?: DeliveryFailure; retryCount?: number; retriedWorkerAttempt?: string; interruptedDevelopment?: boolean;
   reviewFix?: { from: string; state: "running" | "publishing" | "complete" | "failed"; pendingHead?: string; base?: string; repairId?: string;
-    testFiles?: string[] };
+    testFiles?: string[]; retriedTests?: boolean; testFailureNote?: string };
   reviewTestFiles?: string[];
   reviewRepairs?: ReviewRepairDecision[];
   sourceHandoff?: { proof: SourceHandoff; finding: TicketSourceFinding };
@@ -328,16 +329,20 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     const repair = authorized?.repair ?? supplemental;
     const recorded = supplemental && c.reviewRepairs?.find(item => item.id === supplemental.id);
     const repeatLink = retry && supplemental && c.reviewFix?.repairId === supplemental.id && c.reviewFix.state === "failed" && !recorded?.issue;
-    if (!authorized && c.reviewFix?.from === fix.head && !repeatLink) return;
+    const repeatTests = !!(fix.testFailureNote && recorded?.issue && c.reviewFix?.from === fix.head
+      && c.reviewFix.repairId === supplemental?.id && c.reviewFix.state === "failed" && !c.reviewFix.retriedTests
+      && c.failure?.stage === "tests" && c.failure.reason === "check-failed");
+    if ((fix.testFailureNote && !repeatTests) || (!authorized && c.reviewFix?.from === fix.head && !repeatLink && !repeatTests)) return;
     const connection = memberTrackers.get(c.claimedBy) ?? tracker;
     const remote = publisher(connection);
     if (!remote?.checkoutPublished || !remote.updatePublished) return;
     const update = remote.updatePublished;
     const state = { from: fix.head, state: "running" as const, ...(repair ? { repairId: repair.id } : {}),
-      ...(fix.testFiles ? { testFiles: fix.testFiles } : {}) };
+      ...(fix.testFiles ? { testFiles: fix.testFiles } : {}),
+      ...(repeatTests && fix.testFailureNote ? { retriedTests: true, testFailureNote: scrubAuditText(fix.testFailureNote) } : {}) };
     if (supplemental && !recorded) save({ ...c, reviewRepairs: [...(c.reviewRepairs ?? []),
       { id: supplemental.id, head: fix.head, decision: "approved", at: Date.now() }] }, "review-repair-maintainer-approved");
-    save({ ...(claims.get(c.number) ?? c), reviewFix: state }, "review-fix-started");
+    save({ ...(claims.get(c.number) ?? c), reviewFix: state }, repeatTests ? "review-fix-test-retry-started" : "review-fix-started");
     const current = () => claims.get(c.number) ?? c;
     const verify = async () => {
       const [account, issue, pull] = await Promise.all([
@@ -366,7 +371,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
         }
         const prepared = await delivery.prepare({
           number: c.number, spec: { ...approved, files: [...fix.files, ...(fix.testFiles ?? [])],
-            instructions: `只处理本轮评审要求。\n${fix.instructions}` },
+            instructions: [`只处理本轮评审要求。\n${fix.instructions}`,
+              ...(state.testFailureNote ? [`上次同一修订的隔离检查诊断（仅供纠正）：${state.testFailureNote}`] : [])].join("\n") },
           branch: target.branch, upstream: [], publisher: remote, reviewTarget: { ...target, base: fix.base },
           ...(c.approval ? { flowId: c.approval.flowId, planVersion: c.approval.version } : {}),
           repairing: diagnostic => save(current(), "patch-repair", diagnostic),

@@ -191,6 +191,8 @@ node --experimental-strip-types src/workbench/code-device.mts
 
 续修已发布 PR 时，维护者可在取得补充批准后，通过 `SOULFLOW_GITHUB_REVIEW_FIX` 的 `testFiles` 指定现有的测试文件。工作台核对原审批和 PR 当前头，创建关联修复单，仅在原范围和补充测试范围内续修。复核新提交时保留补充范围，其他工单继续使用各自的审批。
 
+已关联的补充续修在完整隔离检查返回确定失败后，可通过 `testFailureNote` 补充复现诊断，沿用同一快照、PR、范围及修订 Issue 纠正一次。工作台记录本次重试后才开工，重启或再次提交同一诊断均不会重复执行。
+
 2026-11-24 使用两台实体 Mac 连接隔离的 souflow 工作台，两台设备各上报一个执行位。工作台重启后，两台设备重新连入，调度拓扑和状态接口显示两台设备在线。自动化测试另行验证指定设备派发、已失效回执、发送前重验授权和满载等待。实体双机同时完成真实工单和自动提交关联 PR 待验收。[双机连接截图](acceptance/paired-code-workers/01-two-code-devices.png)
 
 ### 调度本地代码工单
