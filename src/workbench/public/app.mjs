@@ -77,8 +77,7 @@ let requestNumber = 0;
 let latestResponse = 0;
 let live = false;
 let member;
-let snapshotLoaded = false;
-let authenticationRequired = false;
+let memberReadState = "loading";
 let acceptanceNoteMaxLength;
 let active = 0;
 let auditOpen = false;
@@ -150,14 +149,18 @@ function renderPage() {
   if (memberLabel.textContent !== label) memberLabel.textContent = label;
   personalIdentity.hidden = !member;
   if (personalIdentity.textContent !== identity) personalIdentity.textContent = identity;
-  const status = authenticationRequired ? "成员登录已失效，请重新登录。"
-    : snapshotLoaded ? "当前没有成员身份。" : "正在读取成员身份…";
+  const status = {
+    loading: "正在读取成员身份…",
+    retrying: "暂时无法读取成员身份，正在自动重试…",
+    unauthorized: "成员登录已失效，请重新登录。",
+    ready: "当前没有成员身份。",
+  }[memberReadState];
   personalStatus.hidden = !!member;
   if (personalStatus.textContent !== status) personalStatus.textContent = status;
   personalDevices.hidden = !member;
   personalDeviceList.hidden = !personalDeviceList.childElementCount;
   personalDevicesEmpty.hidden = !personalDeviceList.hidden;
-  start.hidden = authenticationRequired || member?.id === "reviewer";
+  start.hidden = memberReadState === "unauthorized" || member?.id === "reviewer";
 }
 
 function openDecisions(kind) {
@@ -570,7 +573,7 @@ function rejectAuthentication(requestId) {
   // 登录失效后，先前发出的轮询不能恢复成员状态。
   cycle += 1;
   clearMemberState();
-  authenticationRequired = true;
+  memberReadState = "unauthorized";
   member = undefined;
   requests = [];
   flows = [];
@@ -588,10 +591,9 @@ function rejectAuthentication(requestId) {
 function applySnapshot(snapshot) {
   if (snapshot.requests) {
     const nextMember = snapshot.member;
-    if (snapshotLoaded && (member?.login ?? member?.id) !== (nextMember?.login ?? nextMember?.id)) clearMemberState();
+    if (memberReadState === "ready" && (member?.login ?? member?.id) !== (nextMember?.login ?? nextMember?.id)) clearMemberState();
     member = nextMember;
-    authenticationRequired = false;
-    snapshotLoaded = true;
+    memberReadState = "ready";
     promptBox.maxLength = snapshot.inputLimits.promptMaxLength;
     answerMaxLength = snapshot.inputLimits.answerMaxLength;
     planMaxLength = snapshot.planMaxLength;
@@ -637,6 +639,11 @@ async function refresh() {
     render();
   } catch {
     if (revision !== cycle || requestId <= latestResponse) return;
+    if (memberReadState === "loading" || memberReadState === "retrying") {
+      // 首次读取失败后，较早发出的轮询不能恢复身份。
+      acceptResponse(requestId);
+      memberReadState = "retrying";
+    }
     if (!actionError) setError("无法读取会话提问，请重新加载页面。");
     if (!requests.length) render();
   } finally {

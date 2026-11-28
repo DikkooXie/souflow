@@ -53,7 +53,7 @@ async function start(t: TestContext, live?: Parameters<typeof createWorkbenchSer
   return { url, post, read, close };
 }
 
-async function loadWorkbenchPage() {
+async function loadWorkbenchPage(hash = "") {
   function element() {
     const button = { disabled: false };
     return Object.assign(new EventTarget(), {
@@ -76,7 +76,7 @@ async function loadWorkbenchPage() {
   const source = await readFile(new URL("../src/workbench/public/app.mjs", import.meta.url), "utf8");
   runInNewContext(source.replace(/^import .*;\n/gm, ""), {
     document: Object.assign(element(), { querySelector: get, createElement: element }),
-    window: new EventTarget(), location: { hash: "" }, matchMedia: () => new EventTarget(), AbortSignal,
+    window: new EventTarget(), location: { hash }, matchMedia: () => new EventTarget(), AbortSignal,
     createArchive: panel, createAuditView: panel, createDispatchPanel: panel,
     createMonitorView: panel, createGithubPanel: panel, renderDeliveryReviews() {}, renderQualityDetails() {},
     setTimeout(callback: () => void) { tick = callback; },
@@ -106,6 +106,27 @@ function memberSnapshot(login?: string, flowId?: string) {
     flows: flowId ? [{ id: flowId, title: flowId, prompt: flowId, status: "ready", outputs: [] }] : [],
   };
 }
+
+test("AC-3 直接打开个人主页时首次读取失败，重试恢复当前成员", async () => {
+  const page = await loadWorkbenchPage("#personal");
+  const status = page.get("#personal-status");
+  const identity = page.get("#personal-identity");
+  const olderSnapshot = page.take();
+  assert.equal(page.get("#personal-home").hidden, false);
+  assert.match(status.textContent, /正在读取/);
+  await page.poll()(503);
+  assert.equal(status.hidden, false);
+  assert.match(status.textContent, /无法读取.*重试/);
+  await olderSnapshot(200, memberSnapshot("alice"));
+  assert.equal(identity.hidden, true);
+  assert.equal(identity.textContent, "");
+  assert.equal(page.get("#member-label").hidden, true);
+  await page.poll()(200, memberSnapshot("bob"));
+  assert.equal(status.hidden, true);
+  assert.equal(identity.hidden, false);
+  assert.equal(identity.textContent, "bob");
+  assert.equal(page.get("#personal-devices").hidden, false);
+});
 
 test("AC-3 同一成员保留草稿，切换成员或登出清空草稿", async () => {
   const page = await loadWorkbenchPage();
