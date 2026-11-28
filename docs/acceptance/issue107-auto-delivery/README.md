@@ -16,6 +16,8 @@
 
 `dd404c59` 的新一轮复核发现，成员身份失效后，迟到的确认响应可能恢复旧下载链接。新版设备的本人首单、断线后回执去重和撤销后零开工也需要对应部署版本的真机证据。原工作台随后取得新的修复授权，创建 #154。双机试用中，实施成员已亲自批准另一张验收工单，souflow 自动创建并认领 #153。这两项分别记录为续修开工与工单认领，整体验收仍待完成。[修复 Issue #154](https://github.com/DikkooXie/souflow/issues/154) · [真机验收 Issue #153](https://github.com/DikkooXie/souflow/issues/153)
 
+后续 `2f519e0` 的纯业务头 HTTP/接入与 `8637bb3` 集成运行取得了[AC-3 部分真机证据](../ac3-partial-runtime/README.md)：#153 自动交付到草稿 PR #160、真实任务断线后同回执去重；#161 撤销成功且零开工，但放行后的拒绝未实证。#158、#162 平台已合并，原工单同头补证后的复核仍未放行，不表示首版通过。
+
 ## 原交付快照
 
 2026-11-28，原址工作台在 [`6911147f85ef0d7eff0c6697e6a856af544085de`](https://github.com/DikkooXie/souflow/commit/6911147f85ef0d7eff0c6697e6a856af544085de) 恢复原工单，主 Mac 使用本机 Codex 在独立工作区执行。原计划仍为 v14，固定目标源码为 `c458c1da5452739274de8a30658f0235df77e686`，补充范围沿用已批准的修订 `31e2fc20`。本轮执行 `b2dab1f6` 产出提交 [`dcf1dd0779bd3ce535e9236500110febacb4fc48`](https://github.com/DikkooXie/souflow/commit/dcf1dd0779bd3ce535e9236500110febacb4fc48)，由 souflow 自动创建关联 #107 的[草稿 PR #145](https://github.com/DikkooXie/souflow/pull/145)。

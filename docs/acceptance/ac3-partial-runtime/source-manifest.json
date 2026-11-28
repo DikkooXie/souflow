@@ -1,0 +1,177 @@
+{
+  "status": "partial",
+  "businessHead": "2f519e031eb1b57026594e3a0a37c7482256d460",
+  "runtimeIntegration": "8637bb3991bc36184529bec602980ec86ebe4ed9",
+  "taskBaseline": "deb294eb9d07ff491deb0ee4cfc427cb804f0dc5",
+  "issue": 107,
+  "acceptanceIssues": [
+    153,
+    161
+  ],
+  "actualResultPR": 160,
+  "files": [
+    {
+      "path": "AC3-PARTIAL-20261128.md",
+      "bytes": 5256,
+      "sha256": "116b892dbf7e7aaccd47bd61ea69cfeb9e46e6719146c90ddd57fc2c8f34ee5d"
+    },
+    {
+      "path": "http-2f519e03-binding.json",
+      "bytes": 1768,
+      "sha256": "898310f02c1e406c4c746f502869c6f296a1852348db02bb3273187da67cdaef"
+    },
+    {
+      "path": "http-2f519e03-revoked.json",
+      "bytes": 1047,
+      "sha256": "97c9da4be068d15f7b198046058748a3040b8e1cc95b61b45adcb500543449eb"
+    },
+    {
+      "path": "http-2f519e03-peer-events.json",
+      "bytes": 336,
+      "sha256": "1386c8156c4b02d71db7b9f52dd8749d28a8eca985719c2b0b8ce7e109253ef7"
+    },
+    {
+      "path": "http-concurrency.json",
+      "bytes": 480,
+      "sha256": "c963b1a4019a682833167c7a14a1d862f44d90b0283c24fc31a84805af62d8e7"
+    },
+    {
+      "path": "http-expiry-concurrency.json",
+      "bytes": 606,
+      "sha256": "a56a0beeb675f7928cf25858736855902fee1fc1066ec74523162bba402c3c96"
+    },
+    {
+      "path": "http-same-id-permitted.json",
+      "bytes": 394,
+      "sha256": "5ab7a749faa596150799585555687aaee8b3e822dcd72a1ccd9ef56c64af6c08"
+    },
+    {
+      "path": "http-concurrent-unpermitted-check.log",
+      "bytes": 275,
+      "sha256": "c2f27b561969485e118d9415aa0be83aa8df91d71c568750ad3cadd636afc34a"
+    },
+    {
+      "path": "http-concurrent-unpermitted.log",
+      "bytes": 254,
+      "sha256": "ca8b190b82430cb1255ea5ee0ce8df68b7bd139c7f7667e0eb2fa27aa362f003"
+    },
+    {
+      "path": "153-wrong-owner-waiting.json",
+      "bytes": 2011,
+      "sha256": "a4cac462d1eafb8f6745b8269f6681213a001d0963cd7513bbb0f36098d064fc"
+    },
+    {
+      "path": "153-wrong-owner-peer.json",
+      "bytes": 173,
+      "sha256": "b5a8442bb8e559b8ad45f99e61e6b11a705ae985cdd57f32b650e692efc3bd79"
+    },
+    {
+      "path": "153-recovered.json",
+      "bytes": 639,
+      "sha256": "d8b55d2311ccc1eb26405ed1a1e0b621e0daa677ae3d46348c439b1c68d51a9f"
+    },
+    {
+      "path": "153-peer-receipts.json",
+      "bytes": 2250,
+      "sha256": "0382ae5822b3540e3ecae36059a1b81d09c7669833ff0264cb1abedd17802afa"
+    },
+    {
+      "path": "153-terminal-dedup.json",
+      "bytes": 5358,
+      "sha256": "ef49fd5a284ecec780002a675650213a602b64ce8185be6cd756b679856d4cad"
+    },
+    {
+      "path": "153-live-running.json",
+      "bytes": 1097,
+      "sha256": "87049679eb4712ce450c14f92ea5766f565ce83573dcb8148b7e79efa212decd"
+    },
+    {
+      "path": "161-peer-receipts.json",
+      "bytes": 1234,
+      "sha256": "0c2b2d986f6104d38027d4cd7f3353655defab5c4be9dfabbd81e836a9011f42"
+    },
+    {
+      "path": "161-owner-revoked-before-accepted.json",
+      "bytes": 470,
+      "sha256": "da04080e32e8e8aa45821a666c79bfefe39bd4af929d203f1889ca6acbf518a6"
+    },
+    {
+      "path": "161-attempt-audit.json",
+      "bytes": 2490,
+      "sha256": "1cbff4021f50f90b3ecaa45819a18d085da9bbde64dcec550ddae4684ea2089b"
+    },
+    {
+      "path": "http-2f519e03-same-id-permitted.png",
+      "bytes": 45181,
+      "sha256": "e2f5555b6c91f6ec23d5fb484b0d25f742e8fea71c182b2d3d1c9f46a17b218b"
+    },
+    {
+      "path": "http-2f519e03-bob-owner-revoked.png",
+      "bytes": 35557,
+      "sha256": "75584339dabe2d2b7bc6259bfb2323594ca6e032764f34ecca232b61602a6dd1"
+    },
+    {
+      "path": "http-2f519e03-implementer-own-list.png",
+      "bytes": 77502,
+      "sha256": "31136be13b99e895777b126bb20e0c598c3499848e3767d59f61f63c2b468b0e"
+    },
+    {
+      "path": "http-2f519e03-implementer-owner-revoked.png",
+      "bytes": 38778,
+      "sha256": "9536f3d85ecf868e11e003acbc17e0a1aa354bf539dbf13993724899e97a264e"
+    },
+    {
+      "path": "http-2f519e03-bob-online.png",
+      "bytes": 44662,
+      "sha256": "65072cef92142f33934fffe99f8f7f9d9aeccdd62d09aa7933a3aff072d7b4e9"
+    },
+    {
+      "path": "http-2f519e03-bob-own-list.png",
+      "bytes": 73319,
+      "sha256": "4ed2a7ab2563f028c66154a94e94ee7f86d642889752d30c806cf67558bf1f0b"
+    },
+    {
+      "path": "http-2f519e03-implementer-online.png",
+      "bytes": 48397,
+      "sha256": "40f97bf8eb0d67c83944fedc107a1afb2f309488d253eeb68ff734b8f4648bfa"
+    },
+    {
+      "path": "http-2f519e03-implementer-old-credential.log",
+      "bytes": 275,
+      "sha256": "94fa485ac27d99a5090b3af5c6827d7547645ba4de86d57a80516634955c928d"
+    },
+    {
+      "path": "http-2f519e03-bob-old-credential.log",
+      "bytes": 275,
+      "sha256": "fcaf2f41dfebe98d872cb7a8b0406a8c3ed31563f51f292157f10f2b34f6d5f4"
+    },
+    {
+      "path": "8637bb39-bob-only-online.png",
+      "bytes": 55241,
+      "sha256": "ed14ae843349afb53c67982212f74ca2a9f278da315c10bee113eea46d999871"
+    },
+    {
+      "path": "8637bb39-implementer-reconnected.png",
+      "bytes": 49075,
+      "sha256": "b328a0472a5b0aa4e185ac2a11633b43699e63975497f06c7ba37e02b76568d7"
+    },
+    {
+      "path": "8637bb39-153-pr160.png",
+      "bytes": 147480,
+      "sha256": "314de50fb4b9057cc01f3ac2268ebef3ee68c4e1ec47b753def32066a9955755"
+    },
+    {
+      "path": "8637bb39-bob-task-device-revoked.png",
+      "bytes": 41244,
+      "sha256": "b490f57644b979f639cb877cb9001f6c841be63651da99f3af16666ad2cd3eba"
+    },
+    {
+      "path": "8637bb39-161-interrupted.png",
+      "bytes": 149063,
+      "sha256": "d4ac9711ce5f1eafb211c345837ce156e288fa530356257327a1a6b0f6019e41"
+    }
+  ],
+  "pending": [
+    "actual-generated-accepted-released-after-owner-revoke"
+  ]
+}
