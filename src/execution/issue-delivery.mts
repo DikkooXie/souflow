@@ -49,6 +49,7 @@ export type PrepareIssue = (input: {
   recoverCheckedHead?: string;
   failedReviewDraft?: FailedReviewDraft & { testFiles: readonly string[] };
   revalidateWorker?: (signal: AbortSignal) => Promise<void>;
+  workerOffered?: (attemptId: string) => void;
   sourceHandoff?: {
     refreshRevision?: string;
     current: (branch: string, signal: AbortSignal) => Promise<readonly SourceProducer[]>;
@@ -189,7 +190,7 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
 }): PrepareIssue {
   const { root, image, model, timeoutMs, codexAccounts, workers, startTask = startCodexReadOnlyTask } = options;
   return async ({ number, flowId, planVersion, spec, branch, upstream, publisher, previousFailure, previousCandidate,
-    reviewTarget, repairing, workerProof, revalidateWorker, sourceHandoff, recoverCheckedHead, failedReviewDraft }, connected, signal, assigned) => {
+    reviewTarget, repairing, workerProof, revalidateWorker, workerOffered, sourceHandoff, recoverCheckedHead, failedReviewDraft }, connected, signal, assigned) => {
     const runOnDevice = !!(workers && workerProof && !reviewTarget);
     const session = runOnDevice ? undefined : monitor.begin({
       title: `GitHub #${number}`, task: "开发与测试", ticketId: `#${number}`, flowId, ...(planVersion ? { planVersion } : {}),
@@ -286,7 +287,7 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
               patch: safeCandidatePatch } } : {}),
         }, signal, timeoutMs, connected, ensureCurrent, receipt =>
           !!receipt.candidatePatch && !!receipt.candidateFiles
-            && verifyCandidatePatch(editable, receipt.candidateFiles, receipt.candidatePatch));
+            && verifyCandidatePatch(editable, receipt.candidateFiles, receipt.candidatePatch), workerOffered);
         if (result.phase === "failed") throw new IssueDeliveryFailed({ stage: "device", reason: "device-failed",
           ...(result.failureStage ? { workerStage: result.failureStage } : {}), ...(result.isolation ? { isolation: result.isolation } : {}),
           ...(result.candidateDigest ? { candidateDigest: result.candidateDigest, candidateFiles: result.candidateFiles } : {}),

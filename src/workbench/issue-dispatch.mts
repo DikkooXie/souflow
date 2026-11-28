@@ -53,7 +53,8 @@ export type Claim = Remote & {
   observedReviewLink?: boolean;
   deliveryReviews?: { observed: string; receipt: DeliveryReviewReceipt }[];
   claimUncertain?: boolean;
-  failure?: DeliveryFailure; retryCount?: number; retriedWorkerAttempt?: string; interruptedDevelopment?: boolean;
+  failure?: DeliveryFailure; retryCount?: number; retriedWorkerAttempt?: string; pendingWorkerAttempt?: string;
+  recoveryDispatchAttempt?: string; interruptedDevelopment?: boolean;
   reviewFix?: { from: string; state: "running" | "publishing" | "complete" | "failed"; pendingHead?: string; base?: string; repairId?: string;
     testFiles?: string[]; retriedTests?: boolean; testFailureNote?: string; testCheckFailed?: boolean; replayedDraft?: FailedReviewDraft };
   reviewTestFiles?: string[];
@@ -116,7 +117,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       ...(c.reviewFix ? { reviewFix: c.reviewFix } : {}),
       ...(event?.startsWith("review-repair-") ? { repair: c.reviewRepairs?.at(-1) } : {}),
       ...(event === "account-assigned" ? { codexAccount: c.accountAssignment } : {}),
-      ...(event === "worker-retry-queued" || event === "worker-test-recovery-queued" ? { workerAttempt: c.retriedWorkerAttempt } : {}),
+      ...(event === "worker-retry-queued" || event === "worker-test-recovery-queued" ? { workerAttempt: c.pendingWorkerAttempt ?? c.retriedWorkerAttempt } : {}),
+      ...(event === "worker-redispatched" ? { recoveredAttempt: c.retriedWorkerAttempt, workerAttempt: c.recoveryDispatchAttempt } : {}),
       ...(event?.startsWith("dependency-source-") ? { sourceHandoff: c.sourceHandoff } : {}),
       ...(event === "approved-source-refresh" ? { sourceRefresh: c.sourceRefresh, original: c.delivery?.baseRevision } : {}),
       ...(c.pull ? { pull: c.pull.number, ci: c.pull.ci, merge: c.pull.mergeCommit, state: c.pull.state } : {}), actor: c.claimedBy, githubAccount: c.account, phase: c.phase, session: c.sessionId,
@@ -189,11 +191,17 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       oldFormat ? "patch-recovery-queued" : "retry-queued");
   }
   function queueWorkerRetry(c: Claim) {
-    if (c.sourceRefresh) return c;
+    const requested = delivery?.sourceRefresh;
+    const recoveringPending = !!c.pendingWorkerAttempt;
+    const recoveringLegacy = !recoveringPending && c.retryCount === 1 && !!c.retriedWorkerAttempt
+      && requested?.attemptId === c.retriedWorkerAttempt && ["waiting", "uncertain"].includes(c.phase)
+      && c.failure?.stage === "device" && c.failure.reason === "device-failed"
+      && ["tests", "dependencies"].includes(c.failure.workerStage ?? "");
     const needsReceipt = c.phase === "uncertain"
-      && (c.interruptedDevelopment || c.failure?.stage === "preflight" && c.failure.reason === "unavailable");
+      && (c.interruptedDevelopment || c.failure?.stage === "preflight" && c.failure.reason === "unavailable"
+        || c.failure?.stage === "device" && c.failure.reason === "device-failed");
     const recordedFailure = c.phase === "deliveryFailed" && c.failure?.stage === "device" && c.failure.reason === "device-failed";
-    if ((!needsReceipt && !recordedFailure) || !delivery?.conversation || !delivery.failedWorkerAttempt
+    if ((!recoveringPending && !recoveringLegacy && !needsReceipt && !recordedFailure) || !delivery?.conversation || !delivery.failedWorkerAttempt
       || c.claimUncertain || c.target || c.pull || c.pulls.length || !c.delivery?.baseRevision
       || !qualityBindingCurrent(c.approval?.quality) || !delivery.reviewScopeCurrent?.(c)) return c;
     const scope = workerScope(tracker.repo, c);
@@ -203,20 +211,32 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       ...(attempt.failureStage ? { workerStage: attempt.failureStage } : {}), ...(attempt.isolation ? { isolation: attempt.isolation } : {}),
       ...(attempt.candidateDigest ? { candidateDigest: attempt.candidateDigest, candidateFiles: attempt.candidateFiles } : {}),
       ...(attempt.candidatePatch ? { candidatePatch: attempt.candidatePatch, candidatePatchDigest: attempt.candidatePatchDigest } : {}) };
-    const evidenceClaim = isDeepStrictEqual(c.failure, failure) ? c : { ...c, failure };
-    if ((c.retryCount ?? 0) >= 2 || c.retriedWorkerAttempt === attempt.id
-      || !delivery.recoverDeviceTestAttempts?.has(attempt.id)
-      || !["tests", "dependencies"].includes(attempt.failureStage ?? "")) {
+    const { interruptedDevelopment: _interruptedDevelopment, ...resumable } = c;
+    const evidenceClaim = isDeepStrictEqual(c.failure, failure) && !c.interruptedDevelopment ? c : { ...resumable, failure };
+    const configMatches = requested?.attemptId === attempt.id && requested.issue === c.number
+      && requested.requestId === c.requestId && requested.version === c.approval?.version
+      && requested.issueRevision === c.approval?.issueRevision;
+    const sourceAlreadyBlocked = c.sourceRefresh?.state === "blocked" && c.sourceRefresh.revision === requested?.revision;
+    const queuedCandidate: Claim = { ...evidenceClaim, phase: "waiting", pendingWorkerAttempt: attempt.id };
+    const canRefreshSources = !!requested && matchesSourceRefresh(queuedCandidate, requested);
+    if ((!recoveringPending && !recoveringLegacy && (c.retryCount ?? 0) >= 1)
+      || (!recoveringPending && !recoveringLegacy && c.retriedWorkerAttempt === attempt.id)
+      || !delivery.recoverDeviceTestAttempts?.has(attempt.id) || !configMatches || sourceAlreadyBlocked
+      || !["tests", "dependencies"].includes(attempt.failureStage ?? "") || !canRefreshSources) {
       if (evidenceClaim !== c) save(evidenceClaim, "worker-failure-restored");
       return evidenceClaim;
     }
-    // 重试必须显式选中持久化派发 ID；进程重启只恢复证据，不凭原工单授权再次开工。
-    const queued: Claim = { ...evidenceClaim, phase: "waiting", retryCount: (c.retryCount ?? 0) + 1, retriedWorkerAttempt: attempt.id };
-    save(queued, "worker-retry-queued");
+    // 先持久化待恢复回执。源码复核真正通过并即将交给执行器时，才消耗唯一恢复机会。
+    const queued = queuedCandidate;
+    if (!recoveringPending) save(queued, recoveringLegacy ? "worker-recovery-migrated" : "worker-retry-queued");
+    else if (evidenceClaim !== c || c.phase !== "waiting") save(queued, "worker-retry-resumed");
     return queued;
   }
   for (const c of store.load()) {
     if (c.reviewFix?.state === "running") save({ ...c, reviewFix: { ...c.reviewFix, state: "failed" } }, "review-fix-interrupted");
+    else if ((c.pendingWorkerAttempt || c.retryCount === 1 && c.retriedWorkerAttempt) && c.sourceRefresh && c.phase === "developing") {
+      save({ ...c, phase: "uncertain" }, "source-refresh-restarted-before-offer");
+    }
     else if (c.sourceRefresh && c.phase === "developing" && !c.sessionId && delivery?.hasWorkerAttempt?.(tracker.repo, c.number) === false) {
       save({ ...c, phase: "uncertain" }, "dependency-source-restarted");
     }
@@ -236,6 +256,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       ...[...claims.values()].reverse().map(({ requestId: _id, account: _account, phase, delivery, pull, approval, failure,
         checked: _checked, deliveryReviews: _reviews, reviewRepairs: _repairs, sourceHandoff: _sourceHandoff, sourceRefresh: _sourceRefresh,
         observedIssueRevision: _issueRevision, observedReviewLink: _reviewLink, retriedWorkerAttempt: _retriedWorkerAttempt,
+        pendingWorkerAttempt: _pendingWorkerAttempt, recoveryDispatchAttempt: _recoveryDispatchAttempt,
         interruptedDevelopment: _interruptedDevelopment, prepared: _prepared, attemptedCheckedRecovery: _attemptedCheckedRecovery,
         reviewTestFiles: _reviewTestFiles,
         ...item }) => ({ ...item,
@@ -501,7 +522,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       const branch = c.prepared?.branch ?? `feat/${c.number}-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
       const prepared = c.prepared ?? await delivery.prepare({ number: c.number, spec, branch, publisher: remote, upstream,
         ...(recoverCheckedHead ? { recoverCheckedHead } : {}),
-        ...(c.retryCount && c.failure ? { previousFailure: c.failure } : {}),
+        ...(c.failure && (c.retryCount || c.pendingWorkerAttempt) ? { previousFailure: c.failure } : {}),
         ...(spec.sourceFrom?.length && delivery.reviewSourceHandoff ? { sourceHandoff: {
           ...(c.sourceRefresh ? { refreshRevision: c.sourceRefresh.revision } : {}),
           current: producers,
@@ -509,12 +530,21 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
             abort.signal.throwIfAborted();
             const latest = current();
             if (latest.phase !== "checkingSources" || !delivery.reviewScopeCurrent?.(latest)) throw new IssueDeliverySourcesChanged();
+            const pendingAttempt = c.pendingWorkerAttempt ?? c.retriedWorkerAttempt;
+            const recoveringAttempt = !!pendingAttempt && delivery.sourceRefresh?.attemptId === pendingAttempt;
             if (c.sourceRefresh && (latest.sourceHandoff?.finding.status !== "pass"
-              || latest.sourceHandoff.proof.execution !== c.sourceRefresh.revision || delivery.hasWorkerAttempt?.(connection.repo, c.number) !== false)) {
+              || latest.sourceHandoff.proof.execution !== c.sourceRefresh.revision
+              || (recoveringAttempt ? !delivery.hasWorkerAttempt?.(connection.repo, c.number)
+                : delivery.hasWorkerAttempt?.(connection.repo, c.number) !== false))) {
               throw new IssueDeliverySourcesChanged();
             }
+            if (recoveringAttempt && pendingAttempt) {
+              const scope = workerScope(connection.repo, latest);
+              if (!scope || delivery.failedWorkerAttempt?.(scope)?.id !== pendingAttempt
+                || !delivery.recoverDeviceTestAttempts?.has(pendingAttempt)) throw new IssueDeliverySourcesChanged();
+            }
             save({ ...latest, ...(c.sourceRefresh ? { sourceRefresh: { ...c.sourceRefresh, state: "passed", woken: true } } : {}),
-              phase: "developing" }, c.retriedWorkerAttempt ? "worker-redispatched" : c.sourceRefresh?.woken ? "source-refresh-resumed" : "woken");
+              phase: "developing" }, recoveringAttempt ? "source-refresh-reviewed" : c.sourceRefresh?.woken ? "source-refresh-resumed" : "woken");
           },
           async review(proof: SourceHandoff, sources: Record<string, string>, signal: AbortSignal) {
             const finding = await delivery.reviewSourceHandoff?.(current(), proof, sources, signal);
@@ -533,8 +563,27 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
               || (delivery.reviewScopeCurrent && !delivery.reviewScopeCurrent(current()))) {
               throw new IssueVerificationUncertain("needs-reconciliation");
             }
+            const claim = current();
+            if (claim.pendingWorkerAttempt) {
+              const recoveryScope = workerScope(connection.repo, claim);
+              const sourceReady = claim.phase === "checkingSources" && claim.sourceRefresh?.state === "reviewing"
+                && claim.sourceHandoff?.finding.status === "pass"
+                || claim.phase === "developing" && claim.sourceRefresh?.state === "passed";
+              if (!recoveryScope || delivery.failedWorkerAttempt?.(recoveryScope)?.id !== claim.pendingWorkerAttempt
+                || !delivery.recoverDeviceTestAttempts?.has(claim.pendingWorkerAttempt)
+                || !sourceReady) throw new IssueDeliverySourcesChanged();
+            }
             signal.throwIfAborted();
           } } : {}),
+        ...(c.pendingWorkerAttempt ? { workerOffered: attemptId => {
+          const pendingAttempt = c.pendingWorkerAttempt;
+          const latest = current();
+          if (!pendingAttempt || latest.pendingWorkerAttempt !== pendingAttempt || latest.phase !== "developing"
+            || latest.sourceRefresh?.state !== "passed") throw new IssueDeliverySourcesChanged();
+          const { pendingWorkerAttempt: _pendingWorkerAttempt, ...confirmed } = latest;
+          save({ ...confirmed, retriedWorkerAttempt: pendingAttempt, recoveryDispatchAttempt: attemptId,
+            retryCount: 1 }, "worker-redispatched");
+        } } : {}),
         ...(c.approval ? { flowId: c.approval.flowId, planVersion: c.approval.version } : {}) },
         sessionId => { if (current().sessionId !== sessionId) save({ ...current(), sessionId }, "connected"); }, abort.signal,
         accountAssignment => save({ ...current(), accountAssignment }, "account-assigned"));
@@ -584,11 +633,29 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     dispatchReviewFix(retryRepairs);
     for (const item of claims.values()) {
       if (jobs.size >= maxActive) break;
+      if (deliveries.has(item.number)) continue;
       const c = queueWorkerRetry(item);
-      if (deliveries.has(c.number) || !c.delivery || c.requestId === pending?.id) continue;
-      const refresh = !startedSourceRefresh && delivery.sourceRefresh && matchesSourceRefresh(c, delivery.sourceRefresh)
+      if (!c.delivery || c.requestId === pending?.id) continue;
+      const requestedRecoveryAttempt = delivery.sourceRefresh?.attemptId;
+      const claimTracker = memberTrackers.get(c.claimedBy) ?? tracker;
+      const recoveryScope = c.pendingWorkerAttempt ? workerScope(claimTracker.repo, c) : undefined;
+      const pendingRecoveryReady = !c.pendingWorkerAttempt || (!!requestedRecoveryAttempt
+        && requestedRecoveryAttempt === c.pendingWorkerAttempt
+        && delivery.recoverDeviceTestAttempts?.has(c.pendingWorkerAttempt)
+        && recoveryScope
+        && delivery.failedWorkerAttempt?.(recoveryScope)?.id === c.pendingWorkerAttempt);
+      const refresh = !startedSourceRefresh && pendingRecoveryReady && delivery.sourceRefresh && matchesSourceRefresh(c, delivery.sourceRefresh)
         && delivery.reviewScopeCurrent?.(c) && delivery.reviewSourceHandoff
-        && delivery.hasWorkerAttempt?.(tracker.repo, c.number) === false ? delivery.sourceRefresh : undefined;
+        && (delivery.sourceRefresh.attemptId ? c.pendingWorkerAttempt === delivery.sourceRefresh.attemptId
+          : delivery.hasWorkerAttempt?.(tracker.repo, c.number) === false) ? delivery.sourceRefresh : undefined;
+      // 旧版重派记录没有单独的 pending 标记。无论当前失败阶段或重试计数如何，
+      // 只要旧尝试尚未确认完成源码复核后的新派发，就不能落入普通派发路径。
+      const legacyRecovery = !c.recoveryDispatchAttempt && ["waiting", "uncertain"].includes(c.phase)
+        && !!c.retriedWorkerAttempt;
+      if ((c.pendingWorkerAttempt || legacyRecovery) && !refresh) {
+        if (c.phase !== "uncertain") save({ ...c, phase: "uncertain" }, "worker-recovery-configuration-required");
+        continue;
+      }
       const recoverCheckedHead = c.phase === "deliveryFailed" && !c.attemptedCheckedRecovery && !c.target && !c.pull && !c.pulls.length
         && c.failure?.stage === "preflight" && c.failure.reason === "unavailable" && !c.delivery.dependsOn.length
         && delivery.reviewScopeCurrent?.(c) ? delivery.recoverCheckedHeads?.[String(c.number)] : undefined;
@@ -614,7 +681,14 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       deliveries.add(c.number);
       const job = develop(selected, c.delivery, upstream.map(pull => pull?.mergeCommit ?? ""), recoverCheckedHead);
       jobs.add(job);
-      void job.finally(() => { jobs.delete(job); deliveries.delete(c.number); });
+      void job.finally(() => {
+        jobs.delete(job);
+        deliveries.delete(c.number);
+        const pending = claims.get(c.number)?.pendingWorkerAttempt;
+        const scope = workerScope(tracker.repo, c);
+        if (refresh?.attemptId && pending === refresh.attemptId && scope
+          && delivery.failedWorkerAttempt?.(scope)?.id === refresh.attemptId) startedSourceRefresh = false;
+      });
     }
   }
   let polling: Promise<void> | undefined;
