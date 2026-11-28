@@ -115,6 +115,59 @@ test("AC-3 同一设备未就绪或满载时无新任务，恢复空位后继续
   assert.equal(audit.filter(event => (event.details as { action?: string })?.action === "offered").length, 2);
 });
 
+test("设备恢复次数只在派发记录落库后确认", async t => {
+  const { checkpoint } = database();
+  const pool = createCodeWorkerPool(checkpoint, new Set([first.id]));
+  const stop = new AbortController();
+  t.after(() => { stop.abort(); pool.close(); });
+  let recorded = false;
+  const waiting = pool.poll(first, stop.signal);
+  const execution = pool.execute(work, stop.signal, 2000, () => {}, revalidate, undefined, attemptId => {
+    recorded = true;
+    assert.equal(checkpoint.load()[0]?.id, attemptId);
+    assert.equal(checkpoint.load()[0]?.state, "offered");
+  });
+  const result = await waiting;
+  assert.ok(result.status === 200 && result.offer);
+  assert.equal(recorded, true);
+  assert.equal(pool.receipt(first, { id: result.offer.id, digest: result.offer.digest, at: Date.now(), phase: "accepted" }), 200);
+  assert.equal(pool.receipt(first, { id: result.offer.id, digest: result.offer.digest, at: Date.now(), phase: "started", thread: "thread" }), 200);
+  assert.equal(pool.receipt(first, { id: result.offer.id, digest: result.offer.digest, at: Date.now(), phase: "tested", output: "ok", patch: contentDigest("patch") }), 200);
+  await execution;
+});
+
+test("恢复回执落库失败会撤销未发送的 offer 并释放设备位", async t => {
+  const storage = database();
+  const checkpoint: Checkpoint<WorkerAttempt> = { load: storage.checkpoint.load, save(id, row, event) {
+    if (row.state === "cancelled") return false;
+    return storage.checkpoint.save(id, row, event);
+  } };
+  const previous: WorkerAttempt = { id: randomUUID(), device: first.id, name: first.name, instance: first.instance,
+    repo, issue: work.issue, revision: work.revision, digest, issueRevision: work.issueRevision, flowId: work.plan.flowId,
+    state: "failed", assignedAt: 1, updatedAt: 2, plan: work.plan, slots: first.slots, assignedLoad: 0, weight: 1,
+    files: work.files, receipt: { digest, at: 2, failureStage: "tests" } };
+  assert.equal(checkpoint.save(previous.id, previous), true);
+  const pool = createCodeWorkerPool(checkpoint, new Set([first.id]));
+  const stop = new AbortController();
+  t.after(() => { stop.abort(); pool.close(); });
+  const waiting = pool.poll(first, stop.signal);
+  await assert.rejects(pool.execute(work, stop.signal, 2000, () => {}, revalidate, undefined, () => {
+    throw Error("模拟工单恢复状态写库失败");
+  }), /模拟工单恢复状态写库失败/);
+  assert.equal(checkpoint.load().find(attempt => attempt.id !== previous.id)?.state, "offered");
+  assert.equal(pool.snapshot().attempts.find(attempt => attempt.id !== previous.id)?.state, "cancelled");
+  assert.equal(pool.failedAttempt(work)?.id, previous.id);
+
+  const next = pool.execute({ ...work, issue: 11 }, stop.signal, 2000, () => {}, revalidate);
+  const result = await waiting;
+  assert.ok(result.status === 200 && result.offer);
+  assert.equal(result.offer.work.issue, 11);
+  assert.equal(pool.receipt(first, { id: result.offer.id, digest: result.offer.digest, at: Date.now(), phase: "accepted" }), 200);
+  assert.equal(pool.receipt(first, { id: result.offer.id, digest: result.offer.digest, at: Date.now(), phase: "started", thread: "thread" }), 200);
+  assert.equal(pool.receipt(first, { id: result.offer.id, digest: result.offer.digest, at: Date.now(), phase: "tested", output: "ok", patch: contentDigest("patch") }), 200);
+  await next;
+});
+
 test("等待设备不消耗已派发任务的执行和失败回执宽限", async t => {
   const config = readCodeWorkerConfig({ SOULFLOW_CODE_WORKER_RECEIPT_GRACE_MS: "1000" });
   const pool = createCodeWorkerPool(database().checkpoint, new Set([first.id]), config);

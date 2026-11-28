@@ -21,8 +21,19 @@ import { type Claim, createIssueDispatch } from "../src/workbench/issue-dispatch
 import { createPlannedIssuePublication, type IssuePublication } from "../src/workbench/planned-issue-publication.mts";
 import { repairFromApproval, repairFromReceipt } from "../src/workbench/delivery-review-repair.mts";
 import { readApprovedReviewFix, readApprovedReviewFixes } from "../src/workbench/approved-review-fix.mts";
+import { readApprovedSourceRefresh } from "../src/workbench/approved-source-refresh.mts";
 
 const spec = { files: ["src/main.mts"], instructions: "修改校验逻辑。", dependsOn: [] };
+
+test("源码复核恢复配置只接受绑定到原工单的一次性派发 ID", () => {
+  const input = { issue: 7, requestId: "00000000-0000-4000-8000-000000000001", version: 14,
+    issueRevision: "a".repeat(64), revision: "b".repeat(40) };
+  assert.deepEqual(readApprovedSourceRefresh(JSON.stringify(input)), input);
+  const attemptId = "00000000-0000-4000-8000-000000000002";
+  assert.deepEqual(readApprovedSourceRefresh(JSON.stringify({ ...input, attemptId })), { ...input, attemptId });
+  assert.throws(() => readApprovedSourceRefresh(JSON.stringify({ ...input, attemptId: "not-an-id" })), /源码复核续派/);
+  assert.throws(() => readApprovedSourceRefresh(JSON.stringify({ ...input, extra: true })), /源码复核续派/);
+});
 
 test("补充续修配置仅允许明确的测试文件，拒绝混入源码或重复文件", () => {
   const input = { issue: 7, pull: 8, head: "a".repeat(40), base: "main", files: spec.files, instructions: "补测试" };
@@ -1055,14 +1066,15 @@ test("确有设备失败回执的已授权工单只重试一次，仍复核授�
   const approval = { flowId: "flow", planId: "plan", version: 4, issueRevision: issueRevision(issue), quality };
   for (const scenario of ["old", "current", "restart-before-failure-save", "restart-without-receipt", "missing-receipt",
     "stale-approval", "changed-issue", "linked-pr", "already-pushed", "recovery-configured", "recovery-other-attempt",
-    "recovery-previous-attempt", "recovery-codex-failure", "recovery-diagnostics", "recovery-exhausted"] as const) {
+    "recovery-previous-attempt", "recovery-codex-failure", "recovery-diagnostics", "recovery-exhausted", "evidence-without-recovery-config"] as const) {
     await t.test(scenario, async () => {
       const events: { action?: string; workerAttempt?: string }[] = [];
       let prepares = 0;
       let stored: Claim = { ...issue, syncedAt: 0, requestId: "approval", claimedBy: "member", account: "member",
-        phase: scenario === "current" ? "waiting" : scenario.startsWith("restart-") ? "developing" : "uncertain",
+        phase: scenario === "current" ? "waiting" : scenario.startsWith("restart-") || scenario === "evidence-without-recovery-config" ? "developing" : "uncertain",
         delivery: { ...spec, baseRevision }, approval,
-        ...(!scenario.startsWith("restart-") ? { failure: { stage: "preflight", reason: "unavailable" } } : {}),
+        ...(!scenario.startsWith("restart-") && scenario !== "evidence-without-recovery-config"
+          ? { failure: { stage: "preflight", reason: "unavailable" } } : {}),
         ...(scenario === "already-pushed" ? { target: { branch: "feat/7-existing", head: baseRevision } } : {}) };
       const observed = structuredClone(issue);
       if (scenario === "changed-issue") observed.body = "另一个版本";
@@ -1128,13 +1140,18 @@ test("确有设备失败回执的已授权工单只重试一次，仍复核授�
           }
         } finally { await dispatch.close(); }
       }
-      assert.equal(prepares, ["restart-before-failure-save", "recovery-configured", "recovery-diagnostics"].includes(scenario) ? 1 : scenario === "current" ? 1 : 0);
+      assert.equal(prepares, scenario === "current" ? 1 : 0);
       const retries = events.filter(event => event.action === "worker-retry-queued");
-      assert.equal(retries.length, ["restart-before-failure-save", "recovery-configured", "recovery-diagnostics"].includes(scenario) ? 1 : 0);
-      if (retries.length) assert.equal(retries[0]?.workerAttempt, "confirmed-attempt");
+      assert.equal(retries.length, 0);
       if (scenario === "recovery-exhausted") {
         assert.equal(stored.retryCount, 2);
         assert.deepEqual(stored.failure?.isolation?.diagnostics, ["src/example.mts:3:4 TS2322"]);
+      }
+      if (scenario === "evidence-without-recovery-config") {
+        assert.equal(stored.failure?.stage, "device");
+        assert.equal(stored.failure?.workerStage, "tests");
+        assert.equal(stored.interruptedDevelopment, undefined);
+        assert.equal(stored.phase, "uncertain");
       }
     });
   }
@@ -1155,21 +1172,54 @@ test("当前主干复核续派沿用原工单，重复刷新及重启只开工�
     state: "OPEN", assignees: ["member"], pulls: [] };
   const approval = (issue: IssueDetail) => ({ flowId: "original-flow", planId: "original-plan", version: 14, issueRevision: issueRevision(issue), quality });
   const sourceRefresh = { issue: 2, requestId, version: 14, issueRevision: issueRevision(downstream), revision };
-  for (const scenario of ["passed", "prior-offer", "scope-changed", "source-block", "issue-changed", "restart-before-offer", "transient-review"] as const) {
+  for (const scenario of ["passed", "prior-offer", "scope-changed", "source-block", "issue-changed", "restart-before-offer", "transient-review",
+    "recovery-after-worker-failure", "recovery-wrong-attempt", "recovery-no-paired-config", "recovery-newer-attempt",
+    "recovery-transient-review", "recovery-restarted-after-review", "recovery-legacy-waiting", "recovery-legacy-no-paired-config",
+    "recovery-legacy-newer-attempt", "recovery-legacy-retry-exhausted", "recovery-legacy-independent", "recovery-pending-revoked",
+    "recovery-source-block", "recovery-publish-read-retry"] as const) {
     await t.test(scenario, async () => {
+      const attemptId = "00000000-0000-4000-8000-000000000002";
+      const requestedRefresh = scenario.startsWith("recovery-")
+        ? { ...sourceRefresh, ...(!["recovery-no-paired-config", "recovery-legacy-no-paired-config"].includes(scenario) ? { attemptId:
+          scenario === "recovery-wrong-attempt" ? "00000000-0000-4000-8000-000000000003" : attemptId } : {}) }
+        : sourceRefresh;
       const records = new Map<string, Claim>();
       const make = (row: IssueDetail) => ({ ...row, requestId, claimedBy: "member", account: "member", syncedAt: 0, approval: approval(row) });
       records.set("1", { ...make(upstream), phase: "submitted", target: { branch: "feat/upstream", head }, pull: merged,
         delivery: { ...spec, files: [source], baseRevision } });
-      records.set("2", { ...make(downstream), phase: "uncertain", failure: { stage: "preflight", reason: "unavailable" },
-        delivery: { ...spec, baseRevision, dependsOn: [1], sourcePaths: [source], sourceFrom: [{ path: source, issue: 1 }] },
-        ...(scenario === "restart-before-offer" ? { phase: "developing", sourceRefresh: { revision, state: "passed", woken: true } } : {}) });
+      const recovery = scenario.startsWith("recovery-");
+      const preReviewRestart = scenario === "recovery-restarted-after-review";
+      const legacyWaiting = ["recovery-legacy-waiting", "recovery-legacy-no-paired-config", "recovery-legacy-newer-attempt",
+        "recovery-legacy-retry-exhausted", "recovery-legacy-independent"].includes(scenario);
+      const revokedPending = scenario === "recovery-pending-revoked";
+      records.set("2", { ...make(downstream), phase: preReviewRestart ? "developing"
+        : legacyWaiting ? "waiting" : recovery ? "deliveryFailed" : "uncertain",
+        failure: scenario.startsWith("recovery-") ? { stage: "device", reason: "device-failed",
+          workerStage: scenario === "recovery-legacy-newer-attempt" ? "codex" : "tests" }
+          : { stage: "preflight", reason: "unavailable" },
+        ...(preReviewRestart || revokedPending ? { pendingWorkerAttempt: attemptId } : {}),
+        ...(legacyWaiting ? { retryCount: scenario === "recovery-legacy-retry-exhausted" ? 2 : 1, retriedWorkerAttempt: attemptId } : {}),
+        delivery: { ...spec, baseRevision, dependsOn: [1], sourcePaths: [source],
+          ...(scenario === "recovery-legacy-independent" ? {} : { sourceFrom: [{ path: source, issue: 1 }] }) },
+        ...(scenario.startsWith("recovery-") ? { ...(preReviewRestart ? {} : { sessionId: "previous-session" }),
+          sourceRefresh: { revision: preReviewRestart ? revision : "e".repeat(40), state: "passed" as const, woken: true } }
+          : scenario === "restart-before-offer" ? { phase: "developing", sourceRefresh: { revision, state: "passed" as const, woken: true } } : {}) });
       const events: string[] = [];
       let starts = 0;
       let publications = 0;
+      let transientReviewThrown = false;
+      let restartAfterReviewThrown = false;
+      let workerWasOffered = false;
+      let failPublishRead = true;
       const childPull: IssuePull = { number: 11, state: "OPEN", baseName: "main", head: revision, url: "https://github.com/a/b/pull/11" };
-      const tracker: DeliveryTracker = { repo: "a/b", candidates: async () => [], read: async number => number === 1 ? upstream
-        : { ...downstream, ...(scenario === "issue-changed" ? { body: "未批准的需求变更" } : {}), pulls: publications ? [childPull] : [] },
+      const tracker: DeliveryTracker = { repo: "a/b", candidates: async () => [], read: async number => {
+        if (scenario === "recovery-publish-read-retry" && number === 2 && workerWasOffered && failPublishRead) {
+          failPublishRead = false;
+          throw Error("模拟一次 GitHub 回读失败");
+        }
+        return number === 1 ? upstream
+          : { ...downstream, ...(scenario === "issue-changed" ? { body: "未批准的需求变更" } : {}), pulls: publications ? [childPull] : [] };
+      },
         account: async () => "member", assign: async () => assert.fail("不能重新认领"), delivery: {
           checkout: async () => { throw Error("本用例隔离调度状态"); },
           find: async branch => branch === "feat/upstream" ? merged : publications ? childPull : undefined,
@@ -1182,22 +1232,45 @@ test("当前主干复核续派沿用原工单，重复刷新及重启只开工�
           if (action) events.push(action);
           return true;
         } }, async () => assert.fail("不能改走只读核验"), () => true, 2, new Map(), {
-          specs: new Map(), conversation: true, requireQuality: true, pollMs: 60_000, sourceRefresh,
-          hasWorkerAttempt: () => scenario === "prior-offer" || starts > 0,
+          specs: new Map(), conversation: true, requireQuality: true, pollMs: 60_000, sourceRefresh: requestedRefresh,
+          ...(["recovery-after-worker-failure", "recovery-wrong-attempt", "recovery-transient-review", "recovery-no-paired-config",
+            "recovery-newer-attempt", "recovery-restarted-after-review", "recovery-legacy-waiting", "recovery-legacy-no-paired-config",
+            "recovery-legacy-newer-attempt", "recovery-legacy-retry-exhausted", "recovery-legacy-independent", "recovery-pending-revoked",
+            "recovery-source-block", "recovery-publish-read-retry"].includes(scenario) ? {
+            recoverDeviceTestAttempts: new Set(scenario === "recovery-pending-revoked" ? [] : [attemptId]),
+          failedWorkerAttempt: () => ({ id: ["recovery-newer-attempt", "recovery-legacy-newer-attempt"].includes(scenario)
+            ? "00000000-0000-4000-8000-000000000004" : attemptId,
+            failureStage: scenario === "recovery-legacy-newer-attempt" ? "codex" as const : "tests" as const }),
+          } : {}),
+          hasWorkerAttempt: () => scenario.startsWith("recovery-") || scenario === "prior-offer" || starts > 0,
           reviewScopeCurrent: () => scenario !== "scope-changed",
-          reviewSourceHandoff: async () => ({ status: scenario === "source-block" ? "block" : "pass", ticket: "T3",
+          reviewSourceHandoff: async () => ({ status: ["source-block", "recovery-source-block"].includes(scenario) ? "block" : "pass", ticket: "T3",
             revision, paths: [source], sourceDigest: quality.flowDigest, summary: "引用原工单的固定源码",
             evidence: [{ ref: `repo:${source}`, quote: "approved source" }] }),
-          async prepare({ spec: received, sourceHandoff: refresh, upstream: merges, branch }, connected, signal) {
+          async prepare({ spec: received, sourceHandoff: refresh, upstream: merges, branch, previousFailure, workerOffered, revalidateWorker }, connected, signal) {
             assert.ok(refresh);
             assert.equal(received.baseRevision, baseRevision);
             assert.equal(refresh.refreshRevision, revision);
             assert.deepEqual(merges, [mergeCommit]);
-            if (scenario === "transient-review" && restart === 0) throw Error("短时读取错误");
+            if (scenario === "recovery-after-worker-failure") assert.equal(previousFailure?.workerStage, "tests");
+            if (["transient-review", "recovery-transient-review"].includes(scenario) && !transientReviewThrown) {
+              transientReviewThrown = true;
+              throw Error("短时读取错误");
+            }
             const producers = await refresh.current("main", signal);
             await refresh.review({ original: baseRevision, execution: revision, producers, changedPaths: [source], blobs: [], refreshed: true },
               { [source]: "approved source" }, signal);
+            await revalidateWorker?.(signal);
             refresh.ready();
+            if (scenario === "recovery-restarted-after-review" && !restartAfterReviewThrown) {
+              restartAfterReviewThrown = true;
+              throw Error("模拟复核通过后、派发前重启");
+            }
+            await revalidateWorker?.(signal);
+            if (workerOffered) {
+              workerOffered("new-attempt-id");
+              workerWasOffered = true;
+            }
             starts++;
             connected("original-model-session");
             return { workspace: "fixture", base: "main", branch, head: revision, executionRevision: revision };
@@ -1206,15 +1279,49 @@ test("当前主干复核续派沿用原工单，重复刷新及重启只开工�
         try { for (let count = 0; count < 3; count++) { await dispatch.refresh(); await setImmediate(); } }
         finally { await dispatch.close(); }
       }
-      const expected = ["passed", "restart-before-offer", "transient-review"].includes(scenario) ? 1 : 0;
+      const expected = ["passed", "restart-before-offer", "transient-review", "recovery-after-worker-failure", "recovery-transient-review",
+        "recovery-restarted-after-review", "recovery-legacy-waiting", "recovery-publish-read-retry"].includes(scenario) ? 1 : 0;
       assert.equal(starts, expected);
       assert.equal(publications, expected);
-      assert.equal(events.filter(action => action === "woken").length, scenario === "restart-before-offer" ? 0 : expected);
-      assert.equal(events.filter(action => action === "source-refresh-resumed").length, scenario === "restart-before-offer" ? 1 : 0);
+      if (!scenario.startsWith("recovery-")) assert.equal(events.filter(action => action === "woken").length,
+        scenario === "restart-before-offer" ? 0 : expected);
+      assert.equal(events.filter(action => action === "source-refresh-resumed").length,
+        scenario === "restart-before-offer" ? 1 : 0);
+      assert.equal(events.filter(action => action === "worker-redispatched").length,
+        ["recovery-after-worker-failure", "recovery-transient-review", "recovery-restarted-after-review", "recovery-legacy-waiting",
+          "recovery-publish-read-retry"].includes(scenario) ? 1 : 0);
       assert.equal(events.filter(action => action === "approved-source-refresh").length,
-        ["transient-review", "issue-changed"].includes(scenario) ? 2 : ["scope-changed", "prior-offer"].includes(scenario) ? 0 : 1);
+        ["transient-review", "issue-changed"].includes(scenario) ? 2
+          : ["recovery-transient-review", "recovery-restarted-after-review"].includes(scenario) ? 2
+            : ["scope-changed", "prior-offer", "recovery-wrong-attempt", "recovery-no-paired-config", "recovery-newer-attempt",
+              "recovery-legacy-no-paired-config", "recovery-legacy-newer-attempt", "recovery-legacy-retry-exhausted",
+              "recovery-legacy-independent", "recovery-pending-revoked"].includes(scenario) ? 0 : 1);
+      assert.equal(events.filter(action => action === "worker-retry-queued").length,
+        ["recovery-after-worker-failure", "recovery-transient-review", "recovery-source-block", "recovery-publish-read-retry"].includes(scenario) ? 1 : 0);
+      assert.equal(events.filter(action => action === "worker-recovery-migrated").length,
+        scenario === "recovery-legacy-waiting" ? 1 : 0);
+      if (["recovery-legacy-newer-attempt", "recovery-legacy-retry-exhausted", "recovery-legacy-independent",
+        "recovery-pending-revoked"].includes(scenario)) {
+        assert.equal(starts, 0);
+        assert.equal(publications, 0);
+        assert.equal(records.get("2")?.phase, "uncertain");
+        assert.equal(events.filter(action => action === "worker-recovery-configuration-required").length, 1);
+        assert.equal(events.filter(action => action === "worker-retry-resumed").length, 0);
+      }
+      if (["recovery-after-worker-failure", "recovery-transient-review", "recovery-restarted-after-review", "recovery-legacy-waiting"].includes(scenario)) {
+        assert.equal(records.get("2")?.retriedWorkerAttempt, attemptId);
+        assert.equal(records.get("2")?.recoveryDispatchAttempt, "new-attempt-id");
+        assert.equal(records.get("2")?.pendingWorkerAttempt, undefined);
+        assert.equal(records.get("2")?.retryCount, 1);
+        assert.equal(records.get("2")?.sourceRefresh?.revision, revision);
+      }
       assert.deepEqual(records.get("2")?.approval, approval(downstream));
       assert.equal(records.get("2")?.delivery?.baseRevision, baseRevision);
+      if (scenario === "recovery-source-block") {
+        assert.equal(records.get("2")?.phase, "uncertain");
+        assert.equal(events.filter(action => action === "dependency-source-block").length, 1);
+        assert.equal(events.filter(action => action === "worker-retry-resumed").length, 0);
+      }
     });
   }
 });

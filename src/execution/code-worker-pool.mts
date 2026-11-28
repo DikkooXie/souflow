@@ -6,7 +6,7 @@ import { contentDigest, type CandidateFile, type CodeOffer, type CodeReceipt, ty
 import type { IsolationEvidence } from "./isolation-evidence.mts";
 import { IssueVerificationUncertain } from "./issue-verification.mts";
 
-type State = "offered" | CodeReceipt["phase"];
+type State = "offered" | CodeReceipt["phase"] | "cancelled";
 export type WorkerFailureScope = Pick<CodeWork, "repo" | "issue" | "issueRevision" | "plan">;
 export type WorkerAttempt = {
   id: string; device: string; name: string; instance: string; repo: string; issue: number; revision: string;
@@ -71,7 +71,7 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
   }
 
   function latestForScope(scope: WorkerFailureScope) {
-    const latest = [...attempts.values()].reverse().find(row =>
+    const latest = [...attempts.values()].reverse().find(row => row.state !== "cancelled" &&
       row.repo.toLowerCase() === scope.repo.toLowerCase() && row.issue === scope.issue);
     if (latest?.receipt && latest.issueRevision === scope.issueRevision
       && latest.plan.flowId === scope.plan.flowId && latest.plan.version === scope.plan.version
@@ -81,7 +81,8 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
   return {
     config,
     permits: (id: string) => allowed.has(id),
-    hasAttempt: (repo: string, issue: number) => [...attempts.values()].some(row => row.repo.toLowerCase() === repo.toLowerCase() && row.issue === issue),
+    hasAttempt: (repo: string, issue: number) => [...attempts.values()].some(row => row.state !== "cancelled"
+      && row.repo.toLowerCase() === repo.toLowerCase() && row.issue === issue),
     failedAttempt(scope: WorkerFailureScope) {
       // 按持久化派发顺序检查最后一次。同一工单有更新的尝试时，不能凭旧回执再次派发。
       const latest = latestForScope(scope);
@@ -170,7 +171,8 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
     },
     async execute(work: CodeWork, signal: AbortSignal, timeoutMs: number, started: (thread: string) => void,
       revalidate: (signal: AbortSignal) => Promise<void>,
-      verifyCandidate?: (receipt: Extract<CodeReceipt, { phase: "failed" }>) => boolean) {
+      verifyCandidate?: (receipt: Extract<CodeReceipt, { phase: "failed" }>) => boolean,
+      offered?: (attemptId: string) => void) {
       if (!validCodeWork(work, config)) throw Error("已批准的远端工单上下文无效。");
       const availabilityDeadline = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
       const weight = work.files.length;
@@ -199,10 +201,22 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
         const offer = { id, digest, version: workerProtocolVersion, work };
         if (Buffer.byteLength(JSON.stringify({ offer })) > config.messageBytes) throw Error("工单上下文超过设备接收上限。");
         const assignedAt = now();
-        if (!save({ id, device: device.id, name: device.name, instance: device.instance, repo: work.repo, issue: work.issue,
+        const attempt: WorkerAttempt = { id, device: device.id, name: device.name, instance: device.instance, repo: work.repo, issue: work.issue,
           revision: work.revision, digest, issueRevision: work.issueRevision,
           flowId: work.plan.flowId, state: "offered", assignedAt, updatedAt: assignedAt,
-          plan: work.plan, slots: device.slots, assignedLoad: target.load, weight, files: work.files })) throw Error("无法保存设备派发记录。");
+          plan: work.plan, slots: device.slots, assignedLoad: target.load, weight, files: work.files };
+        if (!save(attempt)) throw Error("无法保存设备派发记录。");
+        try { offered?.(id); }
+        catch (error) {
+          // 记录派发的业务状态失败时，撤销尚未发出的 offer，避免设备执行位永久占用。
+          const pending = attempts.get(id);
+          if (pending && unfinished(pending.state)) {
+            const cancelled: WorkerAttempt = { ...pending, state: "cancelled", updatedAt: now() };
+            // SQLite 短时不可写时仍先释放本进程容量；若进程同时退出，持久化的 offered 会恢复为 uncertain。
+            if (!save(cancelled)) attempts.set(id, cancelled);
+          }
+          throw error;
+        }
         const result = await new Promise<CodeReceipt | undefined>(resolve => {
           const settle = (receipt?: CodeReceipt) => {
             executionDeadline.removeEventListener("abort", interrupted);
