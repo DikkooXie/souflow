@@ -356,6 +356,104 @@ test("AC-3 配对码过期失效，跨成员确认不消费原码，并发确认
   assert.ok(!audit.includes(pending.code) && !audit.includes(key));
 });
 
+test("AC-3 个人设备列表拒绝访问或成员不符后，迟到的确认回执无法生成凭据下载链接", async t => {
+  for (const [label, invalidResponse] of [
+    ["列表返回 403", () => Response.json({}, { status: 403 })],
+    ["列表返回其他成员", () => Response.json({ identity: "Bob", devices: [] })],
+  ] as const) {
+    await t.test(label, async t => {
+      class DeviceElement extends EventTarget {
+        children: Array<DeviceElement | string> = [];
+        dataset: Record<string, string> = {};
+        hidden = false;
+        disabled = false;
+        value = "";
+        readonly tag: string;
+        textContent: string;
+
+        constructor(tag = "", textContent = "") {
+          super();
+          this.tag = tag;
+          this.textContent = textContent;
+        }
+        append(...children: Array<DeviceElement | string>) { this.children.push(...children); }
+        replaceChildren(...children: Array<DeviceElement | string>) { this.children = children; }
+        querySelector(tag: string) { return this.children.find(child => child instanceof DeviceElement && child.tag === tag); }
+        contains() { return false; }
+        setAttribute() {}
+        focus() {}
+        reset() {}
+      }
+
+      const section = new DeviceElement();
+      const identity = new DeviceElement("p", "Alice");
+      const elements = new Map([
+        ["#personal-home", new DeviceElement()], ["#personal-devices", section], ["#personal-identity", identity],
+        ["#personal-device-list", new DeviceElement()], ["#personal-devices-empty", new DeviceElement()],
+      ]);
+      const fallback = new DeviceElement();
+      for (const [key, value] of Object.entries({
+        document: { querySelector: (selector: string) => elements.get(selector) ?? fallback },
+        MutationObserver: class { observe() {} },
+      })) {
+        const previous = Object.getOwnPropertyDescriptor(globalThis, key);
+        Object.defineProperty(globalThis, key, { configurable: true, value });
+        t.after(() => {
+          if (previous) Object.defineProperty(globalThis, key, previous);
+          else Reflect.deleteProperty(globalThis, key);
+        });
+      }
+      t.mock.timers.enable({ apis: ["setInterval"] });
+      const createDownload = t.mock.method(URL, "createObjectURL", () => "blob:device-test");
+      let listResponse = () => Response.json({ identity: "Alice", devices: [] });
+      let confirmSignal: AbortSignal | null | undefined;
+      let finishConfirmation!: (response: Response) => void;
+      const confirmation = new Promise<Response>(resolve => { finishConfirmation = resolve; });
+      const path = "/api/remote/personal-devices";
+      t.mock.method(globalThis, "fetch", async (input: unknown, options?: RequestInit) => {
+        if (input === path) return listResponse();
+        if (input === `${path}/pair`) return Response.json({ code: "pairing-fixture" }, { status: 201 });
+        assert.equal(input, `${path}/confirm`);
+        confirmSignal = options?.signal;
+        // 模拟取消请求后，已经在途的成功回执仍被交付。
+        return confirmation;
+      });
+      const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+      const { createRemoteWorkers } = await import(new URL("../src/workbench/public/remote-workers.mjs", import.meta.url).href);
+      createRemoteWorkers((tag: string, _className?: string, text?: string) => new DeviceElement(tag, text));
+      await flush();
+
+      const [form, confirm, , result] = section.children;
+      assert.ok(form instanceof DeviceElement && confirm instanceof DeviceElement && result instanceof DeviceElement);
+      const [nameLabel] = form.children;
+      assert.ok(nameLabel instanceof DeviceElement);
+      const name = nameLabel.querySelector("input");
+      assert.ok(name instanceof DeviceElement);
+      assert.equal(form.hidden, false);
+      name.value = "新人 Mac";
+      form.dispatchEvent(new Event("submit", { cancelable: true }));
+      await flush();
+      assert.equal(confirm.hidden, false);
+      confirm.dispatchEvent(new Event("click"));
+      assert.ok(confirmSignal);
+
+      listResponse = invalidResponse;
+      t.mock.timers.tick(1500);
+      await flush();
+      assert.equal(identity.textContent, "Alice");
+      assert.equal(form.hidden, true);
+      assert.equal(confirm.hidden, true);
+      assert.equal(result.querySelector("a"), undefined);
+
+      finishConfirmation(Response.json({ id: randomUUID(), key: "a".repeat(64), endpoint: "https://127.0.0.1:4717" }, { status: 201 }));
+      await flush();
+      assert.equal(result.querySelector("a"), undefined);
+      assert.equal(createDownload.mock.callCount(), 0);
+      assert.equal(confirmSignal.aborted, true);
+    });
+  }
+});
+
 test("撤销设备后旧设备凭据无法继续领取或回传", () => {
   const events: BusinessEvent[] = [];
   const hub = createRemoteHandoff(checkpoint<RemoteDevice>(events), checkpoint<RemoteJob>(events), 1000);

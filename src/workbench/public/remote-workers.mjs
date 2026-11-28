@@ -77,6 +77,16 @@ function createPersonalDevices(node) {
   const visibleMember = () => panel.hidden || section.hidden || identity.hidden ? "" : identity.textContent;
   const isCurrent = epoch => epoch === generation && !!member && member === visibleMember();
 
+  function invalidateActions() {
+    generation += 1;
+    code = undefined;
+    if (!action) return;
+    const { request, button } = action;
+    action = undefined;
+    request.abort();
+    button.disabled = false;
+  }
+
   function renderDevices(devices) {
     const key = JSON.stringify(devices);
     if (key === rendered) return;
@@ -123,8 +133,9 @@ function createPersonalDevices(node) {
         form.hidden = false;
         renderDevices(data.devices);
       } else if (response.ok || [401, 403, 404].includes(response.status)) {
+        // 设备接口可能先于主页发现身份失效，此时迟到的确认回执也必须作废。
+        invalidateActions();
         form.hidden = confirm.hidden = true;
-        code = undefined;
         renderDevices([]);
         clearEnrollment(result);
         feedback.textContent = "";
@@ -137,21 +148,24 @@ function createPersonalDevices(node) {
     const epoch = generation;
     if (!isCurrent(epoch) || action) return;
     const request = new AbortController();
-    action = request;
+    const current = { request, button };
+    action = current;
     button.disabled = true;
     feedback.textContent = "";
     try {
       const response = await fetch(`${path}/${route}`, { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body), signal: AbortSignal.any([request.signal, AbortSignal.timeout(10_000)]) });
       const data = await response.json();
-      if (!isCurrent(epoch) || action !== request) return;
+      if (!isCurrent(epoch) || action !== current) return;
       if (!response.ok) throw Error(data.error);
       update(data);
     } catch (error) {
-      if (isCurrent(epoch) && action === request) feedback.textContent = error.message || "设备操作暂不可用。";
+      if (isCurrent(epoch) && action === current) feedback.textContent = error.message || "设备操作暂不可用。";
     } finally {
-      if (action === request) action = undefined;
-      button.disabled = false;
+      if (action === current) {
+        action = undefined;
+        button.disabled = false;
+      }
     }
   }
 
@@ -184,10 +198,9 @@ function createPersonalDevices(node) {
     const next = visibleMember();
     if (next === member) return;
     member = next;
-    generation += 1;
+    invalidateActions();
     read?.abort();
-    action?.abort();
-    read = action = code = rendered = undefined;
+    read = rendered = undefined;
     form.hidden = confirm.hidden = true;
     form.reset();
     renderDevices([]);
