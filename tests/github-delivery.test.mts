@@ -531,7 +531,10 @@ test("实际通过的验收测试回执去重，排除跳过的用例和汇总�
 test("隔离检查保留 TAP 回执，自选报告格式的子测试不受影响", async t => {
   const workspace = await mkdtemp(join(tmpdir(), "souflow-check-reporter-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));
-  await writeFile(join(workspace, "package.json"), JSON.stringify({ scripts: { check: "npm test", test: "node --test" } }));
+  // 子进程可以重设旧版脚本使用的变量，外层仍须调用自己选定的 Node。
+  await writeFile(join(workspace, "package.json"), JSON.stringify({ scripts: {
+    check: "SOUFLOW_CHECK_NODE=/does-not-exist npm test", test: "node --test",
+  } }));
   await writeFile(join(workspace, "receipt.test.mjs"), `
     import assert from "node:assert/strict";
     import { execFileSync } from "node:child_process";
