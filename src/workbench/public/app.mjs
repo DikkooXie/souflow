@@ -14,6 +14,15 @@ const count = document.querySelector("#count");
 const reset = document.querySelector("#reset");
 const modeLabel = document.querySelector("#mode");
 const memberLabel = document.querySelector("#member-label");
+const personalButton = document.querySelector("#open-personal");
+const personalPanel = document.querySelector("#personal-home");
+const personalTitle = document.querySelector("#personal-title");
+const personalIdentity = document.querySelector("#personal-identity");
+const personalStatus = document.querySelector("#personal-status");
+const personalDevices = document.querySelector("#personal-devices");
+const personalDeviceList = document.querySelector("#personal-device-list");
+const personalDevicesEmpty = document.querySelector("#personal-devices-empty");
+const personalHash = "#personal";
 const start = document.querySelector("#start-session");
 const promptBox = document.querySelector("#new-prompt");
 const template = document.querySelector("#detail-template");
@@ -63,8 +72,13 @@ let renderedQueue;
 let busy = false;
 let cycle = 0;
 let poll;
+let refreshing = 0;
+let requestNumber = 0;
+let latestResponse = 0;
 let live = false;
 let member;
+let snapshotLoaded = false;
+let authenticationRequired = false;
 let acceptanceNoteMaxLength;
 let active = 0;
 let auditOpen = false;
@@ -100,6 +114,7 @@ function view() {
   if (monitor.visible) return "dispatch-monitor";
   if (github.visible) return "github-issues";
   if (auditOpen) return "audit";
+  if (location.hash === personalHash) return "home";
   return selectedFlow ? "conversation" : "home";
 }
 
@@ -112,10 +127,37 @@ function reportView() {
 
 function showAudit(visible) {
   auditOpen = visible;
-  workspace.hidden = visible;
-  auditPanel.hidden = !visible;
-  auditButton.setAttribute("aria-pressed", String(visible));
+  if (location.hash === personalHash) {
+    history.replaceState(history.state, "", `${location.pathname}${location.search}`);
+  }
   render();
+}
+
+function renderPage() {
+  const personalOpen = location.hash === personalHash;
+  workspace.hidden = auditOpen || personalOpen;
+  auditPanel.hidden = !auditOpen;
+  auditButton.setAttribute("aria-pressed", String(auditOpen));
+  personalPanel.hidden = !personalOpen;
+  personalButton.hidden = !member && !personalOpen;
+  if (personalOpen) personalButton.setAttribute("aria-current", "page");
+  else personalButton.removeAttribute("aria-current");
+
+  const key = member?.login ?? member?.id;
+  const label = member?.label ?? "";
+  const identity = key && key !== label ? `${label}（${key}）` : label;
+  memberLabel.hidden = !member;
+  if (memberLabel.textContent !== label) memberLabel.textContent = label;
+  personalIdentity.hidden = !member;
+  if (personalIdentity.textContent !== identity) personalIdentity.textContent = identity;
+  const status = authenticationRequired ? "成员登录已失效，请重新登录。"
+    : snapshotLoaded ? "当前没有成员身份。" : "正在读取成员身份…";
+  personalStatus.hidden = !!member;
+  if (personalStatus.textContent !== status) personalStatus.textContent = status;
+  personalDevices.hidden = !member;
+  personalDeviceList.hidden = !personalDeviceList.childElementCount;
+  personalDevicesEmpty.hidden = !personalDeviceList.hidden;
+  start.hidden = authenticationRequired || member?.id === "reviewer";
 }
 
 function openDecisions(kind) {
@@ -135,6 +177,7 @@ function updateSidebarOverlay() {
   sidebarScrim.hidden = !overlays;
   workspace.inert = overlays;
   auditPanel.inert = overlays;
+  personalPanel.inert = overlays;
 }
 
 function showSidebar(visible) {
@@ -225,6 +268,7 @@ function pendingDecisions() {
 }
 
 function render() {
+  renderPage();
   reportView();
   const pending = pendingDecisions();
   const current = pending.find(request => request.id === selected) ?? pending[0];
@@ -505,8 +549,48 @@ function later() {
   }
 }
 
+function acceptResponse(requestId) {
+  if (requestId <= latestResponse) return false;
+  latestResponse = requestId;
+  return true;
+}
+
+function clearMemberState() {
+  // 身份边界使当时已发出的请求失效，包括仍在读取正文的响应。
+  latestResponse = requestNumber;
+  personalDeviceList.replaceChildren();
+  drafts.clear();
+  selected = undefined;
+  selectedFlow = undefined;
+  renderedDetail = undefined;
+  feedback.textContent = "";
+}
+
+function rejectAuthentication(requestId) {
+  if (!acceptResponse(requestId)) return;
+  clearMemberState();
+  authenticationRequired = true;
+  member = undefined;
+  requests = [];
+  flows = [];
+  dispatches = [];
+  issuePlans = [];
+  deliveryReviews = [];
+  active = 0;
+  reset.hidden = true;
+  monitor.setAvailable(false);
+  github.setAvailable(false);
+  setError();
+  render();
+}
+
 function applySnapshot(snapshot) {
   if (snapshot.requests) {
+    const nextMember = snapshot.member;
+    if ((member?.login ?? member?.id) !== (nextMember?.login ?? nextMember?.id)) clearMemberState();
+    member = nextMember;
+    authenticationRequired = false;
+    snapshotLoaded = true;
     promptBox.maxLength = snapshot.inputLimits.promptMaxLength;
     answerMaxLength = snapshot.inputLimits.answerMaxLength;
     planMaxLength = snapshot.planMaxLength;
@@ -518,11 +602,7 @@ function applySnapshot(snapshot) {
     if (snapshot.flowId) selectedFlow = snapshot.flowId;
     if (selectedFlow && !flows.some(flow => flow.id === selectedFlow)) selectedFlow = undefined;
     live = snapshot.mode === "codex";
-    member = snapshot.member;
     acceptanceNoteMaxLength = snapshot.acceptanceNoteMaxLength;
-    memberLabel.hidden = !member;
-    memberLabel.textContent = member?.label ?? "";
-    start.hidden = member?.id === "reviewer";
     monitor.setAvailable(live);
     github.setAvailable(snapshot.githubEnabled === true);
     active = snapshot.active ?? 0;
@@ -535,27 +615,38 @@ function applySnapshot(snapshot) {
 
 async function refresh() {
   if (busy) return;
+  // 即使上一条快照滞留，下一轮也能读取最新的认证状态。
+  later();
+  if (refreshing >= 2) return;
   const revision = cycle;
+  const requestId = ++requestNumber;
+  refreshing += 1;
   try {
-    const response = await fetch("/api/decisions");
+    const response = await fetch("/api/decisions", { signal: AbortSignal.timeout(10_000) });
+    if (response.status === 401) {
+      rejectAuthentication(requestId);
+      return;
+    }
     if (!response.ok) throw Error();
     const snapshot = await response.json();
-    if (revision !== cycle) return;
+    if (revision !== cycle || !acceptResponse(requestId)) return;
     applySnapshot(snapshot);
     if (!actionError) setError();
     render();
   } catch {
-    if (revision !== cycle) return;
+    if (revision !== cycle || requestId <= latestResponse) return;
     if (!actionError) setError("无法读取会话提问，请重新加载页面。");
     if (!requests.length) render();
+  } finally {
+    refreshing -= 1;
   }
-  if (revision === cycle) later();
 }
 
 async function post(path, answers) {
   if (busy) return;
   busy = true;
   cycle += 1;
+  const requestId = ++requestNumber;
   reset.disabled = true;
   start.querySelector("button").disabled = true;
   detail.inert = true;
@@ -564,12 +655,17 @@ async function post(path, answers) {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(answers),
     } : { method: "POST" };
     const response = await fetch(path, options);
+    if (response.status === 401) {
+      rejectAuthentication(requestId);
+      return false;
+    }
     const snapshot = await response.json();
+    if (!acceptResponse(requestId)) return false;
     applySnapshot(snapshot);
     setError(response.ok ? "" : snapshot.error, !response.ok);
     return response.ok;
   } catch {
-    setError("发送失败，请刷新页面核对答复状态。", true);
+    if (requestId > latestResponse) setError("发送失败，请刷新页面核对答复状态。", true);
     return false;
   } finally {
     busy = false;
@@ -598,6 +694,19 @@ document.addEventListener("keydown", event => {
     showSidebar(false);
     sidebarToggle.focus();
   }
+});
+personalButton.addEventListener("click", () => {
+  if (location.hash === personalHash) personalTitle.focus();
+  else location.hash = personalHash;
+});
+window.addEventListener("hashchange", () => {
+  const personalOpen = location.hash === personalHash;
+  if (personalOpen) {
+    if (compactLayout.matches) showSidebar(false);
+    auditOpen = false;
+  }
+  render();
+  if (personalOpen) personalTitle.focus();
 });
 auditButton.addEventListener("click", () => {
   if (compactLayout.matches) showSidebar(false);
@@ -633,4 +742,5 @@ start.addEventListener("submit", async event => {
   event.preventDefault();
   if (await post("/api/workflows", { prompt: promptBox.value })) start.reset();
 });
+renderPage();
 void refresh();
