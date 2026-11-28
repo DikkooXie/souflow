@@ -187,6 +187,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           ...(remoteLink?.code ? { hasWorkerAttempt: remoteLink.code.hasAttempt } : {}),
           ...(publishIssues ? { publishRepair: publishIssues } : {}),
           ...(remoteLink?.code ? { failedWorkerAttempt: remoteLink.code.failedAttempt } : {}),
+          inspectRepairCandidate: createRepairCandidateInspector({ ...issueDelivery, root: `${database}.artifacts/github` }),
           async reviewSourceHandoff(claim, proof, sources, signal) {
             if (!reviewSourceHandoff) throw Error("无法复核上游源码交接。");
             return reviewSourceHandoff(claim, proof, sources, signal);
@@ -196,7 +197,6 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
             reviewScopeCurrent: issueDelivery.reviewScopeCurrent ?? (claim => !!reviewScope?.(claim)) } : {}),
           prepare: createIssueDeveloper(monitor, { ...issueDelivery, root: `${database}.artifacts/github`,
             ...(codexAccounts ? { codexAccounts } : {}), ...(remoteLink?.code ? { workers: remoteLink.code } : {}) }),
-          inspectRepairCandidate: createRepairCandidateInspector({ ...issueDelivery, root: `${database}.artifacts/github` }),
         }) : undefined;
       const issuePlanning = live && github && issueTracker && issueDelivery?.conversation && reviewQuality
         ? createConversationDelivery(github, audit.checkpoint<IssueProposal>(`github-proposals:${issueTracker.repo.toLowerCase()}`),
