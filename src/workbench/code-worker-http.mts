@@ -5,7 +5,7 @@ import type { RemoteHandoff } from "../execution/remote-handoff.mts";
 
 export async function handleCodeWorkerRequest(request: IncomingMessage, response: ServerResponse,
   pool: CodeWorkerPool, handoff: RemoteHandoff) {
-  const route = /^\/v1\/code-workers\/([a-f0-9-]{36})\/(wait|receipt)$/.exec(request.url ?? "");
+  const route = /^\/v1\/code-workers\/([a-f0-9-]{36})\/(check|wait|receipt)$/.exec(request.url ?? "");
   if (!route?.[1] || !workerId.test(route[1])) return false;
   const id = route[1];
   function send(status: number, body: object = {}) {
@@ -13,12 +13,17 @@ export async function handleCodeWorkerRequest(request: IncomingMessage, response
     response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
     response.end(JSON.stringify(body));
   }
-  if (request.method !== "POST" || request.headers["content-type"] !== "application/json" || request.headers.origin) {
+  const check = route[2] === "check";
+  if (request.headers.origin || (check ? request.method !== "GET"
+    : request.method !== "POST" || request.headers["content-type"] !== "application/json")) {
     send(415);
   } else if (!pool.permits(id)) {
     send(403);
   } else if (!handoff.canAuthenticateCodeDevice(id, request.headers.authorization)) {
     send(401);
+  } else if (check) {
+    // 自检只验证接入许可和凭据。实例首次绑定留给正常启动的设备。
+    send(200);
   } else {
     try {
       let size = 0;

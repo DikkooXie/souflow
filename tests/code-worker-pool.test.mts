@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { once } from "node:events";
+import { createServer } from "node:http";
+import type { Readable, Writable } from "node:stream";
 import test from "node:test";
 import type { BusinessEvent, Checkpoint } from "../src/audit/activity-store.mts";
 import { codeEditFileBytes, legacyCodeEditFileBytes, readCodeWorkerConfig } from "../src/config/runtime.mts";
 import { createCodeWorkerPool, type WorkerAttempt } from "../src/execution/code-worker-pool.mts";
-import { contentDigest, readCodeOffer, readCodeReceipt, readWorkerCapacity, type CodeOffer, type CodeWork } from "../src/execution/code-worker-protocol.mts";
+import { probeCodeDeviceLogin } from "../src/execution/code-device-login.mts";
+import { contentDigest, readCodeOffer, readCodeReceipt, readWorkerCapacity, workerProtocolVersion, type CodeOffer, type CodeWork } from "../src/execution/code-worker-protocol.mts";
+import { createRemoteHandoff, type RemoteDevice, type RemoteJob } from "../src/execution/remote-handoff.mts";
+import { handleCodeWorkerRequest } from "../src/workbench/code-worker-http.mts";
 
 const repo = "owner/repository";
 const first = { id: "00000000-0000-0000-0000-000000000001", name: "第一台 Mac", instance: randomUUID(), repo, slots: 1, ready: true };
@@ -17,6 +24,96 @@ const work: CodeWork = {
   files: [{ path: "src/worker.mts", sha256: digest }],
   instructions: "修复已批准的问题。", context: JSON.stringify({ editableFiles: [] }),
 };
+
+test("AC-3 设备自检只核对已许可的凭据，保留新设备与现有设备的正常实例", async t => {
+  const devices = new Map<string, RemoteDevice>();
+  const handoff = createRemoteHandoff({ load: () => [...devices.values()], save(id, device) { devices.set(id, device); return true; } },
+    { load: (): RemoteJob[] => [], save: () => true }, 1000);
+  const enrolled = handoff.addDevice("已许可设备", "owner");
+  assert.equal(enrolled.status, 201);
+  if (enrolled.status !== 201) return;
+  const { id, key } = enrolled.bundle;
+  const allowed = new Set<string>();
+  const config = readCodeWorkerConfig({ SOULFLOW_CODE_WORKER_WAIT_MS: "100" });
+  const pool = createCodeWorkerPool(database().checkpoint, allowed, config);
+  t.after(pool.close);
+  const server = createServer((req, res) => { void handleCodeWorkerRequest(req, res, pool, handoff); });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const endpoint = `http://127.0.0.1:${address.port}/v1/code-workers/${id}`;
+  const auth = { Authorization: `Bearer ${key}` };
+  assert.equal((await fetch(`${endpoint}/check`, { headers: auth })).status, 403);
+  allowed.add(id);
+  assert.equal((await fetch(`${endpoint}/check`)).status, 401);
+  assert.equal((await fetch(`${endpoint}/check`, { headers: { ...auth, Origin: endpoint } })).status, 415);
+  assert.equal((await fetch(`${endpoint}/check`, { headers: auth })).status, 200);
+  assert.equal(devices.get(id)?.instance, undefined);
+
+  const instance = randomUUID();
+  const wait = () => fetch(`${endpoint}/wait`, { method: "POST", headers: { ...auth, "Content-Type": "application/json" },
+    body: JSON.stringify({ version: workerProtocolVersion, instance, repo, slots: 1, ready: false }) });
+  assert.equal((await wait()).status, 200);
+  assert.equal(devices.get(id)?.instance, instance);
+  assert.equal((await fetch(`${endpoint}/check`, { headers: auth })).status, 200);
+  assert.equal(devices.get(id)?.instance, instance);
+  assert.equal((await wait()).status, 200);
+});
+
+test("AC-3 连续探测超时各自回收进程，登录恢复后才返回就绪", async () => {
+  const hungProbe = "process.on('SIGTERM', () => {}); process.stdin.resume();";
+  const loginProbe = (type: string) => `require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
+    const msg = JSON.parse(line);
+    if (msg.id === 1) console.log(JSON.stringify({ id: 1, result: {} }));
+    if (msg.id === 2) console.log(JSON.stringify({ id: 2, result: { account: { type: ${JSON.stringify(type)} } } }));
+  });`;
+  const children: ChildProcessByStdio<Writable, Readable, null>[] = [];
+  const probe = (code: string, ms: number) => probeCodeDeviceLogin(AbortSignal.timeout(ms), () => {
+    const child = spawn(process.execPath, ["-e", code], { stdio: ["pipe", "pipe", "ignore"] });
+    children.push(child);
+    return child;
+  });
+  for (let index = 0; index < 2; index++) {
+    assert.equal(await probe(hungProbe, 100), false);
+    assert.equal(children[index]?.signalCode, "SIGKILL");
+  }
+  assert.equal(await probe(loginProbe("apiKey"), 2000), false);
+  assert.equal(await probe(loginProbe("chatgpt"), 2000), true);
+  assert.ok(children.every(child => child.exitCode !== null || child.signalCode !== null));
+});
+
+test("AC-3 同一设备未就绪或满载时无新任务，恢复空位后继续接单", async t => {
+  const config = readCodeWorkerConfig({ SOULFLOW_CODE_WORKER_WAIT_MS: "100" });
+  const { checkpoint, audit } = database();
+  const pool = createCodeWorkerPool(checkpoint, new Set([first.id]), config);
+  const stop = new AbortController();
+  t.after(() => { stop.abort(); pool.close(); });
+  const waiting = pool.execute(work, stop.signal, 2000, () => {}, revalidate);
+  assert.deepEqual(await pool.poll({ ...first, ready: false }, stop.signal), { status: 200, offer: null });
+  assert.equal(checkpoint.load().length, 0);
+  const offered = await pool.poll(first, stop.signal);
+  assert.ok(offered.status === 200 && offered.offer);
+
+  const next = pool.execute({ ...work, issue: 11 }, stop.signal, 2000, () => {}, revalidate);
+  const complete = (offer: CodeOffer) => {
+    const base = { id: offer.id, digest: offer.digest, at: 100 };
+    assert.equal(pool.receipt(first, { ...base, phase: "accepted" }), 200);
+    assert.equal(pool.receipt(first, { ...base, phase: "started", thread: `thread-${offer.work.issue}` }), 200);
+    assert.equal(pool.receipt(first, { ...base, phase: "tested", output: "完成", patch: contentDigest("完成") }), 200);
+  };
+  assert.deepEqual(await pool.poll({ ...first, ready: false }, stop.signal), { status: 200, offer: null });
+  assert.equal(checkpoint.load().length, 1);
+  complete(offered.offer);
+  await waiting;
+  const resumed = await pool.poll(first, stop.signal);
+  assert.ok(resumed.status === 200 && resumed.offer);
+  assert.equal(resumed.offer.work.issue, 11);
+  complete(resumed.offer);
+  await next;
+  assert.equal(audit.filter(event => (event.details as { action?: string })?.action === "offered").length, 2);
+});
 
 function database() {
   const stored = new Map<string, WorkerAttempt>();
