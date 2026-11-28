@@ -372,6 +372,66 @@ test("满载设备仅上报在线，空闲设备才会收到工单", async t => 
   assert.equal(pool.snapshot().attempts[0]?.device, second.id);
 });
 
+test("AC-3 只选择所属成员的设备，受理前缺少授权、所有者不符或撤销均不推进尝试", async t => {
+  const savedDevices = new Map<string, RemoteDevice>();
+  const handoff = createRemoteHandoff({ load: () => [...savedDevices.values()], save(id, row) {
+    savedDevices.set(id, row);
+    return true;
+  } }, { load: (): RemoteJob[] => [], save: () => true }, 1000);
+  const pending = handoff.startPairing("新人 Mac", "alice");
+  assert.ok(pending.status === 201);
+  const enrolled = handoff.confirmPairing(pending.code, "alice");
+  assert.ok(enrolled.status === 201);
+  const device = { ...first, id: enrolled.bundle.id };
+  const allow = new Set([device.id]);
+  const { checkpoint, audit } = database();
+  const config = readCodeWorkerConfig({ SOULFLOW_CODE_WORKER_WAIT_MS: "100" });
+  let claimedBy: string | undefined = "bob";
+  const pool = createCodeWorkerPool(checkpoint, allow, config, Date.now,
+    event => { audit.push(event); return true; }, (id, repository, issue, flowId) =>
+      repository === repo && [work.issue, work.issue + 1].includes(issue) && flowId === work.plan.flowId
+      && claimedBy !== undefined && handoff.ownsDevice(id, claimedBy));
+  const stop = new AbortController();
+  t.after(() => { stop.abort(); pool.close(); });
+  const started: string[] = [];
+  const firstTask = pool.execute(work, stop.signal, 2000, thread => started.push(thread), revalidate);
+  assert.deepEqual(await pool.poll(device, stop.signal), { status: 200, offer: null });
+  assert.deepEqual(checkpoint.load(), []);
+  claimedBy = "alice";
+  const firstDelivery = await pool.poll(device, stop.signal);
+  assert.ok(firstDelivery.status === 200 && firstDelivery.offer);
+  const initial = { id: firstDelivery.offer.id, digest: firstDelivery.offer.digest, at: 100 };
+  assert.equal(pool.receipt(device, { ...initial, phase: "accepted" }), 200);
+  assert.equal(pool.receipt(device, { ...initial, phase: "accepted" }), 200);
+  assert.equal(pool.receipt(device, { ...initial, phase: "started", thread: "owner-session" }), 200);
+  assert.equal(pool.receipt(device, { ...initial, phase: "tested", output: "ok", patch: digest }), 200);
+  assert.equal((await firstTask).phase, "tested");
+
+  const secondTask = assert.rejects(pool.execute({ ...work, issue: work.issue + 1 }, stop.signal, 2000,
+    thread => started.push(thread), revalidate), { reason: "needs-reconciliation" });
+  const secondDelivery = await pool.poll(device, stop.signal);
+  assert.ok(secondDelivery.status === 200 && secondDelivery.offer);
+  const held = { id: secondDelivery.offer.id, digest: secondDelivery.offer.digest, at: 101, phase: "accepted" } as const;
+  const attempt = () => checkpoint.load().find(row => row.id === held.id);
+  for (const actor of [undefined, "bob"]) {
+    claimedBy = actor;
+    assert.equal(pool.receipt(device, held), 403);
+    assert.equal(attempt()?.state, "offered");
+    assert.equal(attempt()?.receipt, undefined);
+  }
+  claimedBy = "alice";
+  assert.equal(handoff.revoke(device.id, "alice"), 200);
+  assert.equal(pool.permits(device.id), true);
+  assert.equal(pool.receipt(device, held), 403);
+  assert.equal(pool.receipt(device, { ...held, phase: "started", thread: "unexpected" }), 409);
+  assert.equal(attempt()?.state, "offered");
+  assert.deepEqual(started, ["owner-session"]);
+  assert.deepEqual(audit.filter(event => event.subject === held.id).map(event => (event.details as { action: string }).action),
+    ["offered", "acceptance-denied", "acceptance-denied", "acceptance-denied"]);
+  stop.abort();
+  await secondTask;
+});
+
 test("设备就绪时重新检查授权，工单改动后不会发给设备", async t => {
   const pool = createCodeWorkerPool(database().checkpoint, new Set([first.id]));
   t.after(pool.close);

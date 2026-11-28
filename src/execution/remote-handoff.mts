@@ -10,7 +10,7 @@ export const remoteMaxFiles = 4;
 export const remoteMaxFileBytes = 65_536;
 export type RemoteFile = { path: string; sha256: string; bytes: number; text: string };
 type Receipt = { sha256: string; bytes: number; headings: number };
-export type RemoteDevice = { id: string; name: string; keyHash: string; instance?: string; lastSeen?: number; revoked?: true };
+export type RemoteDevice = { id: string; name: string; keyHash: string; instance?: string; lastSeen?: number; revoked?: true; owner?: string };
 export type RemoteJob = {
   id: string; deviceId: string; revision: string;
   files: Array<Omit<RemoteFile, "text"> & { text?: string }>;
@@ -40,7 +40,10 @@ function readReceipts(value: unknown): Receipt[] | undefined {
 }
 
 export function createRemoteHandoff(deviceStore: Store<RemoteDevice>, jobStore: Store<RemoteJob>,
-  offlineMs: number, now = Date.now) {
+  offlineMs: number, now = Date.now, record?: (event: BusinessEvent) => boolean) {
+  const pairings = new Map<string, { id: string; name: string; hash: string; expiresAt: number }>();
+  const validName = (name: unknown): name is string =>
+    typeof name === "string" && /^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,39}$/u.test(name);
   const devices = new Map(deviceStore.load().map(device => [device.id, device]));
   const jobs = new Map(jobStore.load().map(job => [job.id, job]));
   // 探针存活只对当前工作台进程有效，重启后等设备重新报到。
@@ -63,7 +66,42 @@ export function createRemoteHandoff(deviceStore: Store<RemoteDevice>, jobStore: 
     jobs.set(job.id, job);
     return true;
   }
+  function register(name: string, actor: string, id: string = randomUUID(), owner?: string) {
+    const registered = [...devices.values()].filter(item => !item.revoked);
+    if (registered.length >= 12 || registered.some(item => item.name === name)) return { status: 409 } as const;
+    const key = randomBytes(32).toString("hex");
+    const device: RemoteDevice = { id, name, keyHash: digest(key), ...(owner ? { owner } : {}) };
+    if (!deviceStore.save(id, device, { kind: "remote.device", subject: id,
+      details: { action: owner ? "paired" : "created", name, actor } })) return { status: 503 } as const;
+    devices.set(id, device);
+    return { status: 201, bundle: { id, key, name } } as const;
+  }
   return {
+    ownsDevice(id: string, actor: string) {
+      const device = devices.get(id);
+      return !!device && !device.revoked && device.owner === actor;
+    },
+    startPairing(name: unknown, actor: string) {
+      if (!validName(name)) return { status: 422 } as const;
+      const id = randomUUID();
+      const code = randomBytes(32).toString("hex");
+      const expiresAt = now() + 5 * 60_000;
+      if (record && !record({ kind: "remote.device", subject: id,
+        details: { action: "pairing-started", name, actor, expiresAt } })) return { status: 503 } as const;
+      pairings.set(actor, { id, name, hash: digest(code), expiresAt });
+      return { status: 201, code, expiresAt } as const;
+    },
+    confirmPairing(code: unknown, actor: string) {
+      const pending = pairings.get(actor);
+      if (!pending || pending.expiresAt <= now() || typeof code !== "string" || !keyFormat.test(code)
+        || !timingSafeEqual(Buffer.from(pending.hash, "hex"), Buffer.from(digest(code), "hex"))) {
+        return { status: 409 } as const;
+      }
+      // 工作台独占数据库。同步保存所有权后才消费配对码，写入失败时可重试。
+      const result = register(pending.name, actor, pending.id, actor);
+      if (result.status === 201) pairings.delete(actor);
+      return result;
+    },
     canAuthenticateCodeDevice: (id: string, authorization: string | undefined) => !!authenticate(id, authorization),
     identifyCodeDevice(id: string, authorization: string | undefined, instance: string) {
       const device = authenticate(id, authorization);
@@ -77,20 +115,11 @@ export function createRemoteHandoff(deviceStore: Store<RemoteDevice>, jobStore: 
       return { status: 200, name: device.name } as const;
     },
     addDevice(name: unknown, actor: string) {
-      if (typeof name !== "string" || !/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,39}$/u.test(name)) return { status: 422 } as const;
-      const registered = [...devices.values()].filter(item => !item.revoked);
-      if (registered.length >= 12 || registered.some(item => item.name === name)) return { status: 409 } as const;
-      const id = randomUUID();
-      const key = randomBytes(32).toString("hex");
-      const device = { id, name, keyHash: digest(key) };
-      if (!deviceStore.save(id, device, { kind: "remote.device", subject: id,
-        details: { action: "created", name, actor } })) return { status: 503 } as const;
-      devices.set(id, device);
-      return { status: 201, bundle: { id, key, name } } as const;
+      return validName(name) ? register(name, actor) : { status: 422 } as const;
     },
     revoke(id: string, actor: string) {
       const device = devices.get(id);
-      if (!device) return 404;
+      if (!device || (device.owner !== undefined && device.owner !== actor)) return 404;
       if (device.revoked) return 200;
       const next = { ...device, revoked: true as const };
       if (!deviceStore.save(id, next, { kind: "remote.device", subject: id,
