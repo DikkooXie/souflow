@@ -53,7 +53,7 @@
 
 ## v14 双机自动建单和下游复验
 
-2026-11-28，原工作台用同一对话的 v14 计划自动创建 #105、#106 和 #107。两台实体 Mac 的本机 Codex 并行开发前两单，自动开 [PR #112](https://github.com/DikkooXie/souflow/pull/112) 和 [PR #114](https://github.com/DikkooXie/souflow/pull/114)。两份 PR 均通过 CI 并合并。随后，[PR #125](https://github.com/DikkooXie/souflow/pull/125) 和 [PR #126](https://github.com/DikkooXie/souflow/pull/126) 分别处理成员轮询与连接器自检回归，并通过实现质量与需求兑现复核。两台 Mac 的原生 HTTPS 自检与 Codex 登录均通过，自检前后的持久设备实例相同。
+2026-11-26，原工作台用同一对话的 v14 计划自动创建 #105、#106 和 #107。两台实体 Mac 的本机 Codex 并行开发前两单，自动开 [PR #112](https://github.com/DikkooXie/souflow/pull/112) 和 [PR #114](https://github.com/DikkooXie/souflow/pull/114)。两份 PR 均通过 CI 并合并。随后，[PR #125](https://github.com/DikkooXie/souflow/pull/125) 和 [PR #126](https://github.com/DikkooXie/souflow/pull/126) 分别处理成员轮询与连接器自检回归，并通过实现质量与需求兑现复核。两台 Mac 的原生 HTTPS 自检与 Codex 登录均通过，自检前后的持久设备实例相同。
 
 [Issue #107](https://github.com/DikkooXie/souflow/issues/107) 复用原对话、工单、计划版本与授权，在 `a14f9a2` 重新复核固定源码后由主 Mac 接单。审计 1086 为源码复核通过，1087–1090 依次记录唤醒、派发、设备接收及 Codex 开工。每个动作只有一条，复核完成后刷新状态也没有重复派发。
 
