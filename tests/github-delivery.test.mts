@@ -17,7 +17,7 @@ import { checkoutReviewedIssueBase, createIssueDeveloper, type DeliveryFailure, 
   passingAcceptanceTests } from "../src/execution/issue-delivery.mts";
 import { type Claim, createIssueDispatch } from "../src/workbench/issue-dispatch.mts";
 import { createPlannedIssuePublication, type IssuePublication } from "../src/workbench/planned-issue-publication.mts";
-import { repairFromReceipt } from "../src/workbench/delivery-review-repair.mts";
+import { repairFromApproval, repairFromReceipt } from "../src/workbench/delivery-review-repair.mts";
 import { readApprovedReviewFix, readApprovedReviewFixes } from "../src/workbench/approved-review-fix.mts";
 
 const spec = { files: ["src/main.mts"], instructions: "修改校验逻辑。", dependsOn: [] };
@@ -81,6 +81,73 @@ test("已批准的补充测试由工作台建单并续修当前 PR，保存复�
   assert.deepEqual(stored.reviewTestFiles, [testFile]);
   assert.equal(stored.reviewFix?.state, "complete");
   assert.equal(stored.reviewRepairs?.[0]?.completedHead, revised);
+});
+
+test("补充续修明确测试失败后只在原修订单内使用诊断纠正一次", async () => {
+  const head = "a".repeat(40);
+  const hash = "b".repeat(64);
+  const testFile = "tests/member.test.mts";
+  const pull: IssuePull = { number: 8, state: "OPEN", url: "https://github.com/a/b/pull/8", head, baseName: "main" };
+  const issue: IssueDetail = { number: 7, title: "成员切换", body: "核对身份", state: "OPEN", assignees: ["member"],
+    url: "https://github.com/a/b/issues/7", pulls: [pull] };
+  const revision = issueRevision(issue);
+  const fix = { issue: 7, pull: 8, head, base: "main", files: spec.files, testFiles: [testFile], instructions: "补成员回归" };
+  const retry = { ...fix, testFailureNote: "TypeScript 类型检查失败，使用仓库支持的接口" };
+  let stored: Claim = { ...issue, pull, requestId: "approval", claimedBy: "member", account: "member", phase: "submitted", syncedAt: 0,
+    target: { branch: "feat/7-fixed", head, base: "main" }, observedReviewLink: true, observedIssueRevision: revision,
+    delivery: { ...spec, baseRevision: "c".repeat(40) }, approval: { flowId: "flow", planId: "plan", version: 1, issueRevision: revision,
+      quality: { policy: 1, flowDigest: hash, batchDigest: hash } } };
+  const original = repairFromApproval("a/b", stored, fix);
+  assert.ok(original);
+  assert.equal(repairFromApproval("a/b", stored, retry)?.id, original.id);
+  const failure = { stage: "tests", reason: "check-failed" } as const;
+  stored = { ...stored, failure, reviewFix: { from: head, state: "failed", repairId: original.id, testFiles: [testFile], testCheckFailed: true },
+    reviewRepairs: [{ id: original.id, head, decision: "approved", at: 0, issue: 9 }] };
+  let prepares = 0;
+  const tracker: DeliveryTracker = { repo: "a/b", candidates: async () => [], read: async () => issue, account: async () => "member",
+    assign: async () => assert.fail(), delivery: { checkout: async () => assert.fail(), checkoutPublished: async () => {},
+      find: async () => pull, publish: async () => assert.fail(), updatePublished: async () => assert.fail() } };
+  for (let i = 0; i < 2; i++) {
+    const dispatch = createIssueDispatch(tracker, { load: () => [stored], save(_id, value) { stored = value; return true; } },
+      async () => "", () => true, 1, new Map(), { specs: new Map(), conversation: true, pollMs: 60_000, reviewScopeCurrent: () => true,
+        reviewFix: retry, async publishRepair(batch) {
+          assert.deepEqual(batch, original.batch);
+          return new Map([["REPAIR", { ...issue, number: 9 }]]);
+        },
+        async prepare({ spec, reviewTarget }) {
+          assert.deepEqual(spec.files, [...fix.files, testFile]);
+          assert.match(spec.instructions, /TypeScript 类型检查失败/);
+          assert.equal(reviewTarget?.head, head);
+          prepares++;
+          throw new IssueDeliveryFailed(failure);
+        },
+      });
+    await dispatch.refresh();
+    await setImmediate();
+    await dispatch.close();
+  }
+  assert.equal(prepares, 1);
+  assert.equal(stored.reviewFix?.retriedTests, true);
+  assert.equal(stored.reviewFix?.state, "failed");
+});
+
+test("旧续修只有本次失败回执能证明测试失败，继承的诊断不能作为依据", () => {
+  const audit = openActivityStore();
+  const subject = "a/b#7";
+  const from = "a".repeat(40);
+  const repairId = "b".repeat(64);
+  const failure = { stage: "tests", reason: "check-failed" };
+  const record = (action: string, diagnosed?: typeof failure) => audit.record({ kind: "github.issue", subject,
+    details: { action, reviewFix: { from, repairId }, ...(diagnosed ? { failure: diagnosed } : {}) } });
+  try {
+    assert.ok(record("review-fix-started", failure));
+    assert.ok(record("review-fix-failed", failure));
+    assert.equal(audit.legacyReviewTestFailure(subject, from, repairId), false);
+    assert.ok(record("review-fix-started"));
+    assert.ok(record("review-fix-failed", failure));
+    assert.equal(audit.legacyReviewTestFailure(subject, from, repairId), true);
+    assert.equal(audit.legacyReviewTestFailure(subject, from, "c".repeat(64)), false);
+  } finally { audit.close(); }
 });
 
 test("恢复原设备已测试的提交，拒绝补丁摘要和文件范围不匹配", async t => {
