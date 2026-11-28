@@ -10,6 +10,7 @@ import { openActivityStore } from "../src/audit/activity-store.mts";
 import { createGitHubDelivery, githubPull } from "../src/connections/github-delivery.mts";
 import { type DeliveryTracker, issueRevision, type IssueDetail, type IssuePull } from "../src/connections/issue-tracker.mts";
 import { qualitySources } from "../src/execution/codex-quality-review.mts";
+import { proveRefreshedSources } from "../src/execution/dependency-source-handoff.mts";
 import { recoverCheckedWorkspace } from "../src/execution/checked-issue-recovery.mts";
 import { restoreFailedReviewDraft } from "../src/execution/failed-review-draft.mts";
 import { contentDigest } from "../src/execution/code-worker-protocol.mts";
@@ -371,6 +372,12 @@ test("只接受直接上游合并改变的只读资料并固定实际 Git 对象
     assert.equal(result?.blobs.find(blob => blob.path === source)?.sha, git("rev-parse", `${merge}:${source}`));
     assert.equal(git("rev-parse", "HEAD"), merge);
     git("switch", "--detach", latest);
+    const refreshed = await proveRefreshedSources(runGit, original, latest, [main, source], undefined, [merge], [producer]);
+    assert.equal(refreshed.refreshed, true);
+    assert.deepEqual(refreshed.changedPaths, [main, source]);
+    assert.equal(refreshed.blobs.find(blob => blob.path === main)?.sha, git("rev-parse", `${latest}:${main}`));
+    await assert.rejects(proveRefreshedSources(runGit, original, merge, [main, source], undefined, [merge], [producer]), IssueDeliverySourcesChanged);
+    await assert.rejects(proveRefreshedSources(runGit, original, latest, [main, source], main, [merge], [producer]), IssueDeliverySourcesChanged);
     await assert.rejects(checkoutReviewedIssueBase(runGit, delivery, [latest], async () => [producer]), IssueDeliverySourcesChanged);
     if (mode === "--squash") {
       let accountAcquired = false;
@@ -1048,6 +1055,85 @@ test("确有设备失败回执的已授权工单只重试一次，仍复核授�
       if (retries.length) assert.equal(retries[0]?.workerAttempt, "confirmed-attempt");
       const recovery = events.filter(event => event.action === "worker-test-recovery-queued");
       assert.deepEqual(recovery.map(event => event.workerAttempt), scenario === "recovery-configured" ? ["confirmed-attempt"] : []);
+    });
+  }
+});
+
+test("当前主干复核续派沿用原工单，重复刷新及重启只开工一次", async t => {
+  const baseRevision = "a".repeat(40);
+  const head = "b".repeat(40);
+  const mergeCommit = "c".repeat(40);
+  const revision = "d".repeat(40);
+  const source = "src/upstream.mts";
+  const requestId = "00000000-0000-4000-8000-000000000001";
+  const quality = { policy: 1, flowDigest: "a".repeat(64), batchDigest: "b".repeat(64) };
+  const merged: IssuePull = { number: 10, url: "https://github.com/a/b/pull/10", state: "MERGED", head, mergeCommit, baseName: "main", ci: "SUCCESS" };
+  const upstream: IssueDetail = { number: 1, title: "上游", body: "已批准的上游", url: "https://github.com/a/b/issues/1",
+    state: "CLOSED", assignees: ["member"], pulls: [merged] };
+  const downstream: IssueDetail = { number: 2, title: "下游", body: "固定需求", url: "https://github.com/a/b/issues/2",
+    state: "OPEN", assignees: ["member"], pulls: [] };
+  const approval = (issue: IssueDetail) => ({ flowId: "original-flow", planId: "original-plan", version: 14, issueRevision: issueRevision(issue), quality });
+  const sourceRefresh = { issue: 2, requestId, version: 14, issueRevision: issueRevision(downstream), revision };
+  for (const scenario of ["passed", "prior-offer", "scope-changed", "source-block", "issue-changed", "restart-before-offer", "transient-review"] as const) {
+    await t.test(scenario, async () => {
+      const records = new Map<string, Claim>();
+      const make = (row: IssueDetail) => ({ ...row, requestId, claimedBy: "member", account: "member", syncedAt: 0, approval: approval(row) });
+      records.set("1", { ...make(upstream), phase: "submitted", target: { branch: "feat/upstream", head }, pull: merged,
+        delivery: { ...spec, files: [source], baseRevision } });
+      records.set("2", { ...make(downstream), phase: "uncertain", failure: { stage: "preflight", reason: "unavailable" },
+        delivery: { ...spec, baseRevision, dependsOn: [1], sourcePaths: [source], sourceFrom: [{ path: source, issue: 1 }] },
+        ...(scenario === "restart-before-offer" ? { phase: "developing", sourceRefresh: { revision, state: "passed", woken: true } } : {}) });
+      const events: string[] = [];
+      let starts = 0;
+      let publications = 0;
+      const childPull: IssuePull = { number: 11, state: "OPEN", baseName: "main", head: revision, url: "https://github.com/a/b/pull/11" };
+      const tracker: DeliveryTracker = { repo: "a/b", candidates: async () => [], read: async number => number === 1 ? upstream
+        : { ...downstream, ...(scenario === "issue-changed" ? { body: "未批准的需求变更" } : {}), pulls: publications ? [childPull] : [] },
+        account: async () => "member", assign: async () => assert.fail("不能重新认领"), delivery: {
+          checkout: async () => { throw Error("本用例隔离调度状态"); },
+          find: async branch => branch === "feat/upstream" ? merged : publications ? childPull : undefined,
+          publish: async input => { assert.equal(input.issue, 2); publications++; return childPull; },
+        } };
+      for (let restart = 0; restart < 2; restart++) {
+        const dispatch = createIssueDispatch(tracker, { load: () => [...records.values()], save(id, claim, event) {
+          records.set(id, claim);
+          const action = (event?.details as { action?: string } | undefined)?.action;
+          if (action) events.push(action);
+          return true;
+        } }, async () => assert.fail("不能改走只读核验"), () => true, 2, new Map(), {
+          specs: new Map(), conversation: true, requireQuality: true, pollMs: 60_000, sourceRefresh,
+          hasWorkerAttempt: () => scenario === "prior-offer" || starts > 0,
+          reviewScopeCurrent: () => scenario !== "scope-changed",
+          reviewSourceHandoff: async () => ({ status: scenario === "source-block" ? "block" : "pass", ticket: "T3",
+            revision, paths: [source], sourceDigest: quality.flowDigest, summary: "引用原工单的固定源码",
+            evidence: [{ ref: `repo:${source}`, quote: "approved source" }] }),
+          async prepare({ spec: received, sourceHandoff: refresh, upstream: merges, branch }, connected, signal) {
+            assert.ok(refresh);
+            assert.equal(received.baseRevision, baseRevision);
+            assert.equal(refresh.refreshRevision, revision);
+            assert.deepEqual(merges, [mergeCommit]);
+            if (scenario === "transient-review" && restart === 0) throw Error("短时读取错误");
+            const producers = await refresh.current("main", signal);
+            await refresh.review({ original: baseRevision, execution: revision, producers, changedPaths: [source], blobs: [], refreshed: true },
+              { [source]: "approved source" }, signal);
+            refresh.ready();
+            starts++;
+            connected("original-model-session");
+            return { workspace: "fixture", base: "main", branch, head: revision, executionRevision: revision };
+          },
+        });
+        try { for (let count = 0; count < 3; count++) { await dispatch.refresh(); await setImmediate(); } }
+        finally { await dispatch.close(); }
+      }
+      const expected = ["passed", "restart-before-offer", "transient-review"].includes(scenario) ? 1 : 0;
+      assert.equal(starts, expected);
+      assert.equal(publications, expected);
+      assert.equal(events.filter(action => action === "woken").length, scenario === "restart-before-offer" ? 0 : expected);
+      assert.equal(events.filter(action => action === "source-refresh-resumed").length, scenario === "restart-before-offer" ? 1 : 0);
+      assert.equal(events.filter(action => action === "approved-source-refresh").length,
+        ["transient-review", "issue-changed"].includes(scenario) ? 2 : ["scope-changed", "prior-offer"].includes(scenario) ? 0 : 1);
+      assert.deepEqual(records.get("2")?.approval, approval(downstream));
+      assert.equal(records.get("2")?.delivery?.baseRevision, baseRevision);
     });
   }
 });

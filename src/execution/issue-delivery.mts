@@ -11,7 +11,7 @@ import { recoverCheckedWorkspace } from "./checked-issue-recovery.mts";
 import { type FailedReviewDraft, restoreFailedReviewDraft } from "./failed-review-draft.mts";
 import { type AccountAssignment, type CodexAccountDispatch, withCodexAccount } from "./codex-account-dispatch.mts";
 import { qualitySources } from "./codex-quality-review.mts";
-import { IssueDeliverySourcesChanged, proveSourceHandoff, type SourceHandoff, type SourceProducer } from "./dependency-source-handoff.mts";
+import { IssueDeliverySourcesChanged, proveRefreshedSources, proveSourceHandoff, type SourceHandoff, type SourceProducer } from "./dependency-source-handoff.mts";
 import type { DispatchMonitor } from "./dispatch-monitor.mts";
 import { IssueVerificationUncertain } from "./issue-verification.mts";
 import type { CodeWorkerPool } from "./code-worker-pool.mts";
@@ -42,6 +42,7 @@ export type PrepareIssue = (input: {
   failedReviewDraft?: FailedReviewDraft & { testFiles: readonly string[] };
   revalidateWorker?: (signal: AbortSignal) => Promise<void>;
   sourceHandoff?: {
+    refreshRevision?: string;
     current: (branch: string, signal: AbortSignal) => Promise<readonly SourceProducer[]>;
     review: (handoff: SourceHandoff, sources: Record<string, string>, signal: AbortSignal) => Promise<void>;
     ready: () => void;
@@ -198,6 +199,9 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
         if (!publisher.checkoutPublished || !spec.baseRevision || !/^[a-f0-9]{40}$/.test(spec.baseRevision)) throw new IssueDeliverySourcesChanged();
         await publisher.checkoutPublished(workspace, reviewTarget, signal);
         await git(["merge-base", "--is-ancestor", spec.baseRevision, "HEAD"]);
+      } else if (sourceHandoff?.refreshRevision && spec.baseRevision) {
+        handoff = await proveRefreshedSources(git, spec.baseRevision, sourceHandoff.refreshRevision,
+          [...spec.files, ...(spec.sourcePaths ?? [])], spec.basePlanPath, upstream, await sourceHandoff.current(base, signal));
       } else {
         handoff = await checkoutReviewedIssueBase(git, spec, upstream,
           sourceHandoff && (() => sourceHandoff.current(base, signal)));
@@ -235,6 +239,7 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
       if (handoff && sourceHandoff) {
         try {
           const sources = await qualitySources(workspace, revision, [...spec.files, ...(spec.sourcePaths ?? [])], signal);
+          if (handoff.refreshed && handoff.blobs.some(blob => !Object.hasOwn(sources, blob.path))) throw new IssueDeliverySourcesChanged();
           await sourceHandoff.review(handoff, sources, signal);
           await ensureCurrent(signal);
         } catch {

@@ -370,7 +370,8 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
         `${p.published?.[p.drafts?.findIndex(ticket => ticket.id === parent) ?? -1]}:${path}`).sort();
       const actual = proof.producers.flatMap(producer => producer.sources.map(path => `${producer.issue}:${path}`)).sort();
       if (!proof.changedPaths.length || !expected.length || JSON.stringify(expected) !== JSON.stringify(actual)
-        || proof.changedPaths.some(path => !proof.producers.some(producer => producer.sources.includes(path)))) throw new IssueDeliverySourcesChanged();
+        || (proof.refreshed ? claim.sourceRefresh?.revision !== proof.execution || proof.changedPaths.some(path => !ticketPaths(draft).includes(path))
+          : proof.changedPaths.some(path => !proof.producers.some(producer => producer.sources.includes(path))))) throw new IssueDeliverySourcesChanged();
       const packet = qualityPacket(flow, p.base, p.id, p.drafts, {}, p.batchAcceptance);
       return reviewTicketSources({ ...packet, revision: proof.execution }, draft, sources, reviewer, signal,
         { original: p.base, changedPaths: proof.changedPaths });

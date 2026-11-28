@@ -77,6 +77,7 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
   return {
     config,
     permits: (id: string) => allowed.has(id),
+    hasAttempt: (repo: string, issue: number) => [...attempts.values()].some(row => row.repo.toLowerCase() === repo.toLowerCase() && row.issue === issue),
     failedAttempt(scope: WorkerFailureScope) {
       // 按持久化派发顺序检查最后一次。同一工单有更新的尝试时，不能凭旧回执再次派发。
       const latest = latestForScope(scope);
