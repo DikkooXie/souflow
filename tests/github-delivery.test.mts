@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { openActivityStore } from "../src/audit/activity-store.mts";
 import { createGitHubDelivery, githubPull } from "../src/connections/github-delivery.mts";
 import { type DeliveryTracker, issueRevision, type IssueDetail, type IssuePull } from "../src/connections/issue-tracker.mts";
@@ -238,6 +238,31 @@ test("实际通过的验收测试回执去重，排除跳过的用例和汇总�
   const fileSummary = execFileSync(process.execPath, ["--test", "--test-reporter=tap", empty], { encoding: "utf8", env });
   assert.match(fileSummary, /ok \d+ - .*AC-9-empty\.test\.mjs/);
   assert.deepEqual(passingAcceptanceTests(fileSummary), []);
+});
+
+test("隔离检查保留 TAP 回执，自选报告格式的子测试不受影响", async t => {
+  const workspace = await mkdtemp(join(tmpdir(), "souflow-check-reporter-"));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  await writeFile(join(workspace, "package.json"), JSON.stringify({ scripts: { check: "npm test", test: "node --test" } }));
+  await writeFile(join(workspace, "receipt.test.mjs"), `
+    import assert from "node:assert/strict";
+    import { execFileSync } from "node:child_process";
+    import { test } from "node:test";
+    test("[AC-1] 保留测试回执", () => {
+      const env = { ...process.env };
+      delete env.NODE_TEST_CONTEXT;
+      const output = execFileSync(process.execPath, ["--test-reporter=tap", "--input-type=module", "-e",
+        "import { test } from 'node:test'; test('child', () => {});"], { env, encoding: "utf8" });
+      assert.match(output, /ok 1 - child/);
+    });
+    test.skip("[AC-2] 此项跳过", () => {});
+  `);
+  const script = fileURLToPath(new URL("../src/execution/isolated-issue-check.sh", import.meta.url));
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const output = execFileSync("sh", [script], { cwd: workspace, encoding: "utf8", env });
+  assert.match(output, /TAP version/);
+  assert.deepEqual(passingAcceptanceTests(output), ["[AC-1] 保留测试回执"]);
 });
 
 test("交付复核按当前头和工单版本保存，旧提交回执保留为历史", async () => {
