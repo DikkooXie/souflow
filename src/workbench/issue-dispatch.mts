@@ -17,8 +17,9 @@ import type { DeliveryReviewReceipt } from "../planning/delivery-review.mts";
 import { qualityBindingCurrent, type QualityBinding, type TicketSourceFinding } from "../planning/dispatch-quality.mts";
 import type { ApprovedReviewFix } from "./approved-review-fix.mts";
 import { matchesSourceRefresh, type ApprovedSourceRefresh } from "./approved-source-refresh.mts";
-import { activePrePrAmendment, amendedSpec, type ApprovedPrePrAmendment } from "./pre-pr-amendment.mts";
+import { activePrePrAmendment, amendedSpec, amendmentRecoveryBound, type ApprovedPrePrAmendment } from "./pre-pr-amendment.mts";
 import { createPrePrAmendmentAuthorization } from "./pre-pr-amendment-authorization.mts";
+import { queueWorkerRecovery } from "./worker-recovery.mts";
 import { readRepairDecision, repairDecisionCard, repairFromApproval, repairFromReceipt } from "./delivery-review-repair.mts";
 import type { ReviewIssueDelivery } from "./github-delivery-review.mts";
 import { type createPlannedIssuePublication, hasPublicationMarker } from "./planned-issue-publication.mts";
@@ -59,6 +60,7 @@ export type Claim = Remote & {
   claimUncertain?: boolean;
   failure?: DeliveryFailure; retryCount?: number; retriedWorkerAttempt?: string; pendingWorkerAttempt?: string;
   recoveryDispatchAttempt?: string; interruptedDevelopment?: boolean;
+  recoveredWorkerAttempts?: string[];
   reviewFix?: { from: string; state: "running" | "publishing" | "complete" | "failed"; pendingHead?: string; base?: string; repairId?: string;
     testFiles?: string[]; retriedTests?: boolean; testFailureNote?: string; testCheckFailed?: boolean; replayedDraft?: FailedReviewDraft };
   reviewTestFiles?: string[];
@@ -198,52 +200,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     save({ ...c, phase: "waiting", retryCount: oldFormat ? 2 : 1, failure: c.failure ?? { stage: "legacy", reason: "unavailable" } },
       oldFormat ? "patch-recovery-queued" : "retry-queued");
   }
-  function queueWorkerRetry(c: Claim) {
-    const requested = delivery?.sourceRefresh;
-    const recoveringPending = !!c.pendingWorkerAttempt;
-    const recoveringLegacy = !recoveringPending && c.retryCount === 1 && !!c.retriedWorkerAttempt
-      && requested?.attemptId === c.retriedWorkerAttempt && ["waiting", "uncertain"].includes(c.phase)
-      && c.failure?.stage === "device" && c.failure.reason === "device-failed"
-      && ["tests", "dependencies"].includes(c.failure.workerStage ?? "");
-    const needsReceipt = c.phase === "uncertain"
-      && (c.interruptedDevelopment || c.failure?.stage === "preflight" && c.failure.reason === "unavailable"
-        || c.failure?.stage === "device" && c.failure.reason === "device-failed");
-    const recordedFailure = c.phase === "deliveryFailed" && c.failure?.stage === "device" && c.failure.reason === "device-failed";
-    if ((!recoveringPending && !recoveringLegacy && !needsReceipt && !recordedFailure) || !delivery?.conversation || !delivery.failedWorkerAttempt
-      || c.claimUncertain || c.target || c.pull || c.pulls.length || !c.delivery?.baseRevision
-      || !qualityBindingCurrent(c.approval?.quality) || !delivery.reviewScopeCurrent?.(c)) return c;
-    const scope = workerScope(tracker.repo, c);
-    const attempt = scope && delivery.failedWorkerAttempt(scope);
-    if (!attempt) return c;
-    const failure: DeliveryFailure = { stage: "device", reason: "device-failed",
-      ...(attempt.patchDiagnostics ? { patchDiagnostics: attempt.patchDiagnostics } : {}),
-      ...(attempt.failureStage ? { workerStage: attempt.failureStage } : {}), ...(attempt.isolation ? { isolation: attempt.isolation } : {}),
-      ...(attempt.candidateDigest ? { candidateDigest: attempt.candidateDigest, candidateFiles: attempt.candidateFiles } : {}),
-      ...(attempt.candidatePatch ? { candidatePatch: attempt.candidatePatch, candidatePatchDigest: attempt.candidatePatchDigest } : {}) };
-    const { interruptedDevelopment: _interruptedDevelopment, ...resumable } = c;
-    const evidenceClaim = isDeepStrictEqual(c.failure, failure) && !c.interruptedDevelopment ? c : { ...resumable, failure };
-    const configMatches = requested?.attemptId === attempt.id && requested.issue === c.number
-      && requested.requestId === c.requestId && requested.version === c.approval?.version
-      && requested.issueRevision === c.approval?.issueRevision;
-    const amendment = activePrePrAmendment(c);
-    const sourceAlreadyBlocked = c.sourceRefresh?.state === "blocked"
-      && (c.sourceRefresh.revision === requested?.revision || requested?.requireAmendment)
-      && (!amendment || c.sourceRefresh.amendmentId === amendment.id);
-    const queuedCandidate: Claim = { ...evidenceClaim, phase: "waiting", pendingWorkerAttempt: attempt.id };
-    const canRefreshSources = !!requested && matchesSourceRefresh(queuedCandidate, requested);
-    if ((!recoveringPending && !recoveringLegacy && (c.retryCount ?? 0) >= 1)
-      || (!recoveringPending && !recoveringLegacy && c.retriedWorkerAttempt === attempt.id)
-      || !delivery.recoverDeviceTestAttempts?.has(attempt.id) || !configMatches || sourceAlreadyBlocked
-      || !["tests", "dependencies"].includes(attempt.failureStage ?? "") || !canRefreshSources) {
-      if (evidenceClaim !== c) save(evidenceClaim, "worker-failure-restored");
-      return evidenceClaim;
-    }
-    // 先持久化待恢复回执。源码复核真正通过并即将交给执行器时，才消耗唯一恢复机会。
-    const queued = queuedCandidate;
-    if (!recoveringPending) save(queued, recoveringLegacy ? "worker-recovery-migrated" : "worker-retry-queued");
-    else if (evidenceClaim !== c || c.phase !== "waiting") save(queued, "worker-retry-resumed");
-    return queued;
-  }
+  const queueWorkerRetry = (c: Claim) => queueWorkerRecovery(c, { delivery, repo: tracker.repo, workerScope, save });
   for (const c of store.load()) {
     if (c.reviewFix?.state === "running") save({ ...c, reviewFix: { ...c.reviewFix, state: "failed" } }, "review-fix-interrupted");
     else if ((c.pendingWorkerAttempt || c.retryCount === 1 && c.retriedWorkerAttempt) && c.sourceRefresh && c.phase === "developing") {
@@ -539,6 +496,9 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
         ...(c.failure && (c.retryCount || c.pendingWorkerAttempt) ? { previousFailure: c.failure } : {}),
         ...(spec.sourceFrom?.length && delivery.reviewSourceHandoff ? { sourceHandoff: {
           ...(c.sourceRefresh ? { refreshRevision: c.sourceRefresh.revision } : {}),
+          ...(c.pendingWorkerAttempt && c.recoveryDispatchAttempt === c.pendingWorkerAttempt && c.sourceRefresh
+            && amendmentRecoveryBound(c, c.pendingWorkerAttempt, c.sourceRefresh.revision)
+            ? { reuseApprovedRevision: true as const } : {}),
           current: producers,
           ready() {
             abort.signal.throwIfAborted();
@@ -596,7 +556,9 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
             || latest.sourceRefresh?.state !== "passed") throw new IssueDeliverySourcesChanged();
           const { pendingWorkerAttempt: _pendingWorkerAttempt, ...confirmed } = latest;
           save({ ...confirmed, retriedWorkerAttempt: pendingAttempt, recoveryDispatchAttempt: attemptId,
-            retryCount: 1 }, "worker-redispatched");
+            recoveredWorkerAttempts: [...new Set([...(latest.recoveredWorkerAttempts ?? []),
+              ...(latest.recoveryDispatchAttempt && latest.retriedWorkerAttempt ? [latest.retriedWorkerAttempt] : []), pendingAttempt])],
+            retryCount: (latest.recoveryDispatchAttempt ? latest.retryCount ?? 0 : 0) + 1 }, "worker-redispatched");
         } } : {}),
         ...(c.approval ? { flowId: c.approval.flowId, planVersion: c.approval.version } : {}) },
         sessionId => { if (current().sessionId !== sessionId) save({ ...current(), sessionId }, "connected"); }, abort.signal,

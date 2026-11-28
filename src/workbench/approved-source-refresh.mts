@@ -1,6 +1,6 @@
 import { workerCommit, workerDigest, workerId } from "../execution/code-worker-protocol.mts";
 import type { Claim } from "./issue-dispatch.mts";
-import { activePrePrAmendment } from "./pre-pr-amendment.mts";
+import { activePrePrAmendment, amendmentRecoveryBound } from "./pre-pr-amendment.mts";
 
 export type ApprovedSourceRefresh = { issue: number; requestId: string; version: number; issueRevision: string; revision: string; attemptId?: string;
   requireAmendment?: true };
@@ -34,9 +34,12 @@ export function matchesSourceRefresh(claim: Claim, requested: ApprovedSourceRefr
       || !!amendment && amendment.attemptId === requested.attemptId && amendment.revision === requested.revision
         && claim.sourceRefresh.amendmentId !== amendment.id);
   if (!sameApproval) return false;
+  // 追加测试授权固定了源码版本，后续恢复不得因换版本而悄悄退回原文件范围。
+  if (claim.prePrAmendments?.length && (!requested.attemptId
+    || !amendmentRecoveryBound(claim, requested.attemptId, requested.revision))) return false;
   if (requested.attemptId) return ["waiting", "uncertain"].includes(claim.phase) && claim.pendingWorkerAttempt === requested.attemptId
     && claim.failure?.stage === "device" && claim.failure.reason === "device-failed"
-    && ["tests", "dependencies"].includes(claim.failure.workerStage ?? "");
+    && ["tests", "dependencies", "patch"].includes(claim.failure.workerStage ?? "");
   return claim.phase === "uncertain" && claim.failure?.stage === "preflight" && !claim.sessionId
     && !claim.retriedWorkerAttempt && !claim.retryCount;
 }
