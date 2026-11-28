@@ -98,6 +98,7 @@ type WorkbenchOptions = {
   codexAccounts?: CodexAccountDispatch;
   remoteLan?: RemoteLanConfig;
   codeDevices?: ReadonlySet<string>;
+  createWorkers?: typeof createCodeWorkerPool;
   qualityReviewer?: QualityReviewer;
   ticketSourceReviewer?: TicketSourceReviewer;
   qualityModel?: string;
@@ -107,6 +108,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
   limits = defaultLimits, inputLimits = defaultInputLimits, auditThresholds = defaultAuditThresholds,
   dispatchConcurrency = defaultDispatchConcurrency, dispatchAdapters, project, members, issueTracker, verifyIssue, issueDelivery,
   memberTrackers, hostName = hostname(), codexAccounts, remoteLan, codeDevices, qualityReviewer, ticketSourceReviewer, qualityModel,
+  createWorkers = createCodeWorkerPool,
 }: WorkbenchOptions = {}) {
   if (codeDevices?.size && (!remoteLan || !issueDelivery || !issueTracker)) {
     throw Error("代码设备需要开启设备接入和 GitHub 对话工单交付。");
@@ -140,11 +142,13 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       if (!recovery) throw Error("局域网设备接入需要持久化的 Codex 工作台。");
       const handoff = createRemoteHandoff(audit.checkpoint<RemoteDevice>("remote-devices"),
         audit.checkpoint<RemoteJob>("remote-jobs"), remoteLan.offlineMs, Date.now, audit.record);
-      const code = issueDelivery && issueTracker ? createCodeWorkerPool(audit.checkpoint<WorkerAttempt>("remote-code"),
+      const code = issueDelivery && issueTracker ? createWorkers(audit.checkpoint<WorkerAttempt>("remote-code"),
         codeDevices ?? new Set<string>(), readCodeWorkerConfig(), Date.now, audit.record,
         (id, repo, issue, flowId): boolean => {
           const claim = issueTracker.repo.toLowerCase() === repo.toLowerCase() ? github?.amendmentClaim(issue) : undefined;
-          return !!claim && claim.approval?.flowId === flowId && handoff.ownsDevice(id, claim.claimedBy);
+          return !!claim && claim.approval?.flowId === flowId && claim.state === "OPEN"
+            && claim.assignees.length === 1 && claim.assignees[0]?.toLowerCase() === claim.account.toLowerCase()
+            && handoff.ownsDevice(id, claim.claimedBy);
         }) : undefined;
       return { handoff, code, ingress: createRemoteWorkerIngress(handoff, remoteLan, code), cert: new X509Certificate(remoteLan.cert).toString() };
     } catch (error) {
