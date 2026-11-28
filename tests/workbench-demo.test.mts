@@ -8,6 +8,7 @@ import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 import test, { type TestContext } from "node:test";
 import { currentDevelopmentPlan, type Flow, maxArtifactTextLength } from "../src/planning/conversation-flow.mts";
 import type { createLocalDispatch } from "../src/execution/local-dispatch.mts";
@@ -51,6 +52,119 @@ async function start(t: TestContext, live?: Parameters<typeof createWorkbenchSer
   };
   return { url, post, read, close };
 }
+
+async function loadWorkbenchPage() {
+  function element() {
+    const button = { disabled: false };
+    return Object.assign(new EventTarget(), {
+      value: "", textContent: "", hidden: false, dataset: {}, childElementCount: 0,
+      querySelector: () => button, querySelectorAll: () => [], contains: () => false,
+      append() {}, replaceChildren() {}, setAttribute() {}, removeAttribute() {},
+    });
+  }
+  const elements = new Map<string, ReturnType<typeof element>>();
+  function get(selector: string) {
+    const entry = elements.get(selector) ?? element();
+    elements.set(selector, entry);
+    return entry;
+  }
+  const prompt = get("#new-prompt");
+  const form = Object.assign(get("#start-session"), { reset() { prompt.value = ""; } });
+  const pending: { path: string; send: (status: number, data?: unknown) => void }[] = [];
+  let tick: (() => void) | undefined;
+  const panel = () => ({ update() {}, setAvailable() {}, navigate() {} });
+  const source = await readFile(new URL("../src/workbench/public/app.mjs", import.meta.url), "utf8");
+  runInNewContext(source.replace(/^import .*;\n/gm, ""), {
+    document: Object.assign(element(), { querySelector: get, createElement: element }),
+    window: new EventTarget(), location: { hash: "" }, matchMedia: () => new EventTarget(), AbortSignal,
+    createArchive: panel, createAuditView: panel, createDispatchPanel: panel,
+    createMonitorView: panel, createGithubPanel: panel, renderDeliveryReviews() {}, renderQualityDetails() {},
+    setTimeout(callback: () => void) { tick = callback; },
+    clearTimeout() { tick = undefined; },
+    fetch: (path: string) => new Promise(resolve => pending.push({ path,
+      send: (status, data) => resolve({ status, ok: status === 200, json: async () => data }),
+    })),
+  });
+  function take(path = "/api/decisions") {
+    const request = pending.shift();
+    assert.equal(request?.path, path);
+    assert.ok(request);
+    return async (status: number, data?: unknown) => {
+      request.send(status, data);
+      await new Promise<void>(resolve => setImmediate(resolve));
+    };
+  }
+  return { get, prompt, form, take, poll() { assert.ok(tick); tick(); return take(); }, submit() {
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+    return take("/api/workflows");
+  } };
+}
+
+function memberSnapshot(login?: string, flowId?: string) {
+  return { mode: "codex", requests: [], inputLimits: { promptMaxLength: 4000, answerMaxLength: 500 },
+    member: login ? { id: "implementer", login, label: login } : undefined, flowId,
+    flows: flowId ? [{ id: flowId, title: flowId, prompt: flowId, status: "ready", outputs: [] }] : [],
+  };
+}
+
+test("AC-3 同一成员保留草稿，切换成员或登出清空草稿", async () => {
+  const page = await loadWorkbenchPage();
+  const label = page.get("#member-label");
+  await page.take()(200, memberSnapshot("alice", "甲的对话"));
+  page.prompt.value = "甲的未提交需求";
+  await page.poll()(200, memberSnapshot("alice", "甲的对话"));
+  assert.equal(page.prompt.value, "甲的未提交需求");
+
+  const oldUnauthorized = page.poll();
+  await page.poll()(200, memberSnapshot("bob"));
+  assert.equal(label.textContent, "bob");
+  assert.equal(page.prompt.value, "");
+  assert.equal(page.get("#conversation").hidden, true);
+  page.prompt.value = "乙的未提交需求";
+  await oldUnauthorized(401);
+  assert.equal(label.textContent, "bob");
+  assert.equal(page.prompt.value, "乙的未提交需求");
+
+  await page.poll()(200, memberSnapshot());
+  assert.equal(label.hidden, true);
+  assert.equal(page.prompt.value, "");
+  await page.poll()(200, memberSnapshot("alice"));
+  assert.equal(label.textContent, "alice");
+  assert.equal(page.prompt.value, "");
+});
+
+test("AC-3 迟到的轮询保留当前提交和新对话，当前 401 清理成员状态", async () => {
+  const page = await loadWorkbenchPage();
+  const label = page.get("#member-label");
+  await page.take()(200, memberSnapshot("alice"));
+  let finishOldSnapshot!: (data: unknown) => void;
+  await page.poll()(200, new Promise(resolve => { finishOldSnapshot = resolve; }));
+  const oldUnauthorized = page.poll();
+  page.prompt.value = "待提交需求";
+  const submitted = page.submit();
+  await oldUnauthorized(401);
+  assert.equal(page.form.querySelector().disabled, true);
+  assert.equal(page.prompt.value, "待提交需求");
+  assert.equal(label.textContent, "alice");
+
+  await submitted(200, memberSnapshot("bob", "新对话"));
+  page.prompt.value = "下一项需求";
+  finishOldSnapshot(memberSnapshot("alice", "旧对话"));
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(label.textContent, "bob");
+  assert.equal(page.get("#conversation").hidden, false);
+  assert.equal(page.get("#conversation-message").textContent, "新对话");
+  assert.equal(page.prompt.value, "下一项需求");
+  assert.equal(page.form.querySelector().disabled, false);
+
+  const oldSuccess = page.poll();
+  await page.submit()(401);
+  await oldSuccess(200, memberSnapshot("bob", "新对话"));
+  assert.equal(label.hidden, true);
+  assert.equal(page.form.hidden, true);
+  assert.equal(page.prompt.value, "");
+  assert.equal(page.get("#conversation").hidden, true);
+});
 
 async function withAuditWriteBlocked(path: string, check: () => Promise<void>) {
   const writer = new DatabaseSync(path);

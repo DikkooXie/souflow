@@ -558,6 +558,7 @@ function acceptResponse(requestId) {
 function clearMemberState() {
   // 身份边界使当时已发出的请求失效，包括仍在读取正文的响应。
   latestResponse = requestNumber;
+  promptBox.value = "";
   personalDeviceList.replaceChildren();
   drafts.clear();
   selected = undefined;
@@ -587,7 +588,7 @@ function rejectAuthentication(requestId) {
 function applySnapshot(snapshot) {
   if (snapshot.requests) {
     const nextMember = snapshot.member;
-    if ((member?.login ?? member?.id) !== (nextMember?.login ?? nextMember?.id)) clearMemberState();
+    if (snapshotLoaded && (member?.login ?? member?.id) !== (nextMember?.login ?? nextMember?.id)) clearMemberState();
     member = nextMember;
     authenticationRequired = false;
     snapshotLoaded = true;
@@ -623,6 +624,7 @@ async function refresh() {
   refreshing += 1;
   try {
     const response = await fetch("/api/decisions", { signal: AbortSignal.timeout(10_000) });
+    if (revision !== cycle) return;
     if (response.status === 401) {
       rejectAuthentication(requestId);
       return;
