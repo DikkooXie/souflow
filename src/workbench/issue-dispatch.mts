@@ -16,6 +16,8 @@ import type { DeliveryReviewReceipt } from "../planning/delivery-review.mts";
 import { qualityBindingCurrent, type QualityBinding, type TicketSourceFinding } from "../planning/dispatch-quality.mts";
 import type { ApprovedReviewFix } from "./approved-review-fix.mts";
 import { matchesSourceRefresh, type ApprovedSourceRefresh } from "./approved-source-refresh.mts";
+import { activePrePrAmendment, amendedSpec, type ApprovedPrePrAmendment } from "./pre-pr-amendment.mts";
+import { createPrePrAmendmentAuthorization } from "./pre-pr-amendment-authorization.mts";
 import { readRepairDecision, repairDecisionCard, repairFromApproval, repairFromReceipt } from "./delivery-review-repair.mts";
 import type { ReviewIssueDelivery } from "./github-delivery-review.mts";
 import { type createPlannedIssuePublication, hasPublicationMarker } from "./planned-issue-publication.mts";
@@ -60,7 +62,8 @@ export type Claim = Remote & {
   reviewTestFiles?: string[];
   reviewRepairs?: ReviewRepairDecision[];
   sourceHandoff?: { proof: SourceHandoff; finding: TicketSourceFinding };
-  sourceRefresh?: { revision: string; state: "reviewing" | "blocked" | "passed"; woken?: true };
+  sourceRefresh?: { revision: string; state: "reviewing" | "blocked" | "passed"; woken?: true; amendmentId?: string };
+  prePrAmendments?: ApprovedPrePrAmendment[];
 };
 const phases = { claiming: "正在认领", waiting: "等待上游 PR 合并", checkingSources: "正在核对上游源码",
   developing: "Codex 正在开发与测试", readyToPublish: "本地检查通过，等待 GitHub 核对",
@@ -121,6 +124,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       ...(event === "worker-redispatched" ? { recoveredAttempt: c.retriedWorkerAttempt, workerAttempt: c.recoveryDispatchAttempt } : {}),
       ...(event?.startsWith("dependency-source-") ? { sourceHandoff: c.sourceHandoff } : {}),
       ...(event === "approved-source-refresh" ? { sourceRefresh: c.sourceRefresh, original: c.delivery?.baseRevision } : {}),
+      ...(event === "pre-pr-amendment-authorized" ? { amendment: activePrePrAmendment(c) } : {}),
+      ...(activePrePrAmendment(c) ? { amendmentId: activePrePrAmendment(c)?.id } : {}),
       ...(c.pull ? { pull: c.pull.number, ci: c.pull.ci, merge: c.pull.mergeCommit, state: c.pull.state } : {}), actor: c.claimedBy, githubAccount: c.account, phase: c.phase, session: c.sessionId,
     } } : undefined)) throw new IssueActionError(503, "无法保存 GitHub 工单状态。");
     claims.set(c.number, c);
@@ -216,7 +221,10 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     const configMatches = requested?.attemptId === attempt.id && requested.issue === c.number
       && requested.requestId === c.requestId && requested.version === c.approval?.version
       && requested.issueRevision === c.approval?.issueRevision;
-    const sourceAlreadyBlocked = c.sourceRefresh?.state === "blocked" && c.sourceRefresh.revision === requested?.revision;
+    const amendment = activePrePrAmendment(c);
+    const sourceAlreadyBlocked = c.sourceRefresh?.state === "blocked"
+      && (c.sourceRefresh.revision === requested?.revision || requested?.requireAmendment)
+      && (!amendment || c.sourceRefresh.amendmentId === amendment.id);
     const queuedCandidate: Claim = { ...evidenceClaim, phase: "waiting", pendingWorkerAttempt: attempt.id };
     const canRefreshSources = !!requested && matchesSourceRefresh(queuedCandidate, requested);
     if ((!recoveringPending && !recoveringLegacy && (c.retryCount ?? 0) >= 1)
@@ -672,14 +680,17 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       const upstream = c.delivery.dependsOn.map(number => claims.get(number)?.pull);
       if (!upstream.every(pull => pull?.state === "MERGED" && pull.mergeCommit)) continue;
       const checkSources = !!(c.delivery.sourceFrom?.length && delivery.reviewSourceHandoff);
+      const amendment = activePrePrAmendment(c);
       const selected: Claim = recoverCheckedHead ? { ...c, attemptedCheckedRecovery: true, phase: "developing" }
         : c.phase === "readyToPublish" ? c : { ...c, ...(refresh ? { sourceRefresh: { ...c.sourceRefresh, revision: refresh.revision, state: "reviewing" } } : {}),
+          ...(refresh && amendment ? { sourceRefresh: { ...c.sourceRefresh, revision: refresh.revision,
+            state: "reviewing", amendmentId: amendment.id } } : {}),
           phase: checkSources ? "checkingSources" : "developing" };
       if (selected !== c) save(selected, refresh ? "approved-source-refresh" : recoverCheckedHead ? "checked-recovery-queued" : checkSources ? "dependency-source-checking"
         : c.retriedWorkerAttempt ? "worker-redispatched" : upstream.length ? "woken" : "dispatched");
       if (refresh) startedSourceRefresh = true;
       deliveries.add(c.number);
-      const job = develop(selected, c.delivery, upstream.map(pull => pull?.mergeCommit ?? ""), recoverCheckedHead);
+      const job = develop(selected, amendedSpec(c) ?? c.delivery, upstream.map(pull => pull?.mergeCommit ?? ""), recoverCheckedHead);
       jobs.add(job);
       void job.finally(() => {
         jobs.delete(job);
@@ -745,8 +756,13 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   function permits(actor: string) {
     return !memberTrackers.size || memberTrackers.has(actor);
   }
+  const amendments = createPrePrAmendmentAuthorization({ claim: number => claims.get(number), save,
+    connection: actor => memberTrackers.get(actor) ?? tracker, delivery, permits, busy: number => deliveries.has(number), dispatch: dispatchReady,
+    latestFailure(c) { const scope = workerScope(tracker.repo, c); return scope && delivery?.failedWorkerAttempt?.(scope); } });
   return {
     snapshot, permits,
+    amendmentClaim(number: number) { const c = claims.get(number); return c && structuredClone(c); },
+    amendmentCandidate: amendments.candidate, authorizeAmendment: amendments.authorize,
     repairCards(actor: string) {
       return repairDecisions(actor).map(({ repair, claim }) => repairDecisionCard(repair, claim.syncedAt));
     },
@@ -875,7 +891,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     async close() {
       abort.abort();
       clearInterval(timer);
-      await Promise.allSettled([pending?.task, refreshing, polling, ...jobs, ...reviewJobs.values()]);
+      await Promise.allSettled([pending?.task, refreshing, polling, ...jobs, ...reviewJobs.values(), amendments.close()]);
     },
   };
 }

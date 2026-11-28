@@ -13,6 +13,7 @@ import { ticketDeliveryLines } from "../planning/ticket-delivery.mts";
 import type { DecisionCard } from "./demo-state.mts";
 import type { Claim, createIssueDispatch } from "./issue-dispatch.mts";
 import { type createPlannedIssuePublication, type PlannedIssueBatch, preparePlannedIssues } from "./planned-issue-publication.mts";
+import { activePrePrAmendment, amendedScope } from "./pre-pr-amendment.mts";
 
 export type IssueProposal = {
   id: string; flowId: string; actor: string; planId: string; version: number; base: string;
@@ -345,7 +346,7 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
       }));
     },
     has(id: string) { return proposals.has(id); },
-    reviewScope(claim: Pick<Claim, "number" | "requestId" | "claimedBy" | "approval">, flow: Flow | undefined): DeliveryReviewScope | undefined {
+    reviewScope(claim: Pick<Claim, "number" | "requestId" | "claimedBy" | "approval" | "sourceRefresh" | "prePrAmendments">, flow: Flow | undefined): DeliveryReviewScope | undefined {
       const p = boundProposal(claim, flow);
       if (!p || !flow) return;
       const selected = p.items.find(issue => issue.number === claim.number && issue.revision === claim.approval?.issueRevision);
@@ -358,23 +359,31 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
         return text ? [{ ...row, text }] : [];
       });
       if (!mapped.length || mapped.length !== issue.validation.length) return;
-      return { request: flow.prompt, criteria: mapped, files: draft?.paths ?? selected?.files ?? [] };
+      return amendedScope(claim, { request: flow.prompt, criteria: mapped, files: draft?.paths ?? selected?.files ?? [] });
     },
     async reviewHandoff(claim: Claim, flow: Flow | undefined, proof: SourceHandoff, sources: Record<string, string>, signal: AbortSignal) {
       const p = boundProposal(claim, flow);
       const reviewer = planned?.sourceReview?.reviewer;
-      const draft = p?.published ? p.drafts?.[p.published.indexOf(claim.number)] : undefined;
-      if (!p?.sourceHandoff || !p.drafts || !p.published || p.status !== "submitted" || !flow || !reviewer || !draft
+      const original = p?.published ? p.drafts?.[p.published.indexOf(claim.number)] : undefined;
+      if (!p?.sourceHandoff || !p.drafts || !p.published || p.status !== "submitted" || !flow || !reviewer || !original
         || proof.original !== p.base) throw new IssueDeliverySourcesChanged();
+      const amendment = activePrePrAmendment(claim);
+      if (amendment && (claim.sourceRefresh?.amendmentId !== amendment.id || claim.pendingWorkerAttempt !== amendment.attemptId
+        || amendment.validation.some(v => !original.validation.some(row => row.criterion === v.criterion)))) throw new IssueDeliverySourcesChanged();
+      const scope = amendedScope(claim, { request: flow.prompt, criteria: original.validation.map(row => ({ ...row, text: row.criterion })),
+        files: original.paths });
+      const draft = !amendment ? original : { ...original, paths: scope.files, validation: scope.criteria.map(({ text: _text, ...row }) => row),
+        instructions: [original.instructions, `追加修订 ${amendment.id}，允许补充测试：${amendment.testFiles.join("、")}`].join("\n") };
       const expected = sourceProducers(p, draft).map(({ path, parent }) =>
         `${p.published?.[p.drafts?.findIndex(ticket => ticket.id === parent) ?? -1]}:${path}`).sort();
       const actual = proof.producers.flatMap(producer => producer.sources.map(path => `${producer.issue}:${path}`)).sort();
       if (!proof.changedPaths.length || !expected.length || JSON.stringify(expected) !== JSON.stringify(actual)
         || (proof.refreshed ? claim.sourceRefresh?.revision !== proof.execution || proof.changedPaths.some(path => !ticketPaths(draft).includes(path))
           : proof.changedPaths.some(path => !proof.producers.some(producer => producer.sources.includes(path))))) throw new IssueDeliverySourcesChanged();
-      const packet = qualityPacket(flow, p.base, p.id, p.drafts, {}, p.batchAcceptance);
+      // 原批次仍按原文校验；追加验证有独立授权，作为本次源码复核工单传入。
+      const packet = qualityPacket(flow, p.base, amendment?.id ?? p.id, p.drafts, {}, p.batchAcceptance);
       return reviewTicketSources({ ...packet, revision: proof.execution }, draft, sources, reviewer, signal,
-        { original: p.base, changedPaths: proof.changedPaths });
+        { original: p.base, changedPaths: proof.changedPaths, ...(amendment ? { authorizedTestPaths: amendment.testFiles } : {}) });
     },
     publicationNeedsCheck(id: string, actor: string) {
       const p = proposals.get(id);

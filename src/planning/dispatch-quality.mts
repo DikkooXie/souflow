@@ -192,7 +192,7 @@ export type TicketSourcePacket = {
   plan: QualityPacket["planning"]["documents"][number] | undefined;
   upstream: readonly QualityTicket[];
   references: Record<string, string>;
-  handoff?: { original: string; changedPaths: readonly string[] };
+  handoff?: { original: string; changedPaths: readonly string[]; authorizedTestPaths?: readonly string[] };
 };
 export type TicketSourceFinding = Finding & { ticket: string; revision: string; paths: string[]; sourceDigest: string };
 export type TicketSourceReviewer = (packet: TicketSourcePacket, signal: AbortSignal, correction?: string) => Promise<string | undefined>;
@@ -209,7 +209,8 @@ const findingFields = {
     properties: { ref: { type: "string" }, quote: { type: "string" } } } },
 };
 export function ticketSourceReviewReferenceLimit(packet: Pick<TicketSourcePacket, "handoff">) {
-  return Math.max(qualityReviewLimits.breakdownReferences, packet.handoff?.changedPaths.length ?? 0);
+  return Math.max(qualityReviewLimits.breakdownReferences,
+    new Set([...(packet.handoff?.changedPaths ?? []), ...(packet.handoff?.authorizedTestPaths ?? [])]).size);
 }
 
 export function ticketSourceReviewSchema(references: string[], referenceLimit: number) {
@@ -310,6 +311,9 @@ export async function reviewTicketSources(batch: QualityPacket, ticket: QualityT
       const finding = readFinding(value, packet, ticketSourceReviewReferenceLimit(packet));
       if (finding.status === "pass" && handoff?.changedPaths.some(path => !finding.evidence.some(({ ref }) => ref === `repo:${path}`))) {
         throw new ReviewFindingFormatError("质量复核缺少已变更交接路径的逐字依据。每条变更路径至少引用一次。");
+      }
+      if (finding.status === "pass" && handoff?.authorizedTestPaths?.some(path => !finding.evidence.some(({ ref }) => ref === `repo:${path}`))) {
+        throw new ReviewFindingFormatError("质量复核缺少补充授权测试路径的逐字依据。每条补充路径至少引用一次。");
       }
       return finding;
     }, error => error instanceof ReviewFindingFormatError ? error.message : undefined);
