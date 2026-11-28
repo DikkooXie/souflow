@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { scrubAuditText } from "../audit/activity-store.mts";
 import type { IssuePublisher } from "../connections/issue-tracker.mts";
@@ -148,15 +149,17 @@ export function parseDeliveryPlan(raw: string): ReadonlyMap<number, DeliverySpec
 
 export async function isolatedIssueCheck(workspace: string, image: string, timeoutMs: number, signal: AbortSignal, install: boolean) {
     const name = `souflow-${randomUUID()}`;
+    const runner = fileURLToPath(new URL("./isolated-issue-check.sh", import.meta.url));
+    const runnerPath = "/souflow-issue-check.sh";
     // 安装只针对合并后的锁文件，补丁应用后的检查使用无网络、只读工作区。
     try {
       const { stdout } = await exec("docker", ["run", "--rm", "--name", name, "--pull=never", "--cap-drop=ALL",
         "--security-opt=no-new-privileges", "--pids-limit=256", "--tmpfs", "/tmp:exec",
         "--mount", `type=bind,source=${workspace},target=/workspace${install ? "" : ",readonly"}`,
         "--workdir", "/workspace", "-e", "npm_config_cache=/tmp/npm-cache",
-        // 工单可能固定在旧 package.json，统一由检查容器选择稳定的机器可读回执。
-        ...(!install ? ["--network=none", "-e", "NODE_OPTIONS=--test-reporter=tap"] : []), image, "npm",
-        ...(install ? ["ci", "--ignore-scripts"] : ["run", "check"])], { timeout: timeoutMs, maxBuffer: 2 * 1024 * 1024, signal });
+        ...(!install ? ["--network=none", "--mount", `type=bind,source=${runner},target=${runnerPath},readonly`] : []),
+        image, ...(install ? ["npm", "ci", "--ignore-scripts"] : ["sh", runnerPath])],
+      { timeout: timeoutMs, maxBuffer: 2 * 1024 * 1024, signal });
       return install ? [] : passingAcceptanceTests(stdout);
     } catch (error) {
       if (!install && error && typeof error === "object" && "code" in error && isolatedCheckFailed(error.code)) {

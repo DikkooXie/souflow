@@ -20,6 +20,7 @@ export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; p
   publishRepair?: ReturnType<typeof createPlannedIssuePublication>;
   reviewScopeCurrent?: (claim: Claim) => boolean;
   failedWorkerAttempt?: (scope: WorkerFailureScope) => string | undefined;
+  recoverDeviceTestAttempts?: ReadonlySet<string>;
   reviewSourceHandoff?: (claim: Claim, proof: SourceHandoff, sources: Record<string, string>, signal: AbortSignal) => Promise<TicketSourceFinding> };
 
 function publisher(tracker: IssueTracker) {
@@ -95,7 +96,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       ...(c.reviewFix ? { reviewFix: c.reviewFix } : {}),
       ...(event?.startsWith("review-repair-") ? { repair: c.reviewRepairs?.at(-1) } : {}),
       ...(event === "account-assigned" ? { codexAccount: c.accountAssignment } : {}),
-      ...(event === "worker-retry-queued" ? { workerAttempt: c.retriedWorkerAttempt } : {}),
+      ...(event === "worker-retry-queued" || event === "worker-test-recovery-queued" ? { workerAttempt: c.retriedWorkerAttempt } : {}),
       ...(event?.startsWith("dependency-source-") ? { sourceHandoff: c.sourceHandoff } : {}),
       ...(c.pull ? { pull: c.pull.number, ci: c.pull.ci, merge: c.pull.mergeCommit, state: c.pull.state } : {}), actor: c.claimedBy, githubAccount: c.account, phase: c.phase, session: c.sessionId,
     } } : undefined)) throw new IssueActionError(503, "无法保存 GitHub 工单状态。");
@@ -169,15 +170,18 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       && (c.interruptedDevelopment || c.failure?.stage === "preflight" && c.failure.reason === "unavailable");
     const recordedFailure = c.phase === "deliveryFailed" && c.failure?.stage === "device" && c.failure.reason === "device-failed";
     if ((!needsReceipt && !recordedFailure) || !delivery?.conversation || !delivery.failedWorkerAttempt
-      || c.claimUncertain || c.retryCount || c.target || c.pull || c.pulls.length || !c.delivery?.baseRevision
+      || c.claimUncertain || (c.retryCount ?? 0) > 1 || c.target || c.pull || c.pulls.length || !c.delivery?.baseRevision
       || !qualityBindingCurrent(c.approval?.quality) || !delivery.reviewScopeCurrent?.(c)) return c;
     const scope = workerScope(tracker.repo, c);
     const attempt = scope && delivery.failedWorkerAttempt(scope);
     if (!attempt) return c;
+    const recoveredTest = c.retryCount === 1 && c.retriedWorkerAttempt && c.retriedWorkerAttempt !== attempt
+      && recordedFailure && c.failure?.workerStage === "tests" && delivery.recoverDeviceTestAttempts?.has(attempt);
+    if (c.retryCount && !recoveredTest) return c;
     // 设备只生成补丁并测试。明确失败且工作台尚未进入发布时，才可沿原授权重试。
-    const queued: Claim = { ...c, phase: "waiting", retryCount: 1, retriedWorkerAttempt: attempt,
+    const queued: Claim = { ...c, phase: "waiting", retryCount: recoveredTest ? 2 : 1, retriedWorkerAttempt: attempt,
       ...(needsReceipt ? { failure: { stage: "device", reason: "device-failed" } } : {}) };
-    save(queued, "worker-retry-queued");
+    save(queued, recoveredTest ? "worker-test-recovery-queued" : "worker-retry-queued");
     return queued;
   }
   for (const c of store.load()) {
