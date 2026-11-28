@@ -11,7 +11,7 @@ export function selectApprovedRepairReplay(claim: Claim, fix: ApprovedReviewFix,
   const failure = claim.failure;
   const record = claim.reviewRepairs?.find(row => row.id === fix.repairId && row.decision === "approved");
   if (!fix.repairId || !fix.failedDraft || !fix.testFiles?.length || !repair || repair.id !== fix.repairId
-    || !record?.issue || record.head !== fix.head || record.completedHead
+    || !record?.issue || !Number.isSafeInteger(record.issue) || record.issue < 1 || record.head !== fix.head || record.completedHead
     || state?.repairId !== repair.id || state.from !== fix.head || state.state !== "failed"
     || !state.retriedTests || !state.testCheckFailed || state.replayedDraft
     || failure?.stage !== "tests" || failure.reason !== "check-failed"

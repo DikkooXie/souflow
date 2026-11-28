@@ -52,7 +52,7 @@ async function fixture() {
 test("普通修复卡固定候选恢复只消费一次，原修复单与原派发保持不变", async t => {
   for (const scenario of ["pass", "fails-again", "restart-running", "wrong-repair", "changed-head", "changed-issue", "changed-link",
     "closed-link", "declined", "new-test", "not-diagnostic-test", "wrong-instructions", "missing-file", "tampered-patch",
-    "tampered-manifest", "not-latest-failure", "scope-revoked", "save-failed", "transient-link", "concurrent-preflight"] as const) await t.test(scenario, async () => {
+    "tampered-manifest", "not-latest-failure", "scope-revoked", "save-failed", "transient-link", "concurrent-preflight", "restart-preflight"] as const) await t.test(scenario, async () => {
     const { claim, issue, pull, linked, fix } = await fixture();
     let stored = structuredClone(claim);
     let remotePull = { ...pull };
@@ -74,7 +74,7 @@ test("普通修复卡固定候选恢复只消费一次，原修复单与原派�
         if (number === 148) {
           linkedReads++;
           if (scenario === "transient-link" && linkedReads === 1) throw Error("临时断网");
-          if (scenario === "concurrent-preflight" && linkedReads === 1) await preflight;
+          if (["concurrent-preflight", "restart-preflight"].includes(scenario) && linkedReads === 1) await preflight;
           return { ...linked, ...(scenario === "changed-link" ? { body: "被改动" } : {}),
           ...(scenario === "closed-link" ? { state: "CLOSED" } : {}) }; }
         assert.equal(number, 107);
@@ -107,7 +107,7 @@ test("普通修复卡固定候选恢复只消费一次，原修复单与原派�
           assert.notEqual(input.failedReviewDraft?.sha256, input.failedReviewDraft?.evidence?.sha256);
           assert.equal(stored.reviewFix?.replayedDraft?.sha256, fix.failedDraft?.sha256);
           assert.deepEqual(stored.reviewFix?.replayedCandidate?.files, claim.failure?.candidateFiles);
-          if (!["pass", "transient-link", "concurrent-preflight"].includes(scenario)) throw new IssueDeliveryFailed({ stage: "tests", reason: "check-failed" });
+          if (!["pass", "transient-link", "concurrent-preflight", "restart-preflight"].includes(scenario)) throw new IssueDeliveryFailed({ stage: "tests", reason: "check-failed" });
           return { workspace: "fixture", branch: input.branch, head: next, base: "main", checked: { head: next, passingTests: ["AC-1 完整质量检查"] } };
         },
       });
@@ -127,13 +127,20 @@ test("普通修复卡固定候选恢复只消费一次，原修复单与原派�
             releasePreflight();
             await setImmediate();
           }
+          if (scenario === "restart-preflight" && restart === 0 && n === 0) {
+            const stopped = dispatch.close();
+            releasePreflight();
+            await stopped;
+            assert.equal(stored.reviewFix?.replayedDraft, undefined, "预检中关停不能标记为已开工");
+            assert.equal(prepares, 0);
+          }
         }
       } finally { await dispatch.close(); }
       if (scenario === "restart-running" && restart === 0 && stored.reviewFix) stored.reviewFix.state = "running";
     }
-    const expected = ["pass", "fails-again", "restart-running", "transient-link", "concurrent-preflight"].includes(scenario) ? 1 : 0;
+    const expected = ["pass", "fails-again", "restart-running", "transient-link", "concurrent-preflight", "restart-preflight"].includes(scenario) ? 1 : 0;
     assert.equal(prepares, expected);
-    assert.equal(pushes, ["pass", "transient-link", "concurrent-preflight"].includes(scenario) ? 1 : 0);
+    assert.equal(pushes, ["pass", "transient-link", "concurrent-preflight", "restart-preflight"].includes(scenario) ? 1 : 0);
     assert.ok(replayWrites <= 1);
     assert.deepEqual(stored.reviewRepairs?.map(row => [row.id, row.issue]), claim.reviewRepairs?.map(row => [row.id, row.issue]));
     assert.deepEqual(stored.approval, claim.approval);

@@ -414,6 +414,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       try {
         const base = await verify();
         if (replay) {
+          abort.signal.throwIfAborted();
           // 只读预检断连尚未开工，不消耗候选；异步期间的授权与失败回执必须仍完全一致。
           if (!isDeepStrictEqual(selectApprovedRepairReplay(current(), fix, currentRepair(current())), replay)) {
             throw Error("固定候选恢复授权已变化。");
