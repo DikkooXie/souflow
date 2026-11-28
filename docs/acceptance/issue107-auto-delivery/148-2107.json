@@ -1,0 +1,63 @@
+{
+  "issue": 148,
+  "parent": 107,
+  "pull": 145,
+  "head": "dcf1dd0779bd3ce535e9236500110febacb4fc48",
+  "repair": "d65da34666ba7bd0b3ece3e8f6c2dd0e7aa905cc56fa3f84eb4d6f99572ef2f2",
+  "state": "failed",
+  "retriedTests": true,
+  "isolation": {
+    "step": "quality",
+    "outcome": "exit",
+    "exitCode": 2,
+    "diagnostics": [
+      "tests/remote-handoff.test.mts:161:14 TS1345"
+    ]
+  },
+  "history": [
+    {
+      "seq": 1206,
+      "action": "review-repair-approved"
+    },
+    {
+      "seq": 1209,
+      "action": "review-fix-started"
+    },
+    {
+      "seq": 1210,
+      "action": "creation-reserved"
+    },
+    {
+      "seq": 1211,
+      "action": "creation-confirmed"
+    },
+    {
+      "seq": 1212,
+      "action": "review-repair-linked"
+    },
+    {
+      "seq": 1213,
+      "action": "review-fix-connected"
+    },
+    {
+      "seq": 1214,
+      "action": "review-fix-failed"
+    },
+    {
+      "seq": 1215,
+      "action": "review-fix-started"
+    },
+    {
+      "seq": 1216,
+      "action": "review-repair-linked"
+    },
+    {
+      "seq": 1217,
+      "action": "review-fix-connected"
+    },
+    {
+      "seq": 1218,
+      "action": "review-fix-failed"
+    }
+  ]
+}

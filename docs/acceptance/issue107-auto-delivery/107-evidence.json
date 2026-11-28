@@ -1,0 +1,184 @@
+{
+  "issue": 107,
+  "pull": 145,
+  "workbench": "6911147f85ef0d7eff0c6697e6a856af544085de",
+  "flow": "5b62f311-ad41-42a8-81f3-674709117c14",
+  "version": 14,
+  "revision": "c458c1da5452739274de8a30658f0235df77e686",
+  "amendment": "31e2fc20-7cad-4f5d-b29d-705b295ab24b",
+  "head": "dcf1dd0779bd3ce535e9236500110febacb4fc48",
+  "attempt": "b2dab1f6-e9e7-4857-9328-be83e36d8486",
+  "actor": "personal",
+  "audit": [
+    {
+      "seq": 1171,
+      "kind": "github.issue",
+      "subject": "DikkooXie/souflow#107",
+      "time": 1795869637331,
+      "action": "worker-retry-queued",
+      "amendmentId": "31e2fc20-7cad-4f5d-b29d-705b295ab24b",
+      "phase": "waiting"
+    },
+    {
+      "seq": 1172,
+      "kind": "github.issue",
+      "subject": "DikkooXie/souflow#107",
+      "time": 1795869637332,
+      "action": "approved-source-refresh",
+      "amendmentId": "31e2fc20-7cad-4f5d-b29d-705b295ab24b",
+      "phase": "checkingSources"
+    },
+    {
+      "seq": 1173,
+      "kind": "github.issue",
+      "subject": "DikkooXie/souflow#107",
+      "time": 1795869705026,
+      "action": "dependency-source-pass",
+      "amendmentId": "31e2fc20-7cad-4f5d-b29d-705b295ab24b",
+      "phase": "checkingSources"
+    },
+    {
+      "seq": 1174,
+      "kind": "github.issue",
+      "subject": "DikkooXie/souflow#107",
+      "time": 1795869707436,
+      "action": "source-refresh-reviewed",
+      "amendmentId": "31e2fc20-7cad-4f5d-b29d-705b295ab24b",
+      "phase": "developing"
+    },
+    {
+      "seq": 1175,
+      "kind": "remote.code",
+      "subject": "b2dab1f6-e9e7-4857-9328-be83e36d8486",
+      "time": 1795869709031,
+      "action": "offered",
+      "issue": 107,
+      "revision": "c458c1da5452739274de8a30658f0235df77e686",
+      "device": "96c4a535-9915-4b7f-8a17-ec42f6b45fde"
+    },
+    {
+      "seq": 1176,
+      "kind": "github.issue",
+      "subject": "DikkooXie/souflow#107",
+      "time": 1795869709032,
+      "action": "worker-redispatched",
+      "amendmentId": "31e2fc20-7cad-4f5d-b29d-705b295ab24b",
+      "phase": "developing"
+    },
+    {
+      "seq": 1177,
+      "kind": "remote.code",
+      "subject": "b2dab1f6-e9e7-4857-9328-be83e36d8486",
+      "time": 1795869709053,
+      "action": "accepted",
+      "issue": 107,
+      "revision": "c458c1da5452739274de8a30658f0235df77e686",
+      "device": "96c4a535-9915-4b7f-8a17-ec42f6b45fde"
+    },
+    {
+      "seq": 1178,
+      "kind": "remote.code",
+      "subject": "b2dab1f6-e9e7-4857-9328-be83e36d8486",
+      "time": 1795869710312,
+      "action": "started",
+      "issue": 107,
+      "revision": "c458c1da5452739274de8a30658f0235df77e686",
+      "device": "96c4a535-9915-4b7f-8a17-ec42f6b45fde"
+    },
+    {
+      "seq": 1179,
+      "kind": "github.issue",
+      "subject": "DikkooXie/souflow#107",
+      "time": 1795869710313,
+      "action": "connected",
+      "amendmentId": "31e2fc20-7cad-4f5d-b29d-705b295ab24b",
+      "phase": "developing"
+    },
+    {
+      "seq": 1186,
+      "kind": "remote.code",
+      "subject": "b2dab1f6-e9e7-4857-9328-be83e36d8486",
+      "time": 1795870362240,
+      "action": "tested",
+      "issue": 107,
+      "revision": "c458c1da5452739274de8a30658f0235df77e686",
+      "device": "96c4a535-9915-4b7f-8a17-ec42f6b45fde",
+      "patchDiagnostics": [
+        {
+          "code": "edit-count",
+          "attempt": 1,
+          "count": 18
+        }
+      ]
+    },
+    {
+      "seq": 1189,
+      "kind": "github.issue",
+      "subject": "DikkooXie/souflow#107",
+      "time": 1795870375058,
+      "action": "local-check-complete",
+      "amendmentId": "31e2fc20-7cad-4f5d-b29d-705b295ab24b",
+      "phase": "readyToPublish"
+    },
+    {
+      "seq": 1190,
+      "kind": "github.issue",
+      "subject": "DikkooXie/souflow#107",
+      "time": 1795870376660,
+      "action": "checked",
+      "head": "dcf1dd0779bd3ce535e9236500110febacb4fc48",
+      "amendmentId": "31e2fc20-7cad-4f5d-b29d-705b295ab24b",
+      "phase": "publishing"
+    },
+    {
+      "seq": 1191,
+      "kind": "github.issue",
+      "subject": "DikkooXie/souflow#107",
+      "time": 1795870382503,
+      "action": "published",
+      "head": "dcf1dd0779bd3ce535e9236500110febacb4fc48",
+      "amendmentId": "31e2fc20-7cad-4f5d-b29d-705b295ab24b",
+      "pull": 145,
+      "phase": "submitted"
+    },
+    {
+      "seq": 1194,
+      "kind": "github.issue",
+      "subject": "DikkooXie/souflow#107",
+      "time": 1795870398842,
+      "action": "pull-sync",
+      "head": "dcf1dd0779bd3ce535e9236500110febacb4fc48",
+      "amendmentId": "31e2fc20-7cad-4f5d-b29d-705b295ab24b",
+      "pull": 145,
+      "phase": "submitted"
+    },
+    {
+      "seq": 1195,
+      "kind": "github.issue",
+      "subject": "DikkooXie/souflow#107",
+      "time": 1795870418725,
+      "action": "pull-sync",
+      "head": "dcf1dd0779bd3ce535e9236500110febacb4fc48",
+      "amendmentId": "31e2fc20-7cad-4f5d-b29d-705b295ab24b",
+      "pull": 145,
+      "phase": "submitted"
+    },
+    {
+      "seq": 1196,
+      "kind": "github.issue",
+      "subject": "DikkooXie/souflow#107",
+      "time": 1795870421929,
+      "action": "delivery-review-block",
+      "head": "dcf1dd0779bd3ce535e9236500110febacb4fc48",
+      "amendmentId": "31e2fc20-7cad-4f5d-b29d-705b295ab24b",
+      "pull": 145,
+      "phase": "submitted"
+    }
+  ],
+  "review": {
+    "implementation": "block",
+    "requirements": [
+      "block"
+    ]
+  }
+}
