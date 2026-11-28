@@ -8,7 +8,7 @@ import { scrubAuditText } from "../audit/activity-store.mts";
 import type { IssuePublisher } from "../connections/issue-tracker.mts";
 import { startCodexReadOnlyTask } from "./codex-command-attempt.mts";
 import { recoverCheckedWorkspace } from "./checked-issue-recovery.mts";
-import { type FailedReviewDraft, restoreFailedReviewDraft } from "./failed-review-draft.mts";
+import { type FailedReviewDraft, type FailedReviewDraftEvidence, restoreFailedReviewDraft } from "./failed-review-draft.mts";
 import { type AccountAssignment, type CodexAccountDispatch, withCodexAccount } from "./codex-account-dispatch.mts";
 import { qualitySources } from "./codex-quality-review.mts";
 import { checkoutApprovedRefresh, IssueDeliverySourcesChanged, proveRefreshedSources, proveSourceHandoff, type SourceHandoff, type SourceProducer } from "./dependency-source-handoff.mts";
@@ -49,7 +49,7 @@ export type PrepareIssue = (input: {
   repairing?: (issue: PatchIssue) => void;
   workerProof?: Pick<CodeWork, "repo" | "issueRevision" | "plan">;
   recoverCheckedHead?: string;
-  failedReviewDraft?: FailedReviewDraft & { testFiles: readonly string[] };
+  failedReviewDraft?: FailedReviewDraft & { testFiles: readonly string[]; evidence?: FailedReviewDraftEvidence };
   revalidateWorker?: (signal: AbortSignal) => Promise<void>;
   workerOffered?: (attemptId: string) => void;
   sourceHandoff?: {
@@ -224,7 +224,7 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
       if (failedReviewDraft && (!reviewTarget || !failedReviewDraft.testFiles.length
         || failedReviewDraft.testFiles.some(file => !spec.files.includes(file)))) throw new IssueDeliverySourcesChanged();
       const recoveredFiles = failedReviewDraft
-        ? await restoreFailedReviewDraft(root, target, workspace, number, revision, failedReviewDraft, spec.files, timeoutMs, signal)
+        ? await restoreFailedReviewDraft(root, target, workspace, number, revision, failedReviewDraft, spec.files, timeoutMs, signal, failedReviewDraft.evidence)
         : [];
       const editable = new Map(await Promise.all((failedReviewDraft?.testFiles ?? spec.files)
         .map(async file => [file, await readEditableFile(workspace, file)] as const)));
