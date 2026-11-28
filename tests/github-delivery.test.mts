@@ -696,7 +696,8 @@ test("确有设备失败回执的已授权工单只重试一次，仍复核授�
     state: "OPEN", assignees: ["member"], pulls: [] };
   const approval = { flowId: "flow", planId: "plan", version: 4, issueRevision: issueRevision(issue), quality };
   for (const scenario of ["old", "current", "restart-before-failure-save", "restart-without-receipt", "missing-receipt",
-    "stale-approval", "changed-issue", "linked-pr", "already-pushed"] as const) {
+    "stale-approval", "changed-issue", "linked-pr", "already-pushed", "recovery-configured", "recovery-other-attempt",
+    "recovery-previous-attempt", "recovery-codex-failure", "recovery-exhausted"] as const) {
     await t.test(scenario, async () => {
       const events: { action?: string; workerAttempt?: string }[] = [];
       let prepares = 0;
@@ -708,6 +709,10 @@ test("确有设备失败回执的已授权工单只重试一次，仍复核授�
       const observed = structuredClone(issue);
       if (scenario === "changed-issue") observed.body = "另一个版本";
       if (scenario === "linked-pr") observed.pulls = [{ number: 9, state: "OPEN", url: "https://github.com/a/b/pull/9" }];
+      if (scenario.startsWith("recovery-")) stored = { ...stored, phase: "deliveryFailed",
+        retryCount: scenario === "recovery-exhausted" ? 2 : 1,
+        retriedWorkerAttempt: scenario === "recovery-previous-attempt" ? "confirmed-attempt" : "first-attempt",
+        failure: { stage: "device", reason: "device-failed", workerStage: scenario === "recovery-codex-failure" ? "codex" : "tests" } };
       const tracker: DeliveryTracker = {
         repo: "a/b", candidates: async () => [], read: async () => observed, account: async () => "member", assign: async () => {},
         delivery: { checkout: async () => ({ base: "main", author: "fixture", email: "fixture@example.test" }), find: async () => undefined,
@@ -720,6 +725,8 @@ test("确有设备失败回执的已授权工单只重试一次，仍复核授�
           return true;
         } }, async () => "", () => true, 2, new Map(), {
           specs: new Map(), conversation: true, requireQuality: true, pollMs: 60_000,
+          ...(scenario.startsWith("recovery-") ? { recoverDeviceTestAttempts:
+            new Set([scenario === "recovery-other-attempt" ? "different-attempt" : "confirmed-attempt"]) } : {}),
           reviewScopeCurrent: () => scenario !== "stale-approval",
           failedWorkerAttempt(scope) {
             assert.deepEqual(scope, { repo: "a/b", issue: 7, issueRevision: approval.issueRevision,
@@ -740,10 +747,12 @@ test("确有设备失败回执的已授权工单只重试一次，仍复核授�
           }
         } finally { await dispatch.close(); }
       }
-      assert.equal(prepares, ["old", "restart-before-failure-save"].includes(scenario) ? 1 : scenario === "current" ? 2 : 0);
+      assert.equal(prepares, ["old", "restart-before-failure-save", "recovery-configured"].includes(scenario) ? 1 : scenario === "current" ? 2 : 0);
       const retries = events.filter(event => event.action === "worker-retry-queued");
       assert.equal(retries.length, ["old", "current", "changed-issue", "restart-before-failure-save"].includes(scenario) ? 1 : 0);
       if (retries.length) assert.equal(retries[0]?.workerAttempt, "confirmed-attempt");
+      const recovery = events.filter(event => event.action === "worker-test-recovery-queued");
+      assert.deepEqual(recovery.map(event => event.workerAttempt), scenario === "recovery-configured" ? ["confirmed-attempt"] : []);
     });
   }
 });

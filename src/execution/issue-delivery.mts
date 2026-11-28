@@ -154,8 +154,8 @@ export async function isolatedIssueCheck(workspace: string, image: string, timeo
         "--security-opt=no-new-privileges", "--pids-limit=256", "--tmpfs", "/tmp:exec",
         "--mount", `type=bind,source=${workspace},target=/workspace${install ? "" : ",readonly"}`,
         "--workdir", "/workspace", "-e", "npm_config_cache=/tmp/npm-cache",
-        // 工单可能固定在旧 package.json，统一由检查容器选择稳定的机器可读回执。
-        ...(!install ? ["--network=none", "-e", "NODE_OPTIONS=--test-reporter=tap"] : []), image, "npm",
+        // 非终端管道中 Node 测试使用 TAP。全局注入报告参数会让部分子测试重复收到同一个参数。
+        ...(!install ? ["--network=none"] : []), image, "npm",
         ...(install ? ["ci", "--ignore-scripts"] : ["run", "check"])], { timeout: timeoutMs, maxBuffer: 2 * 1024 * 1024, signal });
       return install ? [] : passingAcceptanceTests(stdout);
     } catch (error) {

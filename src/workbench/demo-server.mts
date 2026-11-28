@@ -175,6 +175,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         audit.record, dispatchConcurrency, memberTrackers, issueDelivery && {
           specs: issueDelivery.specs, pollMs: issueDelivery.pollMs, conversation: true, requireQuality: true,
           ...(issueDelivery.recoverFailedIssue ? { recoverFailedIssue: issueDelivery.recoverFailedIssue } : {}),
+          ...(issueDelivery.recoverDeviceTestAttempts ? { recoverDeviceTestAttempts: issueDelivery.recoverDeviceTestAttempts } : {}),
           ...(issueDelivery.reviewFix ? { reviewFix: issueDelivery.reviewFix } : {}),
           ...(publishIssues ? { publishRepair: publishIssues } : {}),
           ...(remoteLink?.code ? { failedWorkerAttempt: remoteLink.code.failedAttempt } : {}),
@@ -737,6 +738,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const recoverFailedIssue = process.env.SOULFLOW_GITHUB_RECOVER_FAILED_ISSUE === undefined ? undefined
     : integerSetting("SOULFLOW_GITHUB_RECOVER_FAILED_ISSUE", 0, 1, Number.MAX_SAFE_INTEGER);
   if (recoverFailedIssue !== undefined && !conversationDelivery) throw Error("恢复旧工单前请启用对话工单交付。");
+  const deviceTestAttempts = process.env.SOULFLOW_GITHUB_RECOVER_DEVICE_TEST_ATTEMPTS?.split(",").map(id => id.trim()).filter(Boolean) ?? [];
+  if (deviceTestAttempts.length && (!conversationDelivery || deviceTestAttempts.some(id => !workerId.test(id)))) {
+    throw Error("设备检查恢复需要启用对话工单交付并提供有效的派发 ID。");
+  }
   if (issuePlan) throw Error("静态 GitHub 计划缺少规划产物与校验记录，请改用对话工单交付。");
   if (conversationDelivery && !planPath) throw Error("对话选单需要配置项目开发计划。");
   if (conversationDelivery && (!claimEnabled || !image || !Object.keys(githubAccounts).length)) {
@@ -747,6 +752,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     image, ...(routine ? { model: routine } : {}), ...(advanced ? { planningModel: advanced } : {}),
     conversation: conversationDelivery,
     ...(recoverFailedIssue === undefined ? {} : { recoverFailedIssue }),
+    ...(deviceTestAttempts.length ? { recoverDeviceTestAttempts: new Set(deviceTestAttempts) } : {}),
     ...(reviewFix === undefined ? {} : { reviewFix: readApprovedReviewFix(reviewFix) }),
     pollMs: integerSetting("SOULFLOW_GITHUB_POLL_MS", 20_000, 5000, 3_600_000),
     timeoutMs: runtimeInteger("SOULFLOW_GITHUB_DELIVERY_TIMEOUT_MS", 1000, 3_600_000),
