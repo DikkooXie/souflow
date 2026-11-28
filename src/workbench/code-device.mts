@@ -11,7 +11,7 @@ import { probeCodeDeviceLogin } from "../execution/code-device-login.mts";
 import { startCodexReadOnlyTask } from "../execution/codex-command-attempt.mts";
 import { contentDigest, readCodeOffer, readWorkerCapacity, workerDigest, workerId,
   workerProtocolVersion, type CodeOffer, type CodeReceipt, type WorkerFailureStage } from "../execution/code-worker-protocol.mts";
-import { isolatedIssueCheck } from "../execution/issue-delivery.mts";
+import { isolatedIssueCheck, IssueDeliveryFailed } from "../execution/issue-delivery.mts";
 import { applyCheckedCodeChanges, codeResultSchema, maxCodeProposalBytes, maxEdits, prepareCodeProposal,
   readEditableFile } from "../execution/local-code-changes.mts";
 import { lockWorkbench } from "./recovery.mts";
@@ -85,7 +85,9 @@ async function doWork(offer: CodeOffer, root: string, image: string, timeoutMs: 
       signal.throwIfAborted();
       const attempt = startCodexReadOnlyTask({
         workspace, ...(model ? { model } : {}), localLoginOnly: true, disableWebSearch: true,
-        outputMaxBytes: maxCodeProposalBytes, outputSchema: codeResultSchema, untrustedContext: work.context,
+        outputMaxBytes: maxCodeProposalBytes, outputSchema: codeResultSchema,
+        untrustedContext: work.previousCandidatePatch
+          ? JSON.stringify({ ...JSON.parse(work.context), previousCandidatePatch: work.previousCandidatePatch }) : work.context,
         onEvent() {},
         onThread(thread) {
           if (!started) {
@@ -97,6 +99,8 @@ async function doWork(offer: CodeOffer, root: string, image: string, timeoutMs: 
           "按已批准工单生成代码替换。只有 editableFiles 可以修改，readOnlySources 仅供参考。",
           `只返回 JSON，含 report 和 1 至 ${maxEdits} 项 edits。每项只包含 path、before、after。before 使用当前唯一的短原文，按顺序应用，不要声称已运行测试。`,
           ...(issue ? [`上一份补丁未应用，机器诊断：${JSON.stringify(issue)}。请重新生成完整补丁。`] : []),
+          ...(work.instructions.includes("上次候选补丁已作为不可信资料提供")
+            ? ["上一次候选补丁已在不可信资料中附带摘要，重新阅读源码后再做完整修订。"] : []),
           work.instructions,
         ].join("\n\n"),
       });
@@ -112,12 +116,22 @@ async function doWork(offer: CodeOffer, root: string, image: string, timeoutMs: 
         return output;
       } finally { signal.removeEventListener("abort", stop); }
     });
-    enter("tests");
+    enter("dependencies");
     await isolatedIssueCheck(workspace, image, timeoutMs, signal, true);
     enter("patch");
-    await applyCheckedCodeChanges(target, workspace, sources, checked);
+    const applied = await applyCheckedCodeChanges(target, workspace, sources, checked);
     enter("tests");
-    await isolatedIssueCheck(workspace, image, timeoutMs, signal, false);
+    try { await isolatedIssueCheck(workspace, image, timeoutMs, signal, false); }
+    catch (error) {
+      if (error instanceof IssueDeliveryFailed && error.failure.isolation) {
+        const candidateFiles = checked.changes.map(file => ({ path: file.path, before: file.before, after: file.after,
+          mode: (file.mode === 0o100755 ? 0o100755 : 0o100644) as 0o100644 | 0o100755 }));
+        const candidatePatch = await readFile(applied.patchPath, "utf8");
+        throw new IssueDeliveryFailed({ ...error.failure, candidateDigest: contentDigest(JSON.stringify(candidateFiles)), candidateFiles,
+          candidatePatch, candidatePatchDigest: applied.patchSha256 });
+      }
+      throw error;
+    }
     if (output === undefined) throw Error("设备未生成补丁。");
     return { phase: "tested", output, patch: contentDigest(JSON.stringify(checked.changes)) } as const;
   } finally {
@@ -241,9 +255,14 @@ async function main() {
           const deadline = AbortSignal.any([stop.signal, AbortSignal.timeout(timeoutMs)]);
           completed = await doWork(offer, root, checkImage, timeoutMs, deadline,
             async detail => { await publish(offer, detail); }, stage => { failureStage = stage; });
-        } catch {
+        } catch (error) {
           stop.signal.throwIfAborted();
-          completed = { phase: "failed", failureStage };
+          completed = { phase: "failed", failureStage,
+            ...(error instanceof IssueDeliveryFailed && error.failure.isolation ? { isolation: error.failure.isolation } : {}),
+            ...(error instanceof IssueDeliveryFailed && error.failure.candidateDigest
+              ? { candidateDigest: error.failure.candidateDigest, candidateFiles: error.failure.candidateFiles } : {}),
+            ...(error instanceof IssueDeliveryFailed && error.failure.candidatePatch
+              ? { candidatePatch: error.failure.candidatePatch, candidatePatchDigest: error.failure.candidatePatchDigest } : {}) };
         }
         const phase = await publish(offer, completed);
         process.stdout.write(`GitHub #${offer.work.issue} ${phase === "tested" ? "本机检查已通过，结果已回传" : "未完成，已回报主机"}。\n`);

@@ -6,6 +6,8 @@ import type { BusinessEvent, Checkpoint } from "../audit/activity-store.mts";
 import { issueRevision, type DeliveryTracker, type IssueDetail, type IssuePull, type IssueSummary, type IssueTracker } from "../connections/issue-tracker.mts";
 import type { AccountAssignment } from "../execution/codex-account-dispatch.mts";
 import type { WorkerFailureScope } from "../execution/code-worker-pool.mts";
+import type { WorkerFailureStage } from "../execution/code-worker-protocol.mts";
+import { describeIsolationEvidence } from "../execution/isolation-evidence.mts";
 import type { SourceHandoff, SourceProducer } from "../execution/dependency-source-handoff.mts";
 import { IssueDeliveryFailed, IssueDeliverySourcesChanged, type CheckedIssue, type DeliveryFailure, type DeliverySpec, type DeliveryTarget, type PreparedDelivery, type PrepareIssue } from "../execution/issue-delivery.mts";
 import { IssueVerificationUncertain, type VerifyIssue } from "../execution/issue-verification.mts";
@@ -25,7 +27,10 @@ export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; p
   hasWorkerAttempt?: (repo: string, issue: number) => boolean;
   publishRepair?: ReturnType<typeof createPlannedIssuePublication>;
   reviewScopeCurrent?: (claim: Claim) => boolean;
-  failedWorkerAttempt?: (scope: WorkerFailureScope) => string | undefined;
+  failedWorkerAttempt?: (scope: WorkerFailureScope) => { id: string; failureStage?: WorkerFailureStage;
+    isolation?: import("../execution/isolation-evidence.mts").IsolationEvidence; candidateDigest?: string;
+    candidateFiles?: import("../execution/code-worker-protocol.mts").CandidateFile[]; candidatePatch?: string;
+    candidatePatchDigest?: string } | undefined;
   recoverDeviceTestAttempts?: ReadonlySet<string>;
   recoverCheckedHeads?: Readonly<Record<string, string>>;
   legacyReviewTestFailure?: (subject: string, head: string, repairId: string) => boolean;
@@ -102,10 +107,11 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   const allowedIssues = delivery && new Set(delivery.specs.keys());
   const subject = (number: number) => `${tracker.repo}#${number}`;
   function save(c: Claim, event?: string, patchCheck?: PatchIssue) {
+    const { candidatePatch: _candidatePatch, ...safeFailure } = c.failure ?? {};
     if (!store.save(String(c.number), c, event ? { kind: "github.issue", subject: subject(c.number),
       ...(c.approval ? { flowId: c.approval.flowId } : {}), details: {
       action: event, ...c.approval, ...(c.target ? { branch: c.target.branch, head: c.target.head } : {}),
-      ...(c.failure ? { failure: c.failure } : {}), ...(c.retryCount ? { retryCount: c.retryCount } : {}),
+      ...(c.failure ? { failure: safeFailure } : {}), ...(c.retryCount ? { retryCount: c.retryCount } : {}),
       ...(patchCheck ? { patchCheck } : {}),
       ...(c.reviewFix ? { reviewFix: c.reviewFix } : {}),
       ...(event?.startsWith("review-repair-") ? { repair: c.reviewRepairs?.at(-1) } : {}),
@@ -173,6 +179,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     // 进入远端发布后的尝试只能核对回执。重试沿用原工单的持久化授权和源码版本。
     if (!delivery?.conversation || c.sourceRefresh || c.phase !== "deliveryFailed" || c.target || c.pull || c.pulls.length
       || !c.delivery?.baseRevision || !qualityBindingCurrent(c.approval?.quality)) return;
+    // 远端设备一旦接过工单，主机复验失败不能隐式重新启动另一轮 Codex。
+    if (delivery.hasWorkerAttempt?.(tracker.repo, c.number)) return;
     const selected = delivery.recoverFailedIssue === c.number;
     // 旧版的一次重试可能已耗尽，但当时尚未引入补丁接收与纠正。只恢复显式选中的旧记录一次。
     const oldFormat = selected && c.retryCount === 1 && c.failure?.stage === "patch" && c.failure.reason === "format" && !c.failure.patchIssue;
@@ -186,18 +194,25 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       && (c.interruptedDevelopment || c.failure?.stage === "preflight" && c.failure.reason === "unavailable");
     const recordedFailure = c.phase === "deliveryFailed" && c.failure?.stage === "device" && c.failure.reason === "device-failed";
     if ((!needsReceipt && !recordedFailure) || !delivery?.conversation || !delivery.failedWorkerAttempt
-      || c.claimUncertain || (c.retryCount ?? 0) > 1 || c.target || c.pull || c.pulls.length || !c.delivery?.baseRevision
+      || c.claimUncertain || c.target || c.pull || c.pulls.length || !c.delivery?.baseRevision
       || !qualityBindingCurrent(c.approval?.quality) || !delivery.reviewScopeCurrent?.(c)) return c;
     const scope = workerScope(tracker.repo, c);
     const attempt = scope && delivery.failedWorkerAttempt(scope);
     if (!attempt) return c;
-    const recoveredTest = c.retryCount === 1 && c.retriedWorkerAttempt && c.retriedWorkerAttempt !== attempt
-      && recordedFailure && c.failure?.workerStage === "tests" && delivery.recoverDeviceTestAttempts?.has(attempt);
-    if (c.retryCount && !recoveredTest) return c;
-    // 设备只生成补丁并测试。明确失败且工作台尚未进入发布时，才可沿原授权重试。
-    const queued: Claim = { ...c, phase: "waiting", retryCount: recoveredTest ? 2 : 1, retriedWorkerAttempt: attempt,
-      ...(needsReceipt ? { failure: { stage: "device", reason: "device-failed" } } : {}) };
-    save(queued, recoveredTest ? "worker-test-recovery-queued" : "worker-retry-queued");
+    const failure: DeliveryFailure = { stage: "device", reason: "device-failed",
+      ...(attempt.failureStage ? { workerStage: attempt.failureStage } : {}), ...(attempt.isolation ? { isolation: attempt.isolation } : {}),
+      ...(attempt.candidateDigest ? { candidateDigest: attempt.candidateDigest, candidateFiles: attempt.candidateFiles } : {}),
+      ...(attempt.candidatePatch ? { candidatePatch: attempt.candidatePatch, candidatePatchDigest: attempt.candidatePatchDigest } : {}) };
+    const evidenceClaim = isDeepStrictEqual(c.failure, failure) ? c : { ...c, failure };
+    if ((c.retryCount ?? 0) >= 2 || c.retriedWorkerAttempt === attempt.id
+      || !delivery.recoverDeviceTestAttempts?.has(attempt.id)
+      || !["tests", "dependencies"].includes(attempt.failureStage ?? "")) {
+      if (evidenceClaim !== c) save(evidenceClaim, "worker-failure-restored");
+      return evidenceClaim;
+    }
+    // 重试必须显式选中持久化派发 ID；进程重启只恢复证据，不凭原工单授权再次开工。
+    const queued: Claim = { ...evidenceClaim, phase: "waiting", retryCount: (c.retryCount ?? 0) + 1, retriedWorkerAttempt: attempt.id };
+    save(queued, "worker-retry-queued");
     return queued;
   }
   for (const c of store.load()) {
@@ -218,7 +233,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   }
   function snapshot(canClaim: boolean) {
     return { repo: tracker.repo, canClaim: canClaim && !delivery?.conversation, ...(delivery ? { deliveryEnabled: true, conversationEnabled: delivery.conversation === true } : {}), items: [
-      ...[...claims.values()].reverse().map(({ requestId: _id, account: _account, phase, delivery, pull, approval,
+      ...[...claims.values()].reverse().map(({ requestId: _id, account: _account, phase, delivery, pull, approval, failure,
         checked: _checked, deliveryReviews: _reviews, reviewRepairs: _repairs, sourceHandoff: _sourceHandoff, sourceRefresh: _sourceRefresh,
         observedIssueRevision: _issueRevision, observedReviewLink: _reviewLink, retriedWorkerAttempt: _retriedWorkerAttempt,
         interruptedDevelopment: _interruptedDevelopment, prepared: _prepared, attemptedCheckedRecovery: _attemptedCheckedRecovery,
@@ -226,7 +241,13 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
         ...item }) => ({ ...item,
         ...(delivery ? { dependsOn: delivery.dependsOn, mode: "delivery" } : {}),
         ...(approval ? { flowId: approval.flowId } : {}),
-        ...(item.failure ? { failureMessage: `${stageNames[item.failure.workerStage ?? item.failure.stage]} · ${reasonNames[item.failure.reason]}` } : {}),
+        ...(failure ? { failureMessage: `${stageNames[failure.workerStage ?? failure.stage]} · ${reasonNames[failure.reason]}`,
+          ...(failure.isolation ? { failureEvidence: {
+            summary: describeIsolationEvidence(failure.isolation), diagnostics: failure.isolation.diagnostics ?? [],
+            ...(failure.candidateDigest ? { candidateDigest: failure.candidateDigest } : {}),
+            ...(failure.candidateFiles ? { candidateFiles: failure.candidateFiles.map(file => ({ path: file.path,
+              before: file.before, after: file.after, mode: file.mode })) } : {}),
+          } } : {}) } : {}),
         pulls: pull ? [...item.pulls.filter(other => other.number !== pull.number), pull] : item.pulls,
         progress: item.reviewFix?.state === "running" ? "Codex 正在续修 PR"
           : item.reviewFix?.state === "publishing" ? "正在核对续修发布"
@@ -302,7 +323,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     if (state?.state !== "publishing" || !state.pendingHead || head !== state.pendingHead
       || !state.base || pull.baseName !== state.base || pull.number !== c.pull?.number) return;
     const reviewRepairs = state.repairId ? c.reviewRepairs?.map(item => item.id === state.repairId ? { ...item, completedHead: head } : item) : c.reviewRepairs;
-    save({ ...c, target: { ...target, head, base: state.base }, pull, reviewFix: { ...state, state: "complete" },
+    const { failure: _resolvedFailure, ...resolved } = c;
+    save({ ...resolved, target: { ...target, head, base: state.base }, pull, reviewFix: { ...state, state: "complete" },
       ...(state.testFiles?.length ? { reviewTestFiles: [...new Set([...(c.reviewTestFiles ?? []), ...state.testFiles])] } : {}),
       ...(reviewRepairs ? { reviewRepairs } : {}) }, "review-fix-published");
   }
@@ -314,7 +336,9 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       const started = claim.reviewFix;
       // 建单回执未知时只能续办同一次发布。执行开始后沿用原有的单次续修规则。
       const recoverable = retry && started?.repairId === repair.id && started.state === "failed" && decision.issue === undefined;
-      if (started?.from !== repair.fix.head || recoverable) return { repair, decision };
+      const autoCorrection = retry && started?.repairId === repair.id && started.state === "failed" && started.testCheckFailed
+        && !started.retriedTests && !!claim.failure?.candidatePatch;
+      if (started?.from !== repair.fix.head || recoverable || autoCorrection) return { repair, decision };
     }
   }
   function dispatchReviewFix(retry = false) {
@@ -339,6 +363,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     const supplemental = !authorized && fix.testFiles?.length ? repairFromApproval(tracker.repo, c, fix) : undefined;
     if (fix.testFiles?.length && (!supplemental || !activeReviewScope(c) || !delivery.publishRepair)) return;
     const repair = authorized?.repair ?? supplemental;
+    const autoCorrection = !!(authorized && retry && c.reviewFix?.repairId === repair?.id && c.reviewFix?.state === "failed"
+      && c.reviewFix?.testCheckFailed && !c.reviewFix?.retriedTests && c.failure?.candidatePatch);
     const recorded = supplemental && c.reviewRepairs?.find(item => item.id === supplemental.id);
     const repeatLink = retry && supplemental && c.reviewFix?.repairId === supplemental.id && c.reviewFix.state === "failed" && !recorded?.issue;
     const priorTestFailure = !!(fix.testFailureNote && recorded?.issue && supplemental && c.reviewFix?.from === fix.head
@@ -354,6 +380,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     const update = remote.updatePublished;
     const state = { from: fix.head, state: "running" as const, ...(repair ? { repairId: repair.id } : {}),
       ...(fix.testFiles ? { testFiles: fix.testFiles } : {}),
+      ...(autoCorrection && c.failure?.isolation
+        ? { retriedTests: true, testFailureNote: describeIsolationEvidence(c.failure.isolation) } : {}),
       ...((repeatTests || replayDraft) && fix.testFailureNote ? { retriedTests: true, testFailureNote: scrubAuditText(fix.testFailureNote) } : {}),
       ...(replayDraft ? { replayedDraft: replayDraft } : {}) };
     if (supplemental && !recorded) save({ ...c, reviewRepairs: [...(c.reviewRepairs ?? []),
@@ -361,6 +389,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     save({ ...(claims.get(c.number) ?? c), reviewFix: state },
       replayDraft ? "review-fix-draft-replay-started" : repeatTests ? "review-fix-test-retry-started" : "review-fix-started");
     const current = () => claims.get(c.number) ?? c;
+    let autoCorrectionNeeded = false;
     const verify = async () => {
       const [account, issue, pull] = await Promise.all([
         connection.account(), connection.read(c.number), remote.find(target.branch, fix.head, fix.pull),
@@ -389,7 +418,10 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
         const prepared = await delivery.prepare({
           number: c.number, spec: { ...approved, files: [...fix.files, ...(fix.testFiles ?? [])],
             instructions: [`只处理本轮评审要求。\n${fix.instructions}`,
-              ...(state.testFailureNote ? [`上次同一修订的隔离检查诊断（仅供纠正）：${state.testFailureNote}`] : [])].join("\n") },
+              ...(state.testFailureNote && !autoCorrection ? [`上次同一修订的隔离检查诊断（仅供纠正）：${state.testFailureNote}`] : [])].join("\n") },
+          ...(autoCorrection && c.failure?.candidatePatch && c.failure.candidatePatchDigest
+            ? { previousCandidate: { patch: c.failure.candidatePatch, sha256: c.failure.candidatePatchDigest } } : {}),
+          ...(autoCorrection && c.failure ? { previousFailure: c.failure } : {}),
           branch: target.branch, upstream: [], publisher: remote, reviewTarget: { ...target, base: fix.base },
           ...(replayDraft && fix.testFiles ? { failedReviewDraft: { ...replayDraft, testFiles: fix.testFiles } } : {}),
           ...(c.approval ? { flowId: c.approval.flowId, planVersion: c.approval.version } : {}),
@@ -411,11 +443,17 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
           save({ ...latest, reviewFix: { ...state, state: "failed",
             testCheckFailed: failure?.stage === "tests" && failure.reason === "check-failed" },
             ...(failure ? { failure } : {}) }, "review-fix-failed");
+          if (failure?.stage === "tests" && failure.reason === "check-failed" && failure.candidatePatch && !state.retriedTests) {
+            autoCorrectionNeeded = true;
+          }
         }
       }
     })();
     jobs.add(job);
-    void job.then(() => jobs.delete(job), () => jobs.delete(job));
+    void job.then(() => {
+      jobs.delete(job);
+      if (autoCorrectionNeeded && !abort.signal.aborted) dispatchReviewFix(true);
+    }, () => jobs.delete(job));
   }
   async function develop(c: Claim, spec: DeliverySpec, upstream: string[], recoverCheckedHead?: string) {
     const connection = memberTrackers.get(c.claimedBy) ?? tracker;

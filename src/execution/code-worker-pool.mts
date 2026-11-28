@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { Checkpoint, RecordBusiness } from "../audit/activity-store.mts";
 import { legacyCodeEditFileBytes, readCodeWorkerConfig } from "../config/runtime.mts";
-import { contentDigest, type CodeOffer, type CodeReceipt, type CodeWork, type WorkerFailureStage, validCodeWork,
+import { contentDigest, type CandidateFile, type CodeOffer, type CodeReceipt, type CodeWork, type WorkerFailureStage, validCodeWork,
   workerProtocolVersion } from "./code-worker-protocol.mts";
+import type { IsolationEvidence } from "./isolation-evidence.mts";
 import { IssueVerificationUncertain } from "./issue-verification.mts";
 
 type State = "offered" | CodeReceipt["phase"];
@@ -10,12 +11,14 @@ export type WorkerFailureScope = Pick<CodeWork, "repo" | "issue" | "issueRevisio
 export type WorkerAttempt = {
   id: string; device: string; name: string; instance: string; repo: string; issue: number; revision: string;
   flowId: string; digest: string; issueRevision: string; state: State; assignedAt: number; updatedAt: number;
-  plan: CodeWork["plan"]; weight: number; slots: number; assignedLoad: number;
-  receipt?: { digest: string; at: number; thread?: string; patch?: string; failureStage?: WorkerFailureStage };
+  plan: CodeWork["plan"]; weight: number; slots: number; assignedLoad: number; files: CodeWork["files"];
+  receipt?: { digest: string; at: number; thread?: string; patch?: string; failureStage?: WorkerFailureStage;
+    isolation?: IsolationEvidence; candidateDigest?: string; candidateFiles?: CandidateFile[]; candidatePatch?: string; candidatePatchDigest?: string };
 };
 type Device = { id: string; name: string; instance: string; repo: string; slots: number; ready: boolean; local?: boolean; editFileBytes?: number };
 type Ready = { device: Device; send: (offer?: CodeOffer) => void };
-type Running = { offer: CodeOffer; settled: (receipt: CodeReceipt) => void; started: (thread: string) => void; interrupt: () => void };
+type Running = { offer: CodeOffer; settled: (receipt: CodeReceipt) => void; started: (thread: string) => void; interrupt: () => void;
+  verifyCandidate?: (receipt: Extract<CodeReceipt, { phase: "failed" }>) => boolean };
 const unfinished = (state: State) => state === "offered" || state === "accepted" || state === "started";
 const supportsFiles = (device: Device, work: CodeWork) =>
   work.files.every(file => (file.bytes ?? 0) <= (device.editFileBytes ?? legacyCodeEditFileBytes));
@@ -37,7 +40,8 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
         issueRevision: attempt.issueRevision, planVersion: attempt.plan.version, batchDigest: attempt.plan.batchDigest,
         direction: state === "offered" ? "to-device" : fromDevice ? "from-device" : "host",
         ...(fromDevice && receipt ? { deviceAt: receipt.at, thread: receipt.thread, patch: receipt.patch,
-          failureStage: receipt.failureStage } : {}) } })) return false;
+          failureStage: receipt.failureStage, isolation: receipt.isolation, candidateDigest: receipt.candidateDigest,
+          candidateFiles: receipt.candidateFiles, candidatePatchDigest: receipt.candidatePatchDigest } : {}) } })) return false;
     attempts.set(id, attempt);
     return true;
   }
@@ -81,7 +85,13 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
     failedAttempt(scope: WorkerFailureScope) {
       // 按持久化派发顺序检查最后一次。同一工单有更新的尝试时，不能凭旧回执再次派发。
       const latest = latestForScope(scope);
-      if (latest?.state === "failed") return latest.id;
+      if (latest?.state === "failed" && latest.receipt) return { id: latest.id,
+        ...(latest.receipt.failureStage ? { failureStage: latest.receipt.failureStage } : {}),
+        ...(latest.receipt.isolation ? { isolation: latest.receipt.isolation } : {}),
+        ...(latest.receipt.candidateDigest ? { candidateDigest: latest.receipt.candidateDigest } : {}),
+        ...(latest.receipt.candidateFiles ? { candidateFiles: latest.receipt.candidateFiles } : {}),
+        ...(latest.receipt.candidatePatch ? { candidatePatch: latest.receipt.candidatePatch,
+          candidatePatchDigest: latest.receipt.candidatePatchDigest } : {}) };
     },
     testedPatch(scope: WorkerFailureScope) {
       const latest = latestForScope(scope);
@@ -135,11 +145,22 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
         : attempt.state === "accepted" ? ["started", "declined", "failed", "interrupted"]
           : attempt.state === "started" ? ["tested", "failed", "interrupted"] : [];
       if (!permitted.includes(receipt.phase) || (attempt.receipt && receipt.at < attempt.receipt.at)) return 409;
+      if (receipt.phase === "failed" && receipt.candidateFiles) {
+        const approved = new Map((attempt.files ?? []).map(file => [file.path, file.sha256]));
+        if (receipt.candidateFiles.some(file => approved.get(file.path) !== file.before)) return 422;
+      }
+      if (receipt.phase === "failed" && receipt.candidatePatch
+        && !active?.verifyCandidate?.(receipt)) return 422;
       if (!save({ ...attempt, state: receipt.phase, updatedAt: now(), receipt: { digest, at: receipt.at,
         ...("thread" in receipt ? { thread: receipt.thread } : attempt.receipt?.thread
           ? { thread: attempt.receipt.thread } : {}),
         ...("patch" in receipt ? { patch: receipt.patch } : {}),
-        ...(receipt.phase === "failed" && receipt.failureStage ? { failureStage: receipt.failureStage } : {}) } }, true)) return 503;
+        ...(receipt.phase === "failed" && receipt.failureStage ? { failureStage: receipt.failureStage } : {}),
+        ...(receipt.phase === "failed" && receipt.isolation ? { isolation: receipt.isolation } : {}),
+        ...(receipt.phase === "failed" && receipt.candidateDigest ? { candidateDigest: receipt.candidateDigest,
+          candidateFiles: receipt.candidateFiles } : {}),
+        ...(receipt.phase === "failed" && receipt.candidatePatch ? { candidatePatch: receipt.candidatePatch,
+          candidatePatchDigest: receipt.candidatePatchDigest } : {}) } }, true)) return 503;
       const current = online.get(device.id);
       if (current) current.at = now();
       if (receipt.phase === "started") active?.started(receipt.thread);
@@ -148,9 +169,10 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
       return 200;
     },
     async execute(work: CodeWork, signal: AbortSignal, timeoutMs: number, started: (thread: string) => void,
-      revalidate: (signal: AbortSignal) => Promise<void>) {
+      revalidate: (signal: AbortSignal) => Promise<void>,
+      verifyCandidate?: (receipt: Extract<CodeReceipt, { phase: "failed" }>) => boolean) {
       if (!validCodeWork(work, config)) throw Error("已批准的远端工单上下文无效。");
-      const deadline = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
+      const availabilityDeadline = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
       const weight = work.files.length;
       const pickTarget = () => [...waiters.values()]
           .filter(entry => entry.device.ready && entry.device.repo === work.repo.toLowerCase()
@@ -160,16 +182,18 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
           .sort((a, b) => (a.load + weight) / a.device.slots - (b.load + weight) / b.device.slots
             || a.count - b.count || a.device.id.localeCompare(b.device.id))[0];
       // 等待设备可能跨过 Issue 改派或正文修改。只在准备发出时回读，再用最新连接分配。
-      while (!deadline.aborted && !closed) {
+      while (!availabilityDeadline.aborted && !closed) {
         if (!pickTarget()) {
-          await wait(deadline);
+          await wait(availabilityDeadline);
           continue;
         }
-        await revalidate(deadline);
-        if (deadline.aborted || closed) break;
+        await revalidate(availabilityDeadline);
+        if (availabilityDeadline.aborted || closed) break;
         const target = pickTarget();
         if (!target) continue;
         const { device } = target;
+        // 等待设备只消耗可用性预算；设备收到工单后重新计时，留出执行时间和回执宽限。
+        const executionDeadline = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs + config.receiptGraceMs)]);
         const id = randomUUID();
         const digest = contentDigest(JSON.stringify(work));
         const offer = { id, digest, version: workerProtocolVersion, work };
@@ -178,10 +202,10 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
         if (!save({ id, device: device.id, name: device.name, instance: device.instance, repo: work.repo, issue: work.issue,
           revision: work.revision, digest, issueRevision: work.issueRevision,
           flowId: work.plan.flowId, state: "offered", assignedAt, updatedAt: assignedAt,
-          plan: work.plan, slots: device.slots, assignedLoad: target.load, weight })) throw Error("无法保存设备派发记录。");
+          plan: work.plan, slots: device.slots, assignedLoad: target.load, weight, files: work.files })) throw Error("无法保存设备派发记录。");
         const result = await new Promise<CodeReceipt | undefined>(resolve => {
           const settle = (receipt?: CodeReceipt) => {
-            deadline.removeEventListener("abort", interrupted);
+            executionDeadline.removeEventListener("abort", interrupted);
             running.delete(id);
             resolve(receipt);
           };
@@ -190,8 +214,9 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
             if (current && unfinished(current.state)) save({ ...current, state: "interrupted", updatedAt: now() });
             settle();
           };
-          running.set(id, { offer, settled: settle, started, interrupt: interrupted });
-          deadline.addEventListener("abort", interrupted, { once: true });
+          running.set(id, { offer, settled: settle, started, interrupt: interrupted,
+            ...(verifyCandidate ? { verifyCandidate } : {}) });
+          executionDeadline.addEventListener("abort", interrupted, { once: true });
           target.send(offer);
         });
         if (!result || result.phase === "interrupted") throw new IssueVerificationUncertain("needs-reconciliation");
@@ -208,7 +233,11 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
           ...device, ...capacity(device), lastSeen: seen, online: at - seen <= config.offlineMs,
         })),
         attempts: rows.filter((attempt, index) => unfinished(attempt.state) || index >= rows.length - config.recentAttempts)
-          .map(({ instance: _instance, ...attempt }) => attempt),
+          .map(({ instance: _instance, ...attempt }) => {
+            if (!attempt.receipt?.candidatePatch) return attempt;
+            const { candidatePatch: _candidatePatch, ...receipt } = attempt.receipt;
+            return { ...attempt, receipt };
+          }),
       };
     },
     disconnect(id: string) {

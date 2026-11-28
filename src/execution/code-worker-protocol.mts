@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { codeEditFileHardLimit, type CodeWorkerConfig, readCodeWorkerConfig } from "../config/runtime.mts";
 import { deliveryPath, maxCodeProposalBytes } from "./local-code-changes.mts";
+import { readIsolationEvidence, type IsolationEvidence } from "./isolation-evidence.mts";
 
 export const workerProtocolVersion = 1;
 export const workerId = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
@@ -18,16 +19,19 @@ export type CodeWork = {
   files: { path: string; sha256: string; bytes?: number }[];
   instructions: string;
   context: string;
+  previousCandidatePatch?: { patch: string; sha256: string };
 };
 
 export type CodeOffer = { version: number; id: string; digest: string; work: CodeWork };
-export type WorkerFailureStage = "checkout" | "codex" | "patch" | "tests";
+export type WorkerFailureStage = "checkout" | "codex" | "patch" | "dependencies" | "tests";
+export type CandidateFile = { path: string; before: string; after: string; mode: 0o100644 | 0o100755 };
 export type CodeReceipt = { id: string; digest: string } & (
   | { phase: "accepted"; at: number }
   | { phase: "started"; at: number; thread: string }
   | { phase: "tested"; at: number; output: string; patch: string }
   | { phase: "declined" | "interrupted"; at: number }
-  | { phase: "failed"; at: number; failureStage?: WorkerFailureStage }
+  | { phase: "failed"; at: number; failureStage?: WorkerFailureStage; isolation?: IsolationEvidence;
+      candidateDigest?: string; candidateFiles?: CandidateFile[]; candidatePatch?: string; candidatePatchDigest?: string }
 );
 
 function object(input: unknown): Record<string, unknown> | undefined {
@@ -58,6 +62,12 @@ export function validCodeWork(input: unknown, config: CodeWorkerConfig): input i
       || !Array.isArray(work.files) || !work.files.length || work.files.length > config.maxFiles
       || typeof work.instructions !== "string" || !work.instructions.trim() || work.instructions.length > config.maxInstructions
       || typeof work.context !== "string" || Buffer.byteLength(work.context) > config.maxContextBytes) return false;
+  if (work.previousCandidatePatch !== undefined) {
+    const candidate = object(work.previousCandidatePatch);
+    if (!candidate || Object.keys(candidate).length !== 2 || typeof candidate.patch !== "string"
+      || Buffer.byteLength(candidate.patch) > maxCodeProposalBytes || !candidate.patch.startsWith("diff --git ")
+      || !matches(candidate.sha256, workerDigest) || contentDigest(candidate.patch) !== candidate.sha256) return false;
+  }
   const paths = new Set<string>();
   for (const inputFile of work.files) {
     const file = object(inputFile);
@@ -76,7 +86,7 @@ export function readCodeOffer(input: unknown, config = readCodeWorkerConfig()): 
   return { version: offer.version, id: offer.id, digest: offer.digest, work: offer.work };
 }
 
-export function readCodeReceipt(input: unknown): CodeReceipt | undefined {
+export function readCodeReceipt(input: unknown, config = readCodeWorkerConfig()): CodeReceipt | undefined {
   const value = object(input);
   if (!value || !matches(value.id, workerId) || !matches(value.digest, workerDigest) || !positive(value.at)) return;
   const fields = { id: value.id, digest: value.digest, at: value.at };
@@ -84,9 +94,39 @@ export function readCodeReceipt(input: unknown): CodeReceipt | undefined {
   if (phase === "accepted" || phase === "declined" || phase === "interrupted") return { ...fields, phase };
   if (phase === "failed") {
     const stage = value.failureStage;
+    const isolation = value.isolation === undefined ? undefined : readIsolationEvidence(value.isolation, config.diagnosticMaxBytes);
+    const candidateDigest = value.candidateDigest;
+    const candidateFiles = value.candidateFiles;
+    const candidatePatch = value.candidatePatch;
+    const candidatePatchDigest = value.candidatePatchDigest;
+    const parsedCandidateFiles: CandidateFile[] | undefined = Array.isArray(candidateFiles) && candidateFiles.length > 0
+      && candidateFiles.length <= config.maxFiles ? [] : undefined;
+    if (parsedCandidateFiles && Array.isArray(candidateFiles)) {
+      for (const [index, item] of candidateFiles.entries()) {
+        const file = object(item);
+        const previousPath = parsedCandidateFiles[index - 1]?.path;
+        if (!file || Object.keys(file).length !== 4 || Object.keys(file).some(key => !["path", "before", "after", "mode"].includes(key))
+          || !matches(file.path, deliveryPath) || !matches(file.before, workerDigest) || !matches(file.after, workerDigest)
+          || file.before === file.after || (file.mode !== 0o100644 && file.mode !== 0o100755)
+          || (index > 0 && (!previousPath || previousPath >= file.path))) return;
+        parsedCandidateFiles.push({ path: file.path, before: file.before, after: file.after, mode: file.mode });
+      }
+    }
+    const expectedStep = stage === "dependencies" ? "dependencies" : stage === "tests" ? "quality" : undefined;
+    if ((value.isolation !== undefined && (!expectedStep || !isolation || isolation.step !== expectedStep))
+      || ((candidateDigest !== undefined || candidateFiles !== undefined)
+        && (stage !== "tests" || !isolation || isolation.step !== "quality" || !matches(candidateDigest, workerDigest)
+          || !parsedCandidateFiles || contentDigest(JSON.stringify(parsedCandidateFiles)) !== candidateDigest))) return;
+    if ((candidatePatch !== undefined || candidatePatchDigest !== undefined)
+      && (stage !== "tests" || !isolation || isolation.step !== "quality" || typeof candidatePatch !== "string"
+        || Buffer.byteLength(candidatePatch) > maxCodeProposalBytes || !candidatePatch.startsWith("diff --git ")
+        || !matches(candidatePatchDigest, workerDigest) || contentDigest(candidatePatch) !== candidatePatchDigest
+        || !candidateDigest || !candidateFiles)) return;
     if (stage === undefined) return { ...fields, phase };
-    if (stage === "checkout" || stage === "codex" || stage === "patch" || stage === "tests") {
-      return { ...fields, phase, failureStage: stage };
+    if (stage === "checkout" || stage === "codex" || stage === "patch" || stage === "dependencies" || stage === "tests") {
+      return { ...fields, phase, failureStage: stage, ...(isolation ? { isolation } : {}),
+        ...(typeof candidateDigest === "string" && parsedCandidateFiles ? { candidateDigest, candidateFiles: parsedCandidateFiles } : {}),
+        ...(typeof candidatePatch === "string" ? { candidatePatch, candidatePatchDigest: candidatePatchDigest as string } : {}) };
     }
   }
   if (phase === "started" && typeof value.thread === "string" && /^[a-z0-9_-]{1,128}$/i.test(value.thread)) {

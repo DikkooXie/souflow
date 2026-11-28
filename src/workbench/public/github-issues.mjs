@@ -65,6 +65,22 @@ export function createGithubPanel(node, reportView) {
       row.append(title, node("p", "github-meta", `状态：${safeText(issueStates[issue.state] ?? issue.state)} · GitHub 负责人：${safeText(issue.assignees.join("、") || "未分配")}`));
       row.append(node("p", "", `${issue.mode === "delivery" ? "交付进度" : "本机 Codex"}：${safeText(issue.progress)}`));
       if (issue.failureMessage) row.append(node("p", "github-meta", `最近失败：${safeText(issue.failureMessage)}`));
+      if (issue.failureEvidence) {
+        const evidence = node("details", "github-meta");
+        evidence.append(node("summary", "", safeText(issue.failureEvidence.summary)));
+        if (issue.failureEvidence.diagnostics?.length) {
+          const lines = node("pre");
+          lines.textContent = issue.failureEvidence.diagnostics.map(safeText).join("\n");
+          evidence.append(lines);
+        }
+        if (issue.failureEvidence.candidateDigest) {
+          evidence.append(node("p", "", `已保存候选摘要：${safeText(issue.failureEvidence.candidateDigest)}`));
+          if (issue.failureEvidence.candidateFiles?.length) {
+            evidence.append(node("p", "", `候选文件：${issue.failureEvidence.candidateFiles.map(file => safeText(file.path)).join("、")}`));
+          }
+        }
+        row.append(evidence);
+      }
       if (issue.retryCount) row.append(node("p", "github-meta",
         issue.retryCount > 1 ? "已安排补丁格式修复后的恢复" : "已安排一次自动重试"));
       if (issue.dependsOn?.length) row.append(node("p", "github-meta", `上游：${issue.dependsOn.map(number => `#${number}`).join("、")}`));

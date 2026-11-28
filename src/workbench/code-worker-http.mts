@@ -52,7 +52,7 @@ export async function handleCodeWorkerRequest(request: IncomingMessage, response
         const result = await pool.poll({ id, name: identity.name, ...capacity, local }, connection.signal);
         send(result.status, result.status === 200 ? { offer: result.offer } : {});
       } else {
-        const receipt = readCodeReceipt(body.receipt);
+        const receipt = readCodeReceipt(body.receipt, pool.config);
         send(receipt ? pool.receipt({ id, instance }, receipt) : 422);
       }
     } catch {

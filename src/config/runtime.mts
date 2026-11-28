@@ -52,6 +52,8 @@ export function readCodeWorkerConfig(env?: NodeJS.ProcessEnv) {
     maxFiles: runtimeInteger("SOULFLOW_CODE_WORKER_MAX_FILES", 1, 16, env),
     maxInstructions: runtimeInteger("SOULFLOW_CODE_WORKER_INSTRUCTIONS_MAX_LENGTH", 1, messageBytes, env),
     maxContextBytes: runtimeInteger("SOULFLOW_CODE_WORKER_CONTEXT_MAX_BYTES", 1, messageBytes, env),
+    diagnosticMaxBytes: runtimeInteger("SOULFLOW_CODE_WORKER_DIAGNOSTIC_MAX_BYTES", 256, 32 * 1024, env),
+    receiptGraceMs: runtimeInteger("SOULFLOW_CODE_WORKER_RECEIPT_GRACE_MS", 1_000, 300_000, env),
   };
 }
 
