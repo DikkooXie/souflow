@@ -1,0 +1,149 @@
+{
+  "schemaVersion": 1,
+  "subject": "PR #145 / Issue #107 ordinary personal-device UI and device TLS acceptance",
+  "head": "dcf1dd0779bd3ce535e9236500110febacb4fc48",
+  "completedAt": "2026-11-28T13:04:52.898Z",
+  "result": "passed-within-tested-scope",
+  "fullAC3Acceptance": false,
+  "environment": {
+    "isolation": "new SQLite; two implementer members; no existing devices; Issue operations disabled",
+    "remoteBrowser": "actual Chrome 158 over trusted SSH CDP; independent profile",
+    "browserTransport": "trusted SSH reverse loopback forwarding; original Host/Origin checks preserved",
+    "viewports": [
+      "1440x1000",
+      "390x844"
+    ],
+    "worktreeCleanAfterCleanup": true,
+    "browserEntry": "protected personal page through trusted SSH loopback forwarding",
+    "deviceEntry": "independent HTTPS over Tailscale; address omitted"
+  },
+  "device": {
+    "id": "0ee5e5de-cdf7-4b92-8c6a-639416c633d6",
+    "owner": "bob"
+  },
+  "checks": [
+    {
+      "name": "protected personal page opened on actual newcomer Mac",
+      "result": "pass",
+      "evidence": "13-remote-mac-protected-personal.png"
+    },
+    {
+      "name": "connect, confirm, real ID, download enrollment on newcomer Mac",
+      "result": "pass",
+      "httpStatus": 201,
+      "evidence": "14-remote-mac-bound.png"
+    },
+    {
+      "name": "two implementers only see own devices on personal page",
+      "result": "pass",
+      "evidence": [
+        "ui-results.json",
+        "live-results.json",
+        "03-bob-cannot-see-alice.png"
+      ]
+    },
+    {
+      "name": "invalid name and duplicate name",
+      "result": "pass",
+      "httpStatuses": [
+        422,
+        409
+      ],
+      "evidence": [
+        "05-invalid-name.png",
+        "06-duplicate-name.png"
+      ]
+    },
+    {
+      "name": "pairing expires after real five minutes without server restart",
+      "result": "pass",
+      "startedAt": "2026-11-28T12:56:51.200Z",
+      "rejectedAt": "2026-11-28T13:01:51.361Z",
+      "httpStatus": 409,
+      "evidence": "07-expired-code.png"
+    },
+    {
+      "name": "outside execution list: actual remote self-check and normal connector exit",
+      "result": "pass",
+      "httpStatus": 403,
+      "exitCodes": [
+        1,
+        1
+      ],
+      "evidence": "15-newcomer-remote-denied.log"
+    },
+    {
+      "name": "load permission, restart, same ID online and ready with one free slot",
+      "result": "pass",
+      "selfCheckExit": 0,
+      "freeSlots": "1/1",
+      "evidence": [
+        "16-newcomer-permitted-and-revoked.log",
+        "16-remote-online-ready.png"
+      ]
+    },
+    {
+      "name": "another implementer clicks revoke through normal scheduler UI",
+      "result": "pass",
+      "httpStatus": 404,
+      "evidence": "17-other-member-revoke-rejected.png"
+    },
+    {
+      "name": "code device absent from file verification selector",
+      "result": "pass",
+      "evidence": "live-results.json"
+    },
+    {
+      "name": "cancel revoke retains binding; owner revoke succeeds",
+      "result": "pass",
+      "httpStatus": 200,
+      "evidence": [
+        "ui-results.json",
+        "08-alice-revoked.png"
+      ]
+    },
+    {
+      "name": "owner revokes live remote device; connector exits",
+      "result": "pass",
+      "httpStatus": 200,
+      "connectorExit": 1,
+      "evidence": [
+        "19-remote-owner-revoked.png",
+        "16-newcomer-permitted-and-revoked.log"
+      ]
+    },
+    {
+      "name": "remote page and live interaction page errors",
+      "result": "pass",
+      "pageErrors": [],
+      "evidence": [
+        "remote-browser-results.json",
+        "live-results.json"
+      ]
+    },
+    {
+      "name": "existing remote-handoff tests including concurrent confirmation and replay",
+      "result": "pass",
+      "passed": 8,
+      "failed": 0,
+      "evidence": "11-existing-handoff-tests.log"
+    }
+  ],
+  "selectedScreenshots": [
+    "05-remote-personal.png",
+    "06-remote-ready.png",
+    "07-other-member-rejected.png",
+    "08-owner-revoked.png",
+    "09-remote-mobile.png"
+  ],
+  "notEstablished": [
+    "real authorized first Issue execution on newly bound device",
+    "delay actual accepted receipt, revoke, release same receipt and verify zero task Codex starts",
+    "real dispatched task reconnect and receipt deduplication",
+    "browser-level same-code concurrent confirmation and replay; existing unit tests only"
+  ],
+  "artifactHandling": "No member passwords, device keys, unexpired pairing codes or Codex credentials in selected screenshots/evidence. Isolated credentials/SQLite remain in .private and remote isolated directory; both restricted. Test processes stopped. Source scripts retained.",
+  "rerunRule": "Bound to exact head above. If #148 changes #145 head, repeat this UI/TLS verification on new head before reusing acceptance.",
+  "sourceSha256": "9adac15acc038a1a95bcb2501bd6d457c3e0926ef04c11b24d55396c6ee7d2c7",
+  "publicArchive": "Host addresses, hostname and private paths omitted; source logs remain in controlled local evidence directory. Source evidence names below are controlled local locators, not public repository paths."
+}
