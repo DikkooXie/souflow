@@ -91,3 +91,18 @@
 第二台 Mac 的设备程序为 `03477a1`，本次执行的仓库基线为 `c458c1d`。设备在开工 4 分 6 秒后回报 `failed`，阶段为 `patch`（审计 1152、1153）。设备日志确认接单及回报，回执仅保存失败阶段，没有失败的替换序号或可回放的候选补丁。测试通过回执、任务分支和关联 PR 均为空。原 [#107](https://github.com/DikkooXie/souflow/issues/107) 保持开放。设备补丁诊断由 [#137](https://github.com/DikkooXie/souflow/issues/137) 跟踪。
 
 ![设备回报补丁阶段失败，工作台显示 #107 尚无关联 PR](conversation-dual-mac/07-amended-patch-failure.jpg)
+
+### 主 Mac 设备补丁诊断复验（#137）
+
+2026-11-28，主 Mac 用本机登录的 Codex 和 HTTPS 连接器复验 [#137](https://github.com/DikkooXie/souflow/issues/137)。试验工作台和连接器的实现版本为 `a159dd5`，工单目标固定在 `34ec9a7`，使用独立的 SQLite 数据库。两个用例都要求在同一文件前追加一行注释，编辑内容由 Codex 生成。
+
+- 拒绝用例将试验连接器的单文件容量设置为原文件的 1,043 字节。设备依次回报受理、开工和失败。首份补丁与自动修正均回报 `file-size`、第 1 项替换，同一个派发只有一条开工审计。重新打开工作台后，从调度面板点开工单可以回读两条诊断。
+- 正常用例给这次追加留出容量。连接器安装固定依赖，应用补丁，在断网、只读挂载的 Node 22.17.1 容器中执行完整检查。此前嵌套检查曾因 Node 包装脚本自循环而停住，[运行器修复](https://github.com/DikkooXie/souflow/pull/140)随本次验证覆盖了旧目标提交。
+
+截图取自试验结束后重新打开的工作台。原对话的 #107 在本轮新增派发 0 次。第二台 Mac 的升级与实测另行验收。
+
+![工单详情中首次和自动修正的补丁均指出第 1 项替换超过文件容量](device-patch-diagnostics/01-rejected-edit.jpg)
+
+![正常补丁的隔离检查通过，工单详情回读到设备 tested 回执](device-patch-diagnostics/02-checked-edit.jpg)
+
+两次独立派发的编号前缀为 `4a66fe5d`（失败）和 `4451d493`（测试通过）。本机验证采用试验派发，无 GitHub 发布动作。
