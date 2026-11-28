@@ -10,6 +10,8 @@ import { openActivityStore } from "../src/audit/activity-store.mts";
 import { createGitHubDelivery, githubPull } from "../src/connections/github-delivery.mts";
 import { type DeliveryTracker, issueRevision, type IssueDetail, type IssuePull } from "../src/connections/issue-tracker.mts";
 import { qualitySources } from "../src/execution/codex-quality-review.mts";
+import { recoverCheckedWorkspace } from "../src/execution/checked-issue-recovery.mts";
+import { contentDigest } from "../src/execution/code-worker-protocol.mts";
 import { createDispatchMonitor } from "../src/execution/dispatch-monitor.mts";
 import { checkoutReviewedIssueBase, createIssueDeveloper, type DeliveryFailure, isolatedCheckFailed, IssueDeliveryFailed, IssueDeliverySourcesChanged, parseDeliveryPlan,
   passingAcceptanceTests } from "../src/execution/issue-delivery.mts";
@@ -18,6 +20,86 @@ import { createPlannedIssuePublication, type IssuePublication } from "../src/wor
 import { repairFromReceipt } from "../src/workbench/delivery-review-repair.mts";
 
 const spec = { files: ["src/main.mts"], instructions: "修改校验逻辑。", dependsOn: [] };
+
+test("恢复原设备已测试的提交，拒绝补丁摘要和文件范围不匹配", async t => {
+  const root = await mkdtemp(join(tmpdir(), "souflow-checked-artifact-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const artifact = join(root, "issue-7-a", "source");
+  await mkdir(join(artifact, "src"), { recursive: true });
+  const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
+  git(artifact, "init", "--quiet");
+  git(artifact, "config", "user.name", "fixture");
+  git(artifact, "config", "user.email", "fixture@example.test");
+  const file = "src/main.mts";
+  const before = "export const value = 1;\n";
+  const after = "export const value = 2;\n";
+  await writeFile(join(artifact, file), before);
+  git(artifact, "add", file);
+  git(artifact, "commit", "-qm", "baseline");
+  const revision = git(artifact, "rev-parse", "HEAD");
+  await writeFile(join(artifact, file), after);
+  git(artifact, "commit", "-qam", "device patch");
+  const head = git(artifact, "rev-parse", "HEAD");
+  const patch = contentDigest(JSON.stringify([{ path: file, before: contentDigest(before), after: contentDigest(after), mode: 0o100644 }]));
+  for (const mode of ["match", "wrong-patch", "outside-scope"] as const) {
+    const checkout = join(root, mode);
+    git(root, "clone", "--quiet", artifact, checkout);
+    git(checkout, "switch", "--quiet", "--detach", revision);
+    const result = recoverCheckedWorkspace(root, checkout, 7, head, revision, mode === "wrong-patch" ? "a".repeat(64) : patch,
+      mode === "outside-scope" ? [] : [file], 5000, new AbortController().signal);
+    if (mode === "match") {
+      await result;
+      assert.equal(git(checkout, "rev-parse", "HEAD"), head);
+    } else await assert.rejects(result, mode === "wrong-patch" ? /补丁不一致/ : /超出原工单范围/);
+  }
+});
+
+test("发布前读取失败后原测试提交跨重启保留，恢复时再次读取并只发布一次", async () => {
+  const issue: IssueDetail = { number: 7, title: "发布恢复", body: "条件", url: "https://github.com/a/b/issues/7",
+    state: "OPEN", assignees: ["member"], pulls: [] };
+  const head = "a".repeat(40);
+  let row: Claim = { ...issue, syncedAt: 0, requestId: "approval", claimedBy: "member", account: "member",
+    phase: "waiting", delivery: spec };
+  let prepares = 0;
+  let publishes = 0;
+  let unavailable = false;
+  const tracker: DeliveryTracker = {
+    repo: "a/b", account: async () => "member", assign: async () => {}, candidates: async () => [],
+    async read() { if (unavailable) throw Error("连接失败"); return issue; },
+    delivery: { checkout: async () => assert.fail(), find: async () => undefined,
+      async publish(actual) {
+        assert.equal(actual.head, head);
+        assert.equal(row.target?.head, head);
+        publishes++;
+        return { number: 8, state: "OPEN", url: "https://github.com/a/b/pull/8" };
+      },
+    },
+  };
+  const service = () => createIssueDispatch(tracker, { load: () => [row], save(_id, value) { row = value; return true; } },
+    async () => "", () => true, 1, new Map(), { specs: new Map([[7, spec]]), pollMs: 60_000,
+      async prepare(input) {
+        prepares++;
+        unavailable = true;
+        return { workspace: "fixture", branch: input.branch, base: "main", head, checked: { head, passingTests: ["[AC-1] 回执"] } };
+      } });
+  const first = service();
+  await first.refresh();
+  await setImmediate();
+  await first.close();
+  assert.equal(row.phase, "readyToPublish");
+  assert.equal(row.prepared?.head, head);
+  assert.equal(publishes, 0);
+  unavailable = false;
+  const restarted = service();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await restarted.refresh();
+    await setImmediate();
+  }
+  await restarted.close();
+  assert.equal(prepares, 1);
+  assert.equal(publishes, 1);
+  assert.equal((row as Claim).phase, "submitted");
+});
 
 test("GitHub 允许编辑的 TS 和 JS 文件使用固定提交的内容复核", async t => {
   const repo = await mkdtemp(join(tmpdir(), "souflow-quality-sources-"));

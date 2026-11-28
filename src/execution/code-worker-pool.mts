@@ -66,16 +66,27 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
     });
   }
 
+  function latestForScope(scope: WorkerFailureScope) {
+    const latest = [...attempts.values()].reverse().find(row =>
+      row.repo.toLowerCase() === scope.repo.toLowerCase() && row.issue === scope.issue);
+    if (latest?.receipt && latest.issueRevision === scope.issueRevision
+      && latest.plan.flowId === scope.plan.flowId && latest.plan.version === scope.plan.version
+      && latest.plan.flowDigest === scope.plan.flowDigest && latest.plan.batchDigest === scope.plan.batchDigest) return latest;
+  }
+
   return {
     config,
     permits: (id: string) => allowed.has(id),
     failedAttempt(scope: WorkerFailureScope) {
       // 按持久化派发顺序检查最后一次。同一工单有更新的尝试时，不能凭旧回执再次派发。
-      const latest = [...attempts.values()].reverse().find(row =>
-        row.repo.toLowerCase() === scope.repo.toLowerCase() && row.issue === scope.issue);
-      if (latest?.state === "failed" && latest.receipt && latest.issueRevision === scope.issueRevision
-        && latest.plan.flowId === scope.plan.flowId && latest.plan.version === scope.plan.version
-        && latest.plan.flowDigest === scope.plan.flowDigest && latest.plan.batchDigest === scope.plan.batchDigest) return latest.id;
+      const latest = latestForScope(scope);
+      if (latest?.state === "failed") return latest.id;
+    },
+    testedPatch(scope: WorkerFailureScope) {
+      const latest = latestForScope(scope);
+      if (latest?.state === "tested" && latest.receipt?.patch) {
+        return { id: latest.id, patch: latest.receipt.patch, revision: latest.revision };
+      }
     },
     async poll(device: Device, signal: AbortSignal) {
       if (!allowed.has(device.id) || closed || signal.aborted) return { status: 403 } as const;
