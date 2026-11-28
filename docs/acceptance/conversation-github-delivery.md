@@ -77,3 +77,17 @@
 ![原工作台的 GitHub 工单面板显示正在核对上游源码](conversation-dual-mac/03-current-source-review.jpg)
 
 ![同一工单复核后显示待核对，尚无关联 PR](conversation-dual-mac/04-awaiting-amendment.jpg)
+
+### 在原对话为 #107 补充两项回归并续跑
+
+2026-11-28，原址工作台运行 [PR #136](https://github.com/DikkooXie/souflow/pull/136) 的合并提交 `c458c1d`。成员在 v14 的待决策卡授权补充两个测试文件。`tests/remote-handoff.test.mts` 验证乙无法消费甲的有效配对码、甲仍能使用原码确认。`tests/code-worker-pool.test.mts` 验证设备已收单且仍在执行名单内时，授权缺失或所有者不符均会阻止受理和启动 Codex。
+
+审计 1132、1137、1138 记录修订发起、答复和生效。独立只读复核引用了 8 处固定版本源码，1143、1144 记录复核通过。新执行编号 `d80182cc` 对应一次派发（1145）、一次受理（1147）和一次开工（1148）。同一个设备执行范围包括原先的 4 个实现文件和新获准的 2 个测试文件。
+
+![原对话的待决策卡展示测试文件、验证步骤和授权选择](conversation-dual-mac/05-amendment-approved.jpg)
+
+![源码复核通过后设备接单，工作台显示原工单已重新开工](conversation-dual-mac/06-amended-start.jpg)
+
+第二台 Mac 的设备程序为 `03477a1`，本次执行的仓库基线为 `c458c1d`。设备在开工 4 分 6 秒后回报 `failed`，阶段为 `patch`（审计 1152、1153）。设备日志确认接单及回报，回执仅保存失败阶段，没有失败的替换序号或可回放的候选补丁。测试通过回执、任务分支和关联 PR 均为空。原 [#107](https://github.com/DikkooXie/souflow/issues/107) 保持开放。设备补丁诊断由 [#137](https://github.com/DikkooXie/souflow/issues/137) 跟踪。
+
+![设备回报补丁阶段失败，工作台显示 #107 尚无关联 PR](conversation-dual-mac/07-amended-patch-failure.jpg)
