@@ -1,5 +1,4 @@
-import { execFile, spawn } from "node:child_process";
-import { createInterface } from "node:readline";
+import { execFile } from "node:child_process";
 import { randomUUID, X509Certificate } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { request } from "node:https";
@@ -8,6 +7,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { openActivityStore } from "../audit/activity-store.mts";
 import { codeEditFileBytes, type CodeWorkerConfig, loadLocalEnv, readCodeWorkerConfig, runtimeInteger, runtimeSetting } from "../config/runtime.mts";
+import { probeCodeDeviceLogin } from "../execution/code-device-login.mts";
 import { startCodexReadOnlyTask } from "../execution/codex-command-attempt.mts";
 import { contentDigest, readCodeOffer, readWorkerCapacity, workerDigest, workerId,
   workerProtocolVersion, type CodeOffer, type CodeReceipt, type WorkerFailureStage } from "../execution/code-worker-protocol.mts";
@@ -22,15 +22,16 @@ type Pending = Pick<CodeOffer, "id" | "digest">;
 type Journal = { instance: string; pending: Pending[] };
 
 function connector(endpoint: URL, config: { id: string; key: string; certificate: string }, limits: CodeWorkerConfig) {
-  return (path: "wait" | "receipt", value: object, signal: AbortSignal) => new Promise<{
+  return (path: "check" | "wait" | "receipt", value: object | undefined, signal: AbortSignal) => new Promise<{
     status: number; offer?: unknown;
   }>((fulfill, reject) => {
-    const payload = JSON.stringify(value);
+    const payload = value === undefined ? undefined : JSON.stringify(value);
     const maxBytes = path === "wait" ? limits.waitBodyBytes : limits.messageBytes;
-    if (Buffer.byteLength(payload) > maxBytes) { reject(Error("设备消息超过上限。")); return; }
+    if (payload !== undefined && Buffer.byteLength(payload) > maxBytes) { reject(Error("设备消息超过上限。")); return; }
     const req = request(new URL(`/v1/code-workers/${config.id}/${path}`, endpoint), {
-      method: "POST", ca: config.certificate, signal, timeout: limits.httpTimeoutMs,
-      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload), Authorization: `Bearer ${config.key}` },
+      method: path === "check" ? "GET" : "POST", ca: config.certificate, signal, timeout: limits.httpTimeoutMs,
+      headers: { ...(payload === undefined ? {} : { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) }),
+        Authorization: `Bearer ${config.key}` },
     }, response => {
       const chunks: Buffer[] = [];
       let size = 0;
@@ -124,42 +125,6 @@ async function doWork(offer: CodeOffer, root: string, image: string, timeoutMs: 
   }
 }
 
-async function codexReady(signal: AbortSignal): Promise<boolean> {
-  if (signal.aborted) return false;
-  return new Promise(resolve => {
-    const server = spawn("codex", ["app-server"], { signal, stdio: ["pipe", "pipe", "ignore"] });
-    const lines = createInterface({ input: server.stdout });
-    let settled = false;
-    const finish = (ready: boolean) => {
-      if (settled) return;
-      settled = true;
-      lines.close();
-      server.stdin.destroy();
-      server.kill();
-      resolve(ready);
-    };
-    const send = (message: object) => server.stdin.write(`${JSON.stringify(message)}\n`);
-    server.once("error", () => finish(false));
-    server.once("close", () => finish(false));
-    server.stdin.on("error", () => finish(false));
-    lines.on("line", line => {
-      try {
-        const reply = JSON.parse(line);
-        if (reply?.id === 1) {
-          if (reply.error || !reply.result) { finish(false); return; }
-          send({ method: "initialized" });
-          send({ id: 2, method: "account/read", params: { refreshToken: false } });
-        } else if (reply?.id === 2) {
-          finish(!reply.error && reply.result?.account?.type === "chatgpt");
-        }
-      } catch {
-        finish(false);
-      }
-    });
-    send({ id: 1, method: "initialize", params: { clientInfo: { name: "souflow-code-device", version: String(workerProtocolVersion) } } });
-  });
-}
-
 async function readEnrollment(configPath: string | undefined) {
   if (!configPath) throw Error("请通过 SOULFLOW_CODE_WORKER_ENROLLMENT_FILE 指定设备接入文件。");
   const file = resolve(configPath);
@@ -191,10 +156,9 @@ async function selfCheck(configPath: string | undefined, limits: CodeWorkerConfi
   if (!capacity) process.stdout.write("请检查设备仓库及并发配置。\n");
 
   const [network, loggedIn] = await Promise.all([
-    enrollment && capacity ? connector(enrollment.endpoint, enrollment, limits)("wait", {
-      ...capacity, version: workerProtocolVersion, ready: false,
-    }, AbortSignal.timeout(limits.httpTimeoutMs)).catch(() => undefined) : undefined,
-    codexReady(AbortSignal.timeout(limits.httpTimeoutMs)),
+    enrollment && capacity ? connector(enrollment.endpoint, enrollment, limits)("check", undefined,
+      AbortSignal.timeout(limits.httpTimeoutMs)).catch(() => undefined) : undefined,
+    probeCodeDeviceLogin(AbortSignal.timeout(limits.httpTimeoutMs)),
   ]);
   if (!enrollment || !capacity) process.stdout.write("设备 HTTPS 接入检查跳过，请先修正配置。\n");
   else if (!network) process.stdout.write("设备 HTTPS 接入失败，请检查网络、服务地址和证书。\n");
@@ -287,7 +251,7 @@ async function main() {
       let connected = false;
       try {
         while (!stop.signal.aborted) {
-          const loggedIn = await codexReady(AbortSignal.any([stop.signal, AbortSignal.timeout(limits.httpTimeoutMs)]));
+          const loggedIn = await probeCodeDeviceLogin(AbortSignal.any([stop.signal, AbortSignal.timeout(limits.httpTimeoutMs)]));
           if (stop.signal.aborted) break;
           const ready = loggedIn && active.size < slots;
           const wait = new AbortController();
