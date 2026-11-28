@@ -101,6 +101,28 @@ test("发布前读取失败后原测试提交跨重启保留，恢复时再次�
   assert.equal((row as Claim).phase, "submitted");
 });
 
+test("恢复待发布提交时拒绝已失效的原规划授权", async () => {
+  const head = "a".repeat(40);
+  const issue: IssueDetail = { number: 7, title: "发布恢复", body: "条件", url: "https://github.com/a/b/issues/7",
+    state: "OPEN", assignees: ["member"], pulls: [] };
+  let claim: Claim = { ...issue, syncedAt: 0, requestId: "approval", claimedBy: "member", account: "member",
+    phase: "readyToPublish", delivery: { ...spec, baseRevision: "b".repeat(40) },
+    approval: { flowId: "flow", planId: "plan", version: 1, issueRevision: issueRevision(issue),
+      quality: { policy: 1, flowDigest: "c".repeat(64), batchDigest: "d".repeat(64) } },
+    prepared: { workspace: "test", branch: "feat/7-existing", base: "main", head } };
+  const tracker: DeliveryTracker = { repo: "a/b", candidates: async () => [], read: async () => issue,
+    account: async () => "member", assign: async () => {}, delivery: { checkout: async () => assert.fail(),
+      find: async () => undefined, publish: async () => assert.fail("不能使用已失效的批准发布") } };
+  const service = createIssueDispatch(tracker, { load: () => [claim], save(_id, value) { claim = value; return true; } },
+    async () => "", () => true, 1, new Map(), { specs: new Map(), conversation: true, requireQuality: true, pollMs: 60_000,
+      prepare: async () => assert.fail(), reviewScopeCurrent: () => false });
+  await service.refresh();
+  await setImmediate();
+  await service.close();
+  assert.equal(claim.phase, "uncertain");
+  assert.equal(claim.target, undefined);
+});
+
 test("GitHub 允许编辑的 TS 和 JS 文件使用固定提交的内容复核", async t => {
   const repo = await mkdtemp(join(tmpdir(), "souflow-quality-sources-"));
   t.after(() => rm(repo, { recursive: true, force: true }));

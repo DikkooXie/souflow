@@ -407,7 +407,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
         const issue = await connection.read(c.number);
         if (!stillAssignee(c, issue) || issue.pulls.length) throw new IssueDeliverySourcesChanged();
       }
-      if ((c.retriedWorkerAttempt || c.attemptedCheckedRecovery) && !delivery.reviewScopeCurrent?.(current())) {
+      if (c.approval && delivery.reviewScopeCurrent && !delivery.reviewScopeCurrent(current())) {
         throw new IssueDeliverySourcesChanged();
       }
       const scope = workerScope(connection.repo, c);
@@ -437,7 +437,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
             signal.throwIfAborted();
             const latest = await connection.read(c.number);
             if (!permits(c.claimedBy) || !stillAssignee(c, latest) || latest.pulls.length
-              || ((c.retriedWorkerAttempt || c.attemptedCheckedRecovery) && !delivery.reviewScopeCurrent?.(current()))) {
+              || (delivery.reviewScopeCurrent && !delivery.reviewScopeCurrent(current()))) {
               throw new IssueVerificationUncertain("needs-reconciliation");
             }
             signal.throwIfAborted();
@@ -460,8 +460,9 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       if (handoff && (handoff.finding.status !== "pass" || handoff.proof.execution !== prepared.executionRevision
         || JSON.stringify(await producers(handoff.proof.producers[0]?.baseName ?? "", abort.signal))
           !== JSON.stringify(handoff.proof.producers))) throw new IssueDeliverySourcesChanged();
-      if ((c.retriedWorkerAttempt || c.attemptedCheckedRecovery)
-        && (!permits(c.claimedBy) || !delivery.reviewScopeCurrent?.(current()))) throw new IssueDeliverySourcesChanged();
+      if (!permits(c.claimedBy) || (c.approval && delivery.reviewScopeCurrent && !delivery.reviewScopeCurrent(current()))) {
+        throw new IssueDeliverySourcesChanged();
+      }
       abort.signal.throwIfAborted();
       const target = { branch, head: prepared.head, base: prepared.base };
       const { prepared: _prepared, ...local } = current();
