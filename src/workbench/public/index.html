@@ -21,6 +21,7 @@
       </div>
       <div class="topbar-actions">
         <span id="member-label" class="member-label" hidden></span>
+        <button type="button" id="open-personal" class="audit-nav" aria-controls="personal-home" hidden>个人主页</button>
         <button type="button" id="open-github" class="audit-nav" data-track="open-github" aria-haspopup="dialog" aria-controls="github-dialog" hidden>GitHub 工单</button>
         <button type="button" id="open-monitor" class="audit-nav" data-track="open-monitor" aria-haspopup="dialog" aria-controls="monitor-dialog" hidden>调度面板</button>
         <button type="button" id="open-decisions" class="inbox-button" data-track="open-decisions" aria-haspopup="dialog" aria-controls="decision-dialog">待决策 <span id="count" aria-live="polite">0</span></button>
@@ -77,6 +78,21 @@
         </div>
       </form>
       <p id="error" class="error" role="alert" hidden></p>
+    </main>
+
+    <main id="personal-home" class="audit" aria-labelledby="personal-title" hidden>
+      <header class="audit-header">
+        <div>
+          <h1 id="personal-title" tabindex="-1">个人主页</h1>
+          <p id="personal-identity" hidden></p>
+          <p id="personal-status" role="status">正在读取成员身份…</p>
+        </div>
+      </header>
+      <section id="personal-devices" class="audit-insights" aria-labelledby="personal-devices-title" hidden>
+        <h2 id="personal-devices-title">我的设备</h2>
+        <p id="personal-devices-empty" class="muted">暂无已确认归属的设备。</p>
+        <ul id="personal-device-list" hidden></ul>
+      </section>
     </main>
 
     <main id="audit" class="audit" hidden>
