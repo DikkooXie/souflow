@@ -8,6 +8,7 @@ export type SourceHandoff = {
   original: string; execution: string; producers: readonly SourceProducer[];
   changedPaths: string[];
   blobs: { path: string; mode: string; sha: string }[];
+  refreshed?: true;
 };
 
 export class IssueDeliverySourcesChanged extends Error {
@@ -16,6 +17,37 @@ export class IssueDeliverySourcesChanged extends Error {
 
 const commit = /^[a-f0-9]{40}$/;
 const splitPaths = (value: string) => value.split("\0").filter(Boolean);
+
+export async function proveRefreshedSources(git: Git, original: string, execution: string, paths: readonly string[],
+  planPath: string | undefined, upstream: readonly string[], producers: readonly SourceProducer[]): Promise<SourceHandoff> {
+  const changed = () => new IssueDeliverySourcesChanged();
+  if (![original, execution, ...upstream].every(sha => commit.test(sha))
+    || execution === original || !producers.length || await git(["rev-parse", "HEAD"]) !== execution) throw changed();
+  const history = (await git(["rev-list", "--first-parent", "--parents", execution, `^${original}`]))
+    .split("\n").filter(Boolean).map(line => line.split(" "));
+  if (history.at(-1)?.[1] !== original || upstream.some(merge => !history.some(([sha]) => sha === merge))
+    || producers.some(producer => !upstream.includes(producer.merge))) throw changed();
+  if (planPath) {
+    try { await git(["--literal-pathspecs", "diff", "--quiet", "--no-ext-diff", "--no-textconv", original, execution, "--", planPath]); }
+    catch { throw changed(); }
+  }
+  const relevant = [...new Set(paths)];
+  const changedPaths = splitPaths(await git(["--literal-pathspecs", "diff", "--name-only", "-z", "--no-renames", "--no-ext-diff",
+    "--no-textconv", original, execution, "--", ...relevant]));
+  const blobs = readBlobs(await git(["--literal-pathspecs", "ls-tree", "-z", execution, "--", ...relevant]), relevant);
+  if (!changedPaths.length) throw changed();
+  return { original, execution, producers, changedPaths, blobs, refreshed: true };
+}
+
+function readBlobs(raw: string, relevant: readonly string[]): SourceHandoff["blobs"] {
+  const blobs = splitPaths(raw).map(entry => {
+    const match = /^(100644|100755) blob ([a-f0-9]{40})\t(.+)$/.exec(entry);
+    if (!match?.[1] || !match[2] || !match[3] || !relevant.includes(match[3])) throw new IssueDeliverySourcesChanged();
+    return { path: match[3], mode: match[1], sha: match[2] };
+  });
+  if (new Set(blobs.map(blob => blob.path)).size !== new Set(relevant).size) throw new IssueDeliverySourcesChanged();
+  return blobs;
+}
 
 export async function proveSourceHandoff(git: Git, original: string, execution: string, fixedPaths: readonly string[],
   sources: readonly string[], producers: readonly SourceProducer[]): Promise<SourceHandoff | undefined> {
@@ -57,12 +89,6 @@ export async function proveSourceHandoff(git: Git, original: string, execution: 
   }
   if (verified.size !== producers.length) throw changed();
   if (!touched.size) return;
-  const entries = splitPaths(await git(["--literal-pathspecs", "ls-tree", "-z", execution, "--", ...relevant]));
-  const blobs = entries.map(entry => {
-    const match = /^(100644|100755) blob ([a-f0-9]{40})\t(.+)$/.exec(entry);
-    if (!match?.[1] || !match[2] || !match[3] || !relevant.includes(match[3])) throw changed();
-    return { path: match[3], mode: match[1], sha: match[2] };
-  });
-  if (new Set(blobs.map(blob => blob.path)).size !== new Set(relevant).size) throw changed();
+  const blobs = readBlobs(await git(["--literal-pathspecs", "ls-tree", "-z", execution, "--", ...relevant]), relevant);
   return { original, execution, producers, changedPaths: [...touched], blobs };
 }

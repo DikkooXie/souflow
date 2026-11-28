@@ -14,6 +14,7 @@ import { createIssueVerifier, type VerifyIssue } from "../execution/issue-verifi
 import { createIssueDispatch, IssueActionError, type Claim, type IssueDeliveryOptions } from "./issue-dispatch.mts";
 import { createGitHubDeliveryReviewer } from "./github-delivery-review.mts";
 import { readApprovedReviewFixes } from "./approved-review-fix.mts";
+import { readApprovedSourceRefresh } from "./approved-source-refresh.mts";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
 import { hostname } from "node:os";
@@ -180,6 +181,8 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           legacyReviewTestFailure: audit.legacyReviewTestFailure,
           ...(issueDelivery.reviewFix ? { reviewFix: issueDelivery.reviewFix } : {}),
           ...(issueDelivery.reviewFixes ? { reviewFixes: issueDelivery.reviewFixes } : {}),
+          ...(issueDelivery.sourceRefresh && remoteLink?.code ? { sourceRefresh: issueDelivery.sourceRefresh,
+            hasWorkerAttempt: remoteLink.code.hasAttempt } : {}),
           ...(publishIssues ? { publishRepair: publishIssues } : {}),
           ...(remoteLink?.code ? { failedWorkerAttempt: remoteLink.code.failedAttempt } : {}),
           async reviewSourceHandoff(claim, proof, sources, signal) {
@@ -739,8 +742,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const image = process.env.SOULFLOW_GITHUB_CHECK_IMAGE?.trim();
   const conversationDelivery = process.env.SOULFLOW_GITHUB_CONVERSATION_DELIVERY === "1";
   const reviewFix = process.env.SOULFLOW_GITHUB_REVIEW_FIX;
+  const sourceRefresh = process.env.SOULFLOW_GITHUB_SOURCE_REFRESH;
   delete process.env.SOULFLOW_GITHUB_REVIEW_FIX;
+  delete process.env.SOULFLOW_GITHUB_SOURCE_REFRESH;
   if (reviewFix !== undefined && !conversationDelivery) throw Error("PR 续修需要启用对话工单交付。");
+  if (sourceRefresh !== undefined && !conversationDelivery) throw Error("源码复核续派需要启用对话工单交付。");
   const recoverFailedIssue = process.env.SOULFLOW_GITHUB_RECOVER_FAILED_ISSUE === undefined ? undefined
     : integerSetting("SOULFLOW_GITHUB_RECOVER_FAILED_ISSUE", 0, 1, Number.MAX_SAFE_INTEGER);
   if (recoverFailedIssue !== undefined && !conversationDelivery) throw Error("恢复旧工单前请启用对话工单交付。");
@@ -765,6 +771,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     ...(deviceTestAttempts.length ? { recoverDeviceTestAttempts: new Set(deviceTestAttempts) } : {}),
     recoverCheckedHeads,
     ...(reviewFix === undefined ? {} : { reviewFixes: readApprovedReviewFixes(reviewFix) }),
+    ...(sourceRefresh === undefined ? {} : { sourceRefresh: readApprovedSourceRefresh(sourceRefresh) }),
     pollMs: integerSetting("SOULFLOW_GITHUB_POLL_MS", 20_000, 5000, 3_600_000),
     timeoutMs: runtimeInteger("SOULFLOW_GITHUB_DELIVERY_TIMEOUT_MS", 1000, 3_600_000),
   } : undefined;
