@@ -5,7 +5,7 @@ import { issueRevision, type DeliveryTracker, type IssueDetail, type IssuePull, 
 import type { AccountAssignment } from "../execution/codex-account-dispatch.mts";
 import type { WorkerFailureScope } from "../execution/code-worker-pool.mts";
 import type { SourceHandoff, SourceProducer } from "../execution/dependency-source-handoff.mts";
-import { IssueDeliveryFailed, IssueDeliverySourcesChanged, type CheckedIssue, type DeliveryFailure, type DeliverySpec, type DeliveryTarget, type PrepareIssue } from "../execution/issue-delivery.mts";
+import { IssueDeliveryFailed, IssueDeliverySourcesChanged, type CheckedIssue, type DeliveryFailure, type DeliverySpec, type DeliveryTarget, type PreparedDelivery, type PrepareIssue } from "../execution/issue-delivery.mts";
 import { IssueVerificationUncertain, type VerifyIssue } from "../execution/issue-verification.mts";
 import type { PatchIssue } from "../execution/local-code-changes.mts";
 import type { DeliveryReviewReceipt } from "../planning/delivery-review.mts";
@@ -21,6 +21,7 @@ export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; p
   reviewScopeCurrent?: (claim: Claim) => boolean;
   failedWorkerAttempt?: (scope: WorkerFailureScope) => string | undefined;
   recoverDeviceTestAttempts?: ReadonlySet<string>;
+  recoverCheckedHeads?: Readonly<Record<string, string>>;
   reviewSourceHandoff?: (claim: Claim, proof: SourceHandoff, sources: Record<string, string>, signal: AbortSignal) => Promise<TicketSourceFinding> };
 
 function publisher(tracker: IssueTracker) {
@@ -34,7 +35,7 @@ export type Claim = Remote & {
   sessionId?: string; report?: string;
   accountAssignment?: AccountAssignment;
   delivery?: DeliverySpec; approval?: { flowId: string; planId: string; version: number; issueRevision: string; quality?: QualityBinding };
-  target?: DeliveryTarget; pull?: IssuePull;
+  target?: DeliveryTarget; pull?: IssuePull; prepared?: PreparedDelivery; attemptedCheckedRecovery?: boolean;
   checked?: CheckedIssue;
   observedIssueRevision?: string;
   observedReviewLink?: boolean;
@@ -46,7 +47,8 @@ export type Claim = Remote & {
   sourceHandoff?: { proof: SourceHandoff; finding: TicketSourceFinding };
 };
 const phases = { claiming: "正在认领", waiting: "等待上游 PR 合并", checkingSources: "正在核对上游源码",
-  developing: "Codex 正在开发与测试", publishing: "正在推送并创建 PR", submitted: "已提交 PR", deliveryFailed: "开发或测试失败",
+  developing: "Codex 正在开发与测试", readyToPublish: "本地检查通过，等待 GitHub 核对",
+  publishing: "正在推送并创建 PR", submitted: "已提交 PR", deliveryFailed: "开发或测试失败",
   running: "Codex 正在核验", done: "核验完成", conflict: "认领冲突", uncertain: "待核对", failed: "核验失败" };
 const stageNames = { preflight: "工单状态核对", checkout: "工作区准备", codex: "Codex 运行", dependencies: "依赖安装",
   patch: "补丁校验与应用", tests: "隔离检查", commit: "生成本地提交", publish: "远端发布", legacy: "旧版执行", device: "设备执行" };
@@ -80,6 +82,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   const claims = new Map<number, Claim>();
   const abort = new AbortController();
   const jobs = new Set<Promise<void>>();
+  const deliveries = new Set<number>();
   const reviewJobs = new Map<number, Promise<void>>();
   const reviewUnavailable = new Map<number, string>();
   let pending: { id: string; actor: string; task: Promise<void> } | undefined;
@@ -202,7 +205,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       ...[...claims.values()].reverse().map(({ requestId: _id, account: _account, phase, delivery, pull, approval,
         checked: _checked, deliveryReviews: _reviews, reviewRepairs: _repairs, sourceHandoff: _sourceHandoff,
         observedIssueRevision: _issueRevision, observedReviewLink: _reviewLink, retriedWorkerAttempt: _retriedWorkerAttempt,
-        interruptedDevelopment: _interruptedDevelopment, ...item }) => ({ ...item,
+        interruptedDevelopment: _interruptedDevelopment, prepared: _prepared, attemptedCheckedRecovery: _attemptedCheckedRecovery,
+        ...item }) => ({ ...item,
         ...(delivery ? { dependsOn: delivery.dependsOn, mode: "delivery" } : {}),
         ...(approval ? { flowId: approval.flowId } : {}),
         ...(item.failure ? { failureMessage: `${stageNames[item.failure.workerStage ?? item.failure.stage]} · ${reasonNames[item.failure.reason]}` } : {}),
@@ -364,7 +368,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     jobs.add(job);
     void job.then(() => jobs.delete(job), () => jobs.delete(job));
   }
-  async function develop(c: Claim, spec: DeliverySpec, upstream: string[]) {
+  async function develop(c: Claim, spec: DeliverySpec, upstream: string[], recoverCheckedHead?: string) {
     const connection = memberTrackers.get(c.claimedBy) ?? tracker;
     const remote = publisher(connection);
     const current = () => claims.get(c.number) ?? c;
@@ -397,15 +401,19 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       }));
     };
     try {
-      if (!remote || !delivery || !permits(c.claimedBy) || (await connection.account()).toLowerCase() !== c.account.toLowerCase()) {
-        throw Error("工单账号无法确认。");
+      if (!remote || !delivery || !permits(c.claimedBy)) throw new IssueDeliverySourcesChanged();
+      if (!c.prepared) {
+        if ((await connection.account()).toLowerCase() !== c.account.toLowerCase()) throw new IssueDeliverySourcesChanged();
+        const issue = await connection.read(c.number);
+        if (!stillAssignee(c, issue) || issue.pulls.length) throw new IssueDeliverySourcesChanged();
       }
-      const issue = await connection.read(c.number);
-      if (!stillAssignee(c, issue) || issue.pulls.length) throw Error("工单状态已变化。");
-      if (c.retriedWorkerAttempt && !delivery.reviewScopeCurrent?.(current())) throw new IssueDeliverySourcesChanged();
+      if (c.approval && delivery.reviewScopeCurrent && !delivery.reviewScopeCurrent(current())) {
+        throw new IssueDeliverySourcesChanged();
+      }
       const scope = workerScope(connection.repo, c);
-      const branch = `feat/${c.number}-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
-      const prepared = await delivery.prepare({ number: c.number, spec, branch, publisher: remote, upstream,
+      const branch = c.prepared?.branch ?? `feat/${c.number}-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+      const prepared = c.prepared ?? await delivery.prepare({ number: c.number, spec, branch, publisher: remote, upstream,
+        ...(recoverCheckedHead ? { recoverCheckedHead } : {}),
         ...(c.retryCount && c.failure ? { previousFailure: c.failure } : {}),
         ...(spec.sourceFrom?.length && delivery.reviewSourceHandoff ? { sourceHandoff: {
           current: producers,
@@ -429,7 +437,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
             signal.throwIfAborted();
             const latest = await connection.read(c.number);
             if (!permits(c.claimedBy) || !stillAssignee(c, latest) || latest.pulls.length
-              || (c.retriedWorkerAttempt && !delivery.reviewScopeCurrent?.(current()))) {
+              || (delivery.reviewScopeCurrent && !delivery.reviewScopeCurrent(current()))) {
               throw new IssueVerificationUncertain("needs-reconciliation");
             }
             signal.throwIfAborted();
@@ -437,17 +445,28 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
         ...(c.approval ? { flowId: c.approval.flowId, planVersion: c.approval.version } : {}) },
         sessionId => { if (current().sessionId !== sessionId) save({ ...current(), sessionId }, "connected"); }, abort.signal,
         accountAssignment => save({ ...current(), accountAssignment }, "account-assigned"));
-      const checkedIssue = await connection.read(c.number);
-      if (!stillAssignee(c, checkedIssue) || checkedIssue.pulls.length) throw Error("工单状态已变化。");
-      if (current().phase !== "developing") throw new IssueDeliverySourcesChanged();
+      if (!c.prepared) {
+        abort.signal.throwIfAborted();
+        if (current().phase !== "developing") throw new IssueDeliverySourcesChanged();
+        save({ ...current(), prepared, phase: "readyToPublish" }, "local-check-complete");
+      }
+      // 网络读失败时保留已经测试过的提交。重试只重新读取，仍须先写入发布目标再推送。
+      const observed = await Promise.all([connection.account(), connection.read(c.number)]).catch(() => undefined);
+      if (!observed || abort.signal.aborted) return;
+      const [account, checkedIssue] = observed;
+      if (account.toLowerCase() !== c.account.toLowerCase() || !stillAssignee(c, checkedIssue)
+        || checkedIssue.pulls.length || current().phase !== "readyToPublish") throw new IssueDeliverySourcesChanged();
       const handoff = current().sourceHandoff;
       if (handoff && (handoff.finding.status !== "pass" || handoff.proof.execution !== prepared.executionRevision
         || JSON.stringify(await producers(handoff.proof.producers[0]?.baseName ?? "", abort.signal))
           !== JSON.stringify(handoff.proof.producers))) throw new IssueDeliverySourcesChanged();
-      if (c.retriedWorkerAttempt && (!permits(c.claimedBy) || !delivery.reviewScopeCurrent?.(current()))) throw new IssueDeliverySourcesChanged();
+      if (!permits(c.claimedBy) || (c.approval && delivery.reviewScopeCurrent && !delivery.reviewScopeCurrent(current()))) {
+        throw new IssueDeliverySourcesChanged();
+      }
       abort.signal.throwIfAborted();
       const target = { branch, head: prepared.head, base: prepared.base };
-      save({ ...current(), target, ...(prepared.checked ? { checked: prepared.checked } : {}), phase: "publishing" }, "checked");
+      const { prepared: _prepared, ...local } = current();
+      save({ ...local, target, ...(prepared.checked ? { checked: prepared.checked } : {}), phase: "publishing" }, "checked");
       const pull = await remote.publish({ ...prepared, branch, issue: c.number, title: `feat(issue): deliver #${c.number}` }, abort.signal);
       save({ ...current(), pull, phase: "submitted" }, "published");
     } catch (error) {
@@ -470,7 +489,11 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     for (const item of claims.values()) {
       if (jobs.size >= maxActive) break;
       const c = queueWorkerRetry(item);
-      if (c.phase !== "waiting" || !c.delivery || c.requestId === pending?.id) continue;
+      if (deliveries.has(c.number) || !c.delivery || c.requestId === pending?.id) continue;
+      const recoverCheckedHead = c.phase === "deliveryFailed" && !c.attemptedCheckedRecovery && !c.target && !c.pull && !c.pulls.length
+        && c.failure?.stage === "preflight" && c.failure.reason === "unavailable" && !c.delivery.dependsOn.length
+        && delivery.reviewScopeCurrent?.(c) ? delivery.recoverCheckedHeads?.[String(c.number)] : undefined;
+      if (c.phase !== "waiting" && c.phase !== "readyToPublish" && !recoverCheckedHead) continue;
       if (c.approval && !delivery.conversation) continue;
       if (delivery.requireQuality && !qualityBindingCurrent(c.approval?.quality)) {
         save({ ...c, phase: "uncertain" }, "quality-check-required");
@@ -483,11 +506,14 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       const upstream = c.delivery.dependsOn.map(number => claims.get(number)?.pull);
       if (!upstream.every(pull => pull?.state === "MERGED" && pull.mergeCommit)) continue;
       const checkSources = !!(c.delivery.sourceFrom?.length && delivery.reviewSourceHandoff);
-      save({ ...c, phase: checkSources ? "checkingSources" : "developing" },
-        checkSources ? "dependency-source-checking" : c.retriedWorkerAttempt ? "worker-redispatched" : upstream.length ? "woken" : "dispatched");
-      const job = develop(c, c.delivery, upstream.map(pull => pull?.mergeCommit ?? ""));
+      const selected: Claim = recoverCheckedHead ? { ...c, attemptedCheckedRecovery: true, phase: "developing" }
+        : c.phase === "readyToPublish" ? c : { ...c, phase: checkSources ? "checkingSources" : "developing" };
+      if (selected !== c) save(selected, recoverCheckedHead ? "checked-recovery-queued" : checkSources ? "dependency-source-checking"
+        : c.retriedWorkerAttempt ? "worker-redispatched" : upstream.length ? "woken" : "dispatched");
+      deliveries.add(c.number);
+      const job = develop(selected, c.delivery, upstream.map(pull => pull?.mergeCommit ?? ""), recoverCheckedHead);
       jobs.add(job);
-      void job.finally(() => { jobs.delete(job); });
+      void job.finally(() => { jobs.delete(job); deliveries.delete(c.number); });
     }
   }
   let polling: Promise<void> | undefined;
@@ -618,7 +644,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
             if (prior.phase === "uncertain" && prior.claimUncertain && stillAssignee(prior, issue)) {
               return { issue, resume: prior, deliverySpec, authorization };
             }
-            if (["waiting", "checkingSources", "developing", "publishing", "submitted", "deliveryFailed"].includes(prior.phase)) return undefined;
+            if (["waiting", "checkingSources", "developing", "readyToPublish", "publishing", "submitted", "deliveryFailed"].includes(prior.phase)) return undefined;
           }
           if (prior || issue.state !== "OPEN" || issue.assignees.length || issue.pulls.length) {
             throw new IssueActionError(409, "工单状态已变化，请重新规划。");

@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { scrubAuditText } from "../audit/activity-store.mts";
 import type { IssuePublisher } from "../connections/issue-tracker.mts";
 import { startCodexReadOnlyTask } from "./codex-command-attempt.mts";
+import { recoverCheckedWorkspace } from "./checked-issue-recovery.mts";
 import { type AccountAssignment, type CodexAccountDispatch, withCodexAccount } from "./codex-account-dispatch.mts";
 import { qualitySources } from "./codex-quality-review.mts";
 import { IssueDeliverySourcesChanged, proveSourceHandoff, type SourceHandoff, type SourceProducer } from "./dependency-source-handoff.mts";
@@ -36,6 +37,7 @@ export type PrepareIssue = (input: {
   reviewTarget?: DeliveryTarget & { base: string };
   repairing?: (issue: PatchIssue) => void;
   workerProof?: Pick<CodeWork, "repo" | "issueRevision" | "plan">;
+  recoverCheckedHead?: string;
   revalidateWorker?: (signal: AbortSignal) => Promise<void>;
   sourceHandoff?: {
     current: (branch: string, signal: AbortSignal) => Promise<readonly SourceProducer[]>;
@@ -176,7 +178,7 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
 }): PrepareIssue {
   const { root, image, model, timeoutMs, codexAccounts, workers, startTask = startCodexReadOnlyTask } = options;
   return async ({ number, flowId, planVersion, spec, branch, upstream, publisher, previousFailure,
-    reviewTarget, repairing, workerProof, revalidateWorker, sourceHandoff }, connected, signal, assigned) => {
+    reviewTarget, repairing, workerProof, revalidateWorker, sourceHandoff, recoverCheckedHead }, connected, signal, assigned) => {
     const runOnDevice = !!(workers && workerProof && !reviewTarget);
     const session = runOnDevice ? undefined : monitor.begin({
       title: `GitHub #${number}`, task: "开发与测试", ticketId: `#${number}`, flowId, ...(planVersion ? { planVersion } : {}),
@@ -200,6 +202,18 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
       }
       const editable = new Map(await Promise.all(spec.files.map(async file => [file, await readEditableFile(workspace, file)] as const)));
       const revision = await git(["rev-parse", "HEAD"]);
+      if (recoverCheckedHead) {
+        const receipt = workerProof && workers?.testedPatch({ ...workerProof, issue: number });
+        if (!receipt || receipt.revision !== revision || upstream.length || !revalidateWorker) throw new IssueDeliverySourcesChanged();
+        await recoverCheckedWorkspace(root, workspace, number, recoverCheckedHead, revision, receipt.patch, spec.files, timeoutMs, signal);
+        stage = "dependencies";
+        await isolatedIssueCheck(workspace, image, timeoutMs, signal, true);
+        stage = "tests";
+        const passingTests = await isolatedIssueCheck(workspace, image, timeoutMs, signal, false);
+        await revalidateWorker(signal);
+        return { workspace, base, executionRevision: revision, branch, head: recoverCheckedHead,
+          checked: { head: recoverCheckedHead, passingTests } };
+      }
       const readOnlySources = spec.sourcePaths?.length
         ? await qualitySources(workspace, revision, spec.sourcePaths, signal)
         : {};

@@ -187,6 +187,8 @@ node --experimental-strip-types src/workbench/code-device.mts
 
 若已有一次重试，且确认设备测试失败源自已修复的检查环境，维护者可在工作台的 `.env` 中用 `SOULFLOW_GITHUB_RECOVER_DEVICE_TEST_ATTEMPTS` 指定最新失败的派发 ID，多个 ID 用逗号分隔。原授权和回执仍须对应，额外恢复只执行一次并记录所用回执。确认恢复已入审计后移除配置。
 
+主机的隔离检查和提交完成后先保存待发布产物，再向 GitHub 回读原工单及负责人。回读临时失败时保留测试提交，恢复后按原校验条件发布。开始推送后续办只核对远端回执。旧版留下的已测试独立工单如未开始发布，可配置 `SOULFLOW_GITHUB_RECOVER_CHECKED_HEADS` 指定原本地提交。工作台须核对固定基线、文件和设备补丁摘要，在新目录复测后才发布。
+
 2026-11-24 使用两台实体 Mac 连接隔离的 souflow 工作台，两台设备各上报一个执行位。工作台重启后，两台设备重新连入，调度拓扑和状态接口显示两台设备在线。自动化测试另行验证指定设备派发、已失效回执、发送前重验授权和满载等待。实体双机同时完成真实工单和自动提交关联 PR 待验收。[双机连接截图](acceptance/paired-code-workers/01-two-code-devices.png)
 
 ### 调度本地代码工单

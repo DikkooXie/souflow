@@ -26,7 +26,7 @@ import { createDispatchMonitor, dispatchOverview } from "../execution/dispatch-m
 import { createRemoteHandoff, type RemoteDevice, type RemoteJob } from "../execution/remote-handoff.mts";
 import { createCodeWorkerPool, type WorkerAttempt } from "../execution/code-worker-pool.mts";
 import { loadLocalEnv, readCodeWorkerConfig, runtimeInteger } from "../config/runtime.mts";
-import { workerId } from "../execution/code-worker-protocol.mts";
+import { workerCommit, workerId } from "../execution/code-worker-protocol.mts";
 import { createRemoteWorkerIngress, readRemoteFiles, remoteWorkerNetwork, type RemoteLanConfig } from "./remote-worker-ingress.mts";
 import { createCodexAccountDispatch, readCodexProfiles, type CodexAccountDispatch } from "../execution/codex-account-dispatch.mts";
 import { createConversationFlows, currentDevelopmentPlan, maxArtifactTextLength, phases, readPlanRevision, type Flow, type StoredFlow } from "../planning/conversation-flow.mts";
@@ -176,6 +176,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           specs: issueDelivery.specs, pollMs: issueDelivery.pollMs, conversation: true, requireQuality: true,
           ...(issueDelivery.recoverFailedIssue ? { recoverFailedIssue: issueDelivery.recoverFailedIssue } : {}),
           ...(issueDelivery.recoverDeviceTestAttempts ? { recoverDeviceTestAttempts: issueDelivery.recoverDeviceTestAttempts } : {}),
+          ...(issueDelivery.recoverCheckedHeads ? { recoverCheckedHeads: issueDelivery.recoverCheckedHeads } : {}),
           ...(issueDelivery.reviewFix ? { reviewFix: issueDelivery.reviewFix } : {}),
           ...(publishIssues ? { publishRepair: publishIssues } : {}),
           ...(remoteLink?.code ? { failedWorkerAttempt: remoteLink.code.failedAttempt } : {}),
@@ -742,6 +743,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (deviceTestAttempts.length && (!conversationDelivery || deviceTestAttempts.some(id => !workerId.test(id)))) {
     throw Error("设备检查恢复需要启用对话工单交付并提供有效的派发 ID。");
   }
+  const recoverCheckedHeads = stringMapSetting("SOULFLOW_GITHUB_RECOVER_CHECKED_HEADS");
+  if (Object.entries(recoverCheckedHeads).some(([issue, head]) => !conversationDelivery || !/^[1-9]\d*$/.test(issue) || !workerCommit.test(head))) {
+    throw Error("交付恢复需要启用对话工单交付并提供有效的工单和提交。");
+  }
   if (issuePlan) throw Error("静态 GitHub 计划缺少规划产物与校验记录，请改用对话工单交付。");
   if (conversationDelivery && !planPath) throw Error("对话选单需要配置项目开发计划。");
   if (conversationDelivery && (!claimEnabled || !image || !Object.keys(githubAccounts).length)) {
@@ -753,6 +758,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     conversation: conversationDelivery,
     ...(recoverFailedIssue === undefined ? {} : { recoverFailedIssue }),
     ...(deviceTestAttempts.length ? { recoverDeviceTestAttempts: new Set(deviceTestAttempts) } : {}),
+    recoverCheckedHeads,
     ...(reviewFix === undefined ? {} : { reviewFix: readApprovedReviewFix(reviewFix) }),
     pollMs: integerSetting("SOULFLOW_GITHUB_POLL_MS", 20_000, 5000, 3_600_000),
     timeoutMs: runtimeInteger("SOULFLOW_GITHUB_DELIVERY_TIMEOUT_MS", 1000, 3_600_000),
