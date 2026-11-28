@@ -66,7 +66,7 @@ export type Claim = Remote & {
   checked?: CheckedIssue;
   observedIssueRevision?: string;
   observedReviewLink?: boolean;
-  deliveryReviews?: { observed: string; receipt: DeliveryReviewReceipt }[];
+  deliveryReviews?: { observed: string; receipt: DeliveryReviewReceipt; recordedAt?: number }[];
   claimUncertain?: boolean;
   failure?: DeliveryFailure; retryCount?: number; retriedWorkerAttempt?: string; pendingWorkerAttempt?: string;
   recoveryDispatchAttempt?: string; interruptedDevelopment?: boolean;
@@ -152,9 +152,12 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     } } : undefined)) throw new IssueActionError(503, "无法保存 GitHub 工单状态。");
     claims.set(c.number, c);
   }
-  const reviewVersion = (c: Claim) => JSON.stringify([c.pull?.number, c.pull?.head, c.pull?.baseName, c.approval, c.observedIssueRevision,
-    c.observedReviewLink,
-    c.checked?.head === c.pull?.head ? c.checked : undefined]);
+  const reviewVersion = (c: Claim) => {
+    const verification = delivery?.review?.version?.(c);
+    return JSON.stringify([c.pull?.number, c.pull?.head, c.pull?.baseName, c.approval, c.observedIssueRevision,
+      c.observedReviewLink, c.checked?.head === c.pull?.head ? c.checked : undefined, ...(verification ? [verification] : [])]);
+  };
+  const lastReview = (c: Claim, observed: string) => [...(c.deliveryReviews ?? [])].reverse().find(row => row.observed === observed);
   const activeReviewScope = (c: Claim) => c.observedIssueRevision === c.approval?.issueRevision && c.observedReviewLink === true
     && (delivery?.reviewScopeCurrent?.(c) ?? true);
   function repairProposal(c: Claim) {
@@ -163,7 +166,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     const remote = publisher(connection);
     if (!connection.creation || !remote?.checkoutPublished || !remote.updatePublished) return;
     const observed = reviewVersion(c);
-    const receipt = c.deliveryReviews?.find(item => item.observed === observed)?.receipt;
+    const receipt = lastReview(c, observed)?.receipt;
     return receipt && repairFromReceipt(connection.repo, c, receipt);
   }
   function currentRepair(c: Claim) {
@@ -188,7 +191,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     if (!review || !remote.reviewChanges || !c.approval?.quality || !c.pull?.head || reviewJobs.size >= maxActive || reviewJobs.has(c.number)) return;
     if (!activeReviewScope(c)) return;
     const observed = reviewVersion(c);
-    const prior = c.deliveryReviews?.find(item => item.observed === observed)?.receipt;
+    const prior = lastReview(c, observed)?.receipt;
     if (prior && (!retry || prior.implementation && prior.requirements)) return;
     if (reviewUnavailable.get(c.number) === observed && !retry) return;
     reviewUnavailable.delete(c.number);
@@ -204,7 +207,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       const latest = claims.get(c.number);
       if (!latest || abort.signal.aborted || reviewVersion(latest) !== observed || !activeReviewScope(latest)) return;
       if (!receipt) { unavailable(); return; }
-      save({ ...latest, deliveryReviews: [...(latest.deliveryReviews ?? []).filter(item => item.observed !== observed), { observed, receipt }] },
+      save({ ...latest, deliveryReviews: [...(latest.deliveryReviews ?? []), { observed, receipt, recordedAt: Date.now() }] },
         `delivery-review-${receipt.status}`);
     }).catch(unavailable).finally(() => { reviewJobs.delete(c.number); });
     reviewJobs.set(c.number, job);
@@ -842,12 +845,13 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
           const repairs = c.reviewRepairs?.filter(item => item.decision === "approved").map(({ head, issue, id, completedHead }) =>
             ({ head, issue, completedHead, state: c.reviewFix?.repairId === id ? c.reviewFix.state : completedHead ? "complete" : issue ? "linked" : "queued",
               ...(issue ? { url: `https://github.com/${tracker.repo}/issues/${issue}` } : {}) }));
+          const latestReview = lastReview(c, observed);
           return { number: c.number, pull: c.pull?.number, head: c.pull?.head, running: reviewJobs.has(c.number),
             ...(repairs?.length ? { repairs } : {}),
             ...(proposedRepair && "reason" in proposedRepair ? { repairUnavailable: proposedRepair.reason } : {}),
             unavailable: reviewUnavailable.get(c.number) === observed
               || !!c.observedIssueRevision && !current, reviews: (c.deliveryReviews ?? [])
-              .map(({ receipt, observed: prior }) => ({ ...receipt, current: current && prior === observed })) };
+              .map(row => ({ ...row.receipt, ...(row.recordedAt ? { recordedAt: row.recordedAt } : {}), current: current && row === latestReview })) };
         });
     },
     async suggest() {
