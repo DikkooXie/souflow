@@ -123,6 +123,7 @@ test("同进程源码拦截后经追加授权重审，测试范围与两项断�
       reviewSourceHandoff: (c, proof, sources, signal) => service.reviewHandoff(c, flow, proof, sources, signal),
       async prepare({ spec, sourceHandoff, revalidateWorker, workerOffered, branch }, _connected, signal) {
         assert.ok(sourceHandoff);
+        assert.equal(sourceHandoff.reuseApprovedRevision, undefined, "首次追加授权仍要求检出的当前主干等于批准提交");
         const producers = await sourceHandoff.current("main", signal);
         const execution = sourceHandoff.refreshRevision;
         assert.ok(execution);

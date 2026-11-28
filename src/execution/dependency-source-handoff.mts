@@ -18,6 +18,15 @@ export class IssueDeliverySourcesChanged extends Error {
 const commit = /^[a-f0-9]{40}$/;
 const splitPaths = (value: string) => value.split("\0").filter(Boolean);
 
+export async function checkoutApprovedRefresh(git: Git, execution: string): Promise<void> {
+  // 仅恢复已有修订时固定旧授权提交；旁支祖先不能冒充默认分支的已批准版本。
+  if (!commit.test(execution)
+    || !(await git(["rev-list", "--first-parent", "HEAD"])).split("\n").includes(execution)) {
+    throw new IssueDeliverySourcesChanged();
+  }
+  await git(["switch", "--detach", execution]);
+}
+
 export async function proveRefreshedSources(git: Git, original: string, execution: string, paths: readonly string[],
   planPath: string | undefined, upstream: readonly string[], producers: readonly SourceProducer[]): Promise<SourceHandoff> {
   const changed = () => new IssueDeliverySourcesChanged();

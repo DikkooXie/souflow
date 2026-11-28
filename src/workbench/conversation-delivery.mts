@@ -13,7 +13,7 @@ import { ticketDeliveryLines } from "../planning/ticket-delivery.mts";
 import type { DecisionCard } from "./demo-state.mts";
 import type { Claim, createIssueDispatch } from "./issue-dispatch.mts";
 import { type createPlannedIssuePublication, type PlannedIssueBatch, preparePlannedIssues } from "./planned-issue-publication.mts";
-import { activePrePrAmendment, amendedScope } from "./pre-pr-amendment.mts";
+import { activePrePrAmendment, amendedScope, amendmentRecoveryBound } from "./pre-pr-amendment.mts";
 
 export type IssueProposal = {
   id: string; flowId: string; actor: string; planId: string; version: number; base: string;
@@ -368,7 +368,8 @@ export function createConversationDelivery(github: Pick<ReturnType<typeof create
       if (!p?.sourceHandoff || !p.drafts || !p.published || p.status !== "submitted" || !flow || !reviewer || !original
         || proof.original !== p.base) throw new IssueDeliverySourcesChanged();
       const amendment = activePrePrAmendment(claim);
-      if (amendment && (claim.sourceRefresh?.amendmentId !== amendment.id || claim.pendingWorkerAttempt !== amendment.attemptId
+      if (amendment && (claim.sourceRefresh?.amendmentId !== amendment.id || !claim.pendingWorkerAttempt
+        || !amendmentRecoveryBound(claim, claim.pendingWorkerAttempt, proof.execution)
         || amendment.validation.some(v => !original.validation.some(row => row.criterion === v.criterion)))) throw new IssueDeliverySourcesChanged();
       const scope = amendedScope(claim, { request: flow.prompt, criteria: original.validation.map(row => ({ ...row, text: row.criterion })),
         files: original.paths });

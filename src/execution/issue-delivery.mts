@@ -11,7 +11,7 @@ import { recoverCheckedWorkspace } from "./checked-issue-recovery.mts";
 import { type FailedReviewDraft, restoreFailedReviewDraft } from "./failed-review-draft.mts";
 import { type AccountAssignment, type CodexAccountDispatch, withCodexAccount } from "./codex-account-dispatch.mts";
 import { qualitySources } from "./codex-quality-review.mts";
-import { IssueDeliverySourcesChanged, proveRefreshedSources, proveSourceHandoff, type SourceHandoff, type SourceProducer } from "./dependency-source-handoff.mts";
+import { checkoutApprovedRefresh, IssueDeliverySourcesChanged, proveRefreshedSources, proveSourceHandoff, type SourceHandoff, type SourceProducer } from "./dependency-source-handoff.mts";
 import { diagnoseIsolationFailure, type IsolationEvidence } from "./isolation-evidence.mts";
 import { verifyCandidatePatch } from "./candidate-patch-evidence.mts";
 import type { DispatchMonitor } from "./dispatch-monitor.mts";
@@ -54,6 +54,7 @@ export type PrepareIssue = (input: {
   workerOffered?: (attemptId: string) => void;
   sourceHandoff?: {
     refreshRevision?: string;
+    reuseApprovedRevision?: true;
     current: (branch: string, signal: AbortSignal) => Promise<readonly SourceProducer[]>;
     review: (handoff: SourceHandoff, sources: Record<string, string>, signal: AbortSignal) => Promise<void>;
     ready: () => void;
@@ -212,6 +213,7 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
         await publisher.checkoutPublished(workspace, reviewTarget, signal);
         await git(["merge-base", "--is-ancestor", spec.baseRevision, "HEAD"]);
       } else if (sourceHandoff?.refreshRevision && spec.baseRevision) {
+        if (sourceHandoff.reuseApprovedRevision) await checkoutApprovedRefresh(git, sourceHandoff.refreshRevision);
         handoff = await proveRefreshedSources(git, spec.baseRevision, sourceHandoff.refreshRevision,
           [...spec.files, ...(spec.sourcePaths ?? [])], spec.basePlanPath, upstream, await sourceHandoff.current(base, signal));
       } else {

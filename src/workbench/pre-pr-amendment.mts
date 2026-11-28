@@ -26,6 +26,12 @@ export function activePrePrAmendment(c: AmendmentClaim) {
   const a = c.prePrAmendments?.at(-1);
   return a && amendmentBound(c, a) ? a : undefined;
 }
+export function amendmentRecoveryBound(c: Claim, attemptId: string, revision: string) {
+  const a = activePrePrAmendment(c);
+  if (!a || a.revision !== revision) return false;
+  return a.attemptId === attemptId || c.sourceRefresh?.amendmentId === a.id
+    && c.recoveryDispatchAttempt === attemptId && !!c.retriedWorkerAttempt;
+}
 export function amendedSpec(c: Claim): DeliverySpec | undefined {
   if (!c.delivery) return;
   const a = activePrePrAmendment(c);
