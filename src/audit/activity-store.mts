@@ -188,6 +188,12 @@ export function openActivityStore(path = ":memory:", now = Date.now, thresholds 
   let closed = false;
 
   const load = db.prepare("SELECT version, payload FROM workbench_checkpoints WHERE area = ? ORDER BY rowid");
+  const reviewTestEvents = db.prepare(`
+    SELECT details FROM activity_events WHERE kind = 'github.issue' AND subject = ?
+      AND json_extract(details, '$.reviewFix.from') = ? AND json_extract(details, '$.reviewFix.repairId') = ?
+      AND json_extract(details, '$.action') IN ('review-fix-started', 'review-fix-failed')
+    ORDER BY seq DESC LIMIT 2
+  `);
   const save = db.prepare(`
     INSERT INTO workbench_checkpoints(area, id, version, payload) VALUES (?, ?, 1, ?)
     ON CONFLICT(area, id) DO UPDATE SET version = excluded.version, payload = excluded.payload
@@ -231,6 +237,13 @@ export function openActivityStore(path = ":memory:", now = Date.now, thresholds 
           }
         },
       };
+    },
+    legacyReviewTestFailure(subject: string, head: string, repairId: string) {
+      const [last, prior] = reviewTestEvents.all(subject, head, repairId).map(row => {
+        return JSON.parse(String(row.details)) as { action: string; failure?: { stage?: string; reason?: string } };
+      });
+      const failedChecks = (details: typeof last) => details?.failure?.stage === "tests" && details.failure.reason === "check-failed";
+      return last?.action === "review-fix-failed" && prior?.action === "review-fix-started" && failedChecks(last) && !failedChecks(prior);
     },
     record(event: BusinessEvent) {
       if (closed) return false;

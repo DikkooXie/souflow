@@ -101,7 +101,7 @@ test("补充续修明确测试失败后只在原修订单内使用诊断纠正�
   assert.ok(original);
   assert.equal(repairFromApproval("a/b", stored, retry)?.id, original.id);
   const failure = { stage: "tests", reason: "check-failed" } as const;
-  stored = { ...stored, failure, reviewFix: { from: head, state: "failed", repairId: original.id, testFiles: [testFile] },
+  stored = { ...stored, failure, reviewFix: { from: head, state: "failed", repairId: original.id, testFiles: [testFile], testCheckFailed: true },
     reviewRepairs: [{ id: original.id, head, decision: "approved", at: 0, issue: 9 }] };
   let prepares = 0;
   const tracker: DeliveryTracker = { repo: "a/b", candidates: async () => [], read: async () => issue, account: async () => "member",
@@ -129,6 +129,25 @@ test("补充续修明确测试失败后只在原修订单内使用诊断纠正�
   assert.equal(prepares, 1);
   assert.equal(stored.reviewFix?.retriedTests, true);
   assert.equal(stored.reviewFix?.state, "failed");
+});
+
+test("旧续修只有本次失败回执能证明测试失败，继承的诊断不能作为依据", () => {
+  const audit = openActivityStore();
+  const subject = "a/b#7";
+  const from = "a".repeat(40);
+  const repairId = "b".repeat(64);
+  const failure = { stage: "tests", reason: "check-failed" };
+  const record = (action: string, diagnosed?: typeof failure) => audit.record({ kind: "github.issue", subject,
+    details: { action, reviewFix: { from, repairId }, ...(diagnosed ? { failure: diagnosed } : {}) } });
+  try {
+    assert.ok(record("review-fix-started", failure));
+    assert.ok(record("review-fix-failed", failure));
+    assert.equal(audit.legacyReviewTestFailure(subject, from, repairId), false);
+    assert.ok(record("review-fix-started"));
+    assert.ok(record("review-fix-failed", failure));
+    assert.equal(audit.legacyReviewTestFailure(subject, from, repairId), true);
+    assert.equal(audit.legacyReviewTestFailure(subject, from, "c".repeat(64)), false);
+  } finally { audit.close(); }
 });
 
 test("恢复原设备已测试的提交，拒绝补丁摘要和文件范围不匹配", async t => {

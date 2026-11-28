@@ -24,6 +24,7 @@ export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; p
   failedWorkerAttempt?: (scope: WorkerFailureScope) => string | undefined;
   recoverDeviceTestAttempts?: ReadonlySet<string>;
   recoverCheckedHeads?: Readonly<Record<string, string>>;
+  legacyReviewTestFailure?: (subject: string, head: string, repairId: string) => boolean;
   reviewSourceHandoff?: (claim: Claim, proof: SourceHandoff, sources: Record<string, string>, signal: AbortSignal) => Promise<TicketSourceFinding> };
 
 function publisher(tracker: IssueTracker) {
@@ -45,7 +46,7 @@ export type Claim = Remote & {
   claimUncertain?: boolean;
   failure?: DeliveryFailure; retryCount?: number; retriedWorkerAttempt?: string; interruptedDevelopment?: boolean;
   reviewFix?: { from: string; state: "running" | "publishing" | "complete" | "failed"; pendingHead?: string; base?: string; repairId?: string;
-    testFiles?: string[]; retriedTests?: boolean; testFailureNote?: string };
+    testFiles?: string[]; retriedTests?: boolean; testFailureNote?: string; testCheckFailed?: boolean };
   reviewTestFiles?: string[];
   reviewRepairs?: ReviewRepairDecision[];
   sourceHandoff?: { proof: SourceHandoff; finding: TicketSourceFinding };
@@ -329,9 +330,9 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     const repair = authorized?.repair ?? supplemental;
     const recorded = supplemental && c.reviewRepairs?.find(item => item.id === supplemental.id);
     const repeatLink = retry && supplemental && c.reviewFix?.repairId === supplemental.id && c.reviewFix.state === "failed" && !recorded?.issue;
-    const repeatTests = !!(fix.testFailureNote && recorded?.issue && c.reviewFix?.from === fix.head
-      && c.reviewFix.repairId === supplemental?.id && c.reviewFix.state === "failed" && !c.reviewFix.retriedTests
-      && c.failure?.stage === "tests" && c.failure.reason === "check-failed");
+    const repeatTests = !!(fix.testFailureNote && recorded?.issue && supplemental && c.reviewFix?.from === fix.head
+      && c.reviewFix.repairId === supplemental.id && c.reviewFix.state === "failed" && !c.reviewFix.retriedTests
+      && (c.reviewFix.testCheckFailed ?? delivery.legacyReviewTestFailure?.(subject(c.number), fix.head, supplemental.id)));
     if ((fix.testFailureNote && !repeatTests) || (!authorized && c.reviewFix?.from === fix.head && !repeatLink && !repeatTests)) return;
     const connection = memberTrackers.get(c.claimedBy) ?? tracker;
     const remote = publisher(connection);
@@ -389,8 +390,10 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
         const latest = current();
         // 开始推送后只回读 GitHub，避免因响应丢失重复推送。
         if (latest.reviewFix?.state === "running") {
-          save({ ...latest, reviewFix: { ...state, state: "failed" },
-            ...(error instanceof IssueDeliveryFailed ? { failure: error.failure } : {}) }, "review-fix-failed");
+          const failure = error instanceof IssueDeliveryFailed ? error.failure : undefined;
+          save({ ...latest, reviewFix: { ...state, state: "failed",
+            testCheckFailed: failure?.stage === "tests" && failure.reason === "check-failed" },
+            ...(failure ? { failure } : {}) }, "review-fix-failed");
         }
       }
     })();
