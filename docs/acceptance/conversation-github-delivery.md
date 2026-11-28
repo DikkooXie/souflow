@@ -62,3 +62,18 @@
 ![原工作台显示 #107 通过复核后的设备派发，主 Mac 的本机 Codex 已开工](conversation-dual-mac/01-native-start.jpg)
 
 ![原工作台显示 #107 隔离检查失败，暂无关联 PR](conversation-dual-mac/02-isolated-check-failed.jpg)
+
+### 当前主干重新复核后追加测试范围
+
+2026-11-28，原址工作台升级到 [#133](https://github.com/DikkooXie/souflow/pull/133) 的合并提交 `d342210`，原对话和 SQLite 数据库继续使用。两台 Mac 均重新接入。对照升级前的派发记录，#107 有一次历史设备开工和测试失败。
+
+| 本轮观察 | 实测结果 |
+| --- | --- |
+| 源码复核 | 审计 1121、1122 记录原 v14 工单排队恢复并开始复核。1125、1126 记录复核拦截并进入待核对。 |
+| 设备和 GitHub | 本轮新增开工 0 次，无新增测试回执或关联 PR。 |
+| 补充范围 | 两项测试获准追加。一是他人确认配对码会被拒，原发起人仍可使用。二是执行名单有效且设备已经收到工单时，再次受理必须核对当前授权。 |
+| 修订入口 | 已提交批次调用原对话重规划返回 HTTP 409。首次发布前给单张工单追加测试范围由 [#134](https://github.com/DikkooXie/souflow/issues/134) 跟踪。 |
+
+![原工作台的 GitHub 工单面板显示正在核对上游源码](conversation-dual-mac/03-current-source-review.jpg)
+
+![同一工单复核后显示待核对，尚无关联 PR](conversation-dual-mac/04-awaiting-amendment.jpg)
