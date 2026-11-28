@@ -50,3 +50,15 @@
 ![工作台显示上游已合并，下游 PR 的 CI 已通过](conversation-delivery-retest/05-upstream-merged-downstream-pr.png)
 
 本轮覆盖单机、同一个 Codex 登录和一对真实依赖工单。B5 团队验收、跨 Codex 账号调度和双机试点分别记录。
+
+## v14 双机自动建单和下游复验
+
+2026-11-28，原工作台用同一对话的 v14 计划自动创建 #105、#106 和 #107。两台实体 Mac 的本机 Codex 并行开发前两单，自动开 [PR #112](https://github.com/DikkooXie/souflow/pull/112) 和 [PR #114](https://github.com/DikkooXie/souflow/pull/114)。两份 PR 均通过 CI 并合并。随后，[PR #125](https://github.com/DikkooXie/souflow/pull/125) 和 [PR #126](https://github.com/DikkooXie/souflow/pull/126) 分别处理成员轮询与连接器自检回归，并通过实现质量与需求兑现复核。两台 Mac 的原生 HTTPS 自检与 Codex 登录均通过，自检前后的持久设备实例相同。
+
+[Issue #107](https://github.com/DikkooXie/souflow/issues/107) 复用原对话、工单、计划版本与授权，在 `a14f9a2` 重新复核固定源码后由主 Mac 接单。审计 1086 为源码复核通过，1087–1090 依次记录唤醒、派发、设备接收及 Codex 开工。每个动作只有一条，复核完成后刷新状态也没有重复派发。
+
+设备完成候选补丁的准备和应用。安装依赖的容器退出码为 0，隔离质量检查容器退出码为 2。审计 1096 为设备检查失败，1097 为工作台确认失败。GitHub 回读 #107 仍开放，关联 PR 和任务分支均为空。失败记录目前只留阶段，明细与候选留存由 [#129](https://github.com/DikkooXie/souflow/issues/129) 跟进。首版 [#67](https://github.com/DikkooXie/souflow/issues/67) 仍待下游交付与两类复核通过。
+
+![原工作台显示 #107 通过复核后的设备派发，主 Mac 的本机 Codex 已开工](conversation-dual-mac/01-native-start.jpg)
+
+![原工作台显示 #107 隔离检查失败，暂无关联 PR](conversation-dual-mac/02-isolated-check-failed.jpg)
