@@ -51,7 +51,8 @@ test("正常派发入口从原批准修复单自动检查候选，有限修正�
       const previous: Claim = { ...stored, reviewFix: { from: head, repairId: "previous", state: "complete" },
         repairContinuation: { head, repairId: "previous", rounds: [] } };
       const continuation = createRepairContinuation({ current: () => previous, repair: () => repair,
-        signal: new AbortController().signal, start: assert.fail, connection: assert.fail, save: assert.fail, track: assert.fail });
+        signal: new AbortController().signal, start: () => assert.fail(), connection: () => assert.fail(),
+        save: () => assert.fail(), track: () => assert.fail() });
       assert.equal(continuation.owns(previous), false, "旧授权的续修记录不能挡住当前提交的新卡");
     }
     let linked: IssueDetail | undefined;

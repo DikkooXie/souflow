@@ -74,11 +74,10 @@ export function diagnoseIsolationFailure(error: unknown, install: boolean, signa
       const safe = normalizedDiagnostic(raw.trim());
       const structured = raw.startsWith("SOUFLOW_DIAGNOSTIC ") ? raw.slice("SOUFLOW_DIAGNOSTIC ".length) : undefined;
       const selected = safe ?? (structured && validDiagnostic(structured) && !structured.includes(" BIOME:info:") ? structured : undefined);
-      if (!selected) continue;
+      if (!selected || lines.has(selected)) continue;
       if (lines.size >= 16 || Buffer.byteLength(JSON.stringify([...lines, selected])) > maxBytes) { incomplete = true; continue; }
       lines.add(selected);
     }
-    if (lines.size >= 16) break;
   }
   const diagnostics = [...lines];
   return { step, outcome: "exit", exitCode, ...(diagnostics.length ? { diagnostics } : {}), ...(incomplete ? { diagnosticsIncomplete: true } : {}) };

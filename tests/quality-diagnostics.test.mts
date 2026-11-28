@@ -30,4 +30,10 @@ test("TS 与 Biome 只保安全定位，info 不触发续修，warning 与 error
   assert.match(run().stdout, /SOUFLOW_DIAGNOSTICS_INCOMPLETE/);
   const truncated = diagnoseIsolationFailure({ code: 1, stdout: `${output.stdout}SOUFLOW_DIAGNOSTICS_INCOMPLETE\n` }, false, new AbortController().signal);
   assert.equal(truncated.diagnosticsIncomplete, true);
+  const full = Array.from({ length: 16 }, (_, i) => `tests/example.test.mts(${i + 1},1): error TS1345:`).join("\n");
+  const inspect = (stderr: string) => diagnoseIsolationFailure({ code: 1, stdout: full, stderr }, false, new AbortController().signal, 4096);
+  assert.equal(inspect(full).diagnostics?.length, 16);
+  assert.equal(inspect(full).diagnosticsIncomplete, undefined);
+  assert.equal(inspect("src/main.mts(1,1): error TS1345:").diagnosticsIncomplete, true);
+  assert.equal(inspect("SOUFLOW_DIAGNOSTICS_INCOMPLETE").diagnosticsIncomplete, true);
 });
