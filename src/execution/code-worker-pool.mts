@@ -85,6 +85,8 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
   return {
     config,
     permits: (id: string) => allowed.has(id),
+    hasAnyAttempt: (repo: string, issue: number) => [...attempts.values()].some(row =>
+      row.repo.toLowerCase() === repo.toLowerCase() && row.issue === issue),
     hasAttempt: (repo: string, issue: number) => [...attempts.values()].some(row => row.state !== "cancelled"
       && row.repo.toLowerCase() === repo.toLowerCase() && row.issue === issue),
     failedAttempt(scope: WorkerFailureScope) {

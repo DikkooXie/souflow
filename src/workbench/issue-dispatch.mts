@@ -24,12 +24,17 @@ import { matchesSourceRefresh, type ApprovedSourceRefresh } from "./approved-sou
 import { activePrePrAmendment, amendedSpec, amendmentRecoveryBound, type ApprovedPrePrAmendment } from "./pre-pr-amendment.mts";
 import { createPrePrAmendmentAuthorization } from "./pre-pr-amendment-authorization.mts";
 import { queueWorkerRecovery } from "./worker-recovery.mts";
+import { canWaitForDevice, deviceWaitBinding, restoreDeviceWait, type DeviceWait, type LegacyDeviceWait } from "./device-wait.mts";
 import { approvedRepairFiles, readRepairDecision, repairDecisionCard, repairFromApproval, repairFromReceipt } from "./delivery-review-repair.mts";
 import type { ReviewIssueDelivery } from "./github-delivery-review.mts";
 import { type createPlannedIssuePublication, hasPublicationMarker, readPublishedRepair } from "./planned-issue-publication.mts";
 
 export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; prepare: PrepareIssue; pollMs: number; conversation?: boolean;
   inspectRepairCandidate?: InspectRepairCandidate;
+  executionMode?: "device" | "local";
+  hasAnyWorkerAttempt?: (repo: string, issue: number) => boolean;
+  hasIssueExecutionHistory?: (subject: string) => boolean;
+  recoverDeviceWait?: LegacyDeviceWait;
   requireQuality?: boolean; recoverFailedIssue?: number; reviewFix?: ApprovedReviewFix; review?: ReviewIssueDelivery;
   reviewFixes?: readonly ApprovedReviewFix[];
   sourceRefresh?: ApprovedSourceRefresh;
@@ -67,6 +72,7 @@ export type Claim = Remote & {
   recoveryDispatchAttempt?: string; interruptedDevelopment?: boolean;
   recoveredWorkerAttempts?: string[];
   repairContinuation?: RepairContinuation;
+  deviceWait?: DeviceWait;
   reviewFix?: { from: string; state: "running" | "publishing" | "complete" | "failed"; pendingHead?: string; base?: string; repairId?: string;
     testFiles?: string[]; retriedTests?: boolean; testFailureNote?: string; testCheckFailed?: boolean; replayedDraft?: FailedReviewDraft;
     replayedCandidate?: { sha256: string; digest: string; files: import("../execution/code-worker-protocol.mts").CandidateFile[] } };
@@ -77,6 +83,7 @@ export type Claim = Remote & {
   prePrAmendments?: ApprovedPrePrAmendment[];
 };
 const phases = { claiming: "正在认领", waiting: "等待上游 PR 合并", checkingSources: "正在核对上游源码",
+  waitingDevice: "等待可用的授权设备", deviceOffered: "工单已派发，等待设备开工",
   developing: "Codex 正在开发与测试", readyToPublish: "本地检查通过，等待 GitHub 核对",
   publishing: "正在推送并创建 PR", submitted: "已提交 PR", deliveryFailed: "开发或测试失败",
   running: "Codex 正在核验", done: "核验完成", conflict: "认领冲突", uncertain: "待核对", failed: "核验失败" };
@@ -132,6 +139,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       ...(patchCheck ? { patchCheck } : {}),
       ...(c.reviewFix ? { reviewFix: c.reviewFix } : {}),
       ...(c.repairContinuation ? { repairContinuation: c.repairContinuation } : {}),
+      ...(c.deviceWait ? { deviceWait: c.deviceWait } : {}),
       ...(event?.startsWith("review-repair-") ? { repair: c.reviewRepairs?.at(-1) } : {}),
       ...(event === "account-assigned" ? { codexAccount: c.accountAssignment } : {}),
       ...(event === "worker-retry-queued" || event === "worker-test-recovery-queued" ? { workerAttempt: c.pendingWorkerAttempt ?? c.retriedWorkerAttempt } : {}),
@@ -216,7 +224,10 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   }
   const queueWorkerRetry = (c: Claim) => queueWorkerRecovery(c, { delivery, repo: tracker.repo, workerScope, save });
   for (const c of store.load()) {
-    if (c.reviewFix?.state === "running") save({ ...c, reviewFix: { ...c.reviewFix, state: "failed" } }, "review-fix-interrupted");
+    const waiting = restoreDeviceWait(tracker.repo, c, delivery);
+    if (waiting) save(waiting, c.deviceWait ? "device-wait-restored" : "legacy-device-wait-restored");
+    else if (["waitingDevice", "deviceOffered"].includes(c.phase)) save({ ...c, phase: "uncertain" }, "device-wait-needs-reconciliation");
+    else if (c.reviewFix?.state === "running") save({ ...c, reviewFix: { ...c.reviewFix, state: "failed" } }, "review-fix-interrupted");
     else if ((c.pendingWorkerAttempt || c.retryCount === 1 && c.retriedWorkerAttempt) && c.sourceRefresh && c.phase === "developing") {
       save({ ...c, phase: "uncertain" }, "source-refresh-restarted-before-offer");
     }
@@ -243,6 +254,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
         recoveredWorkerAttempts: _recoveredWorkerAttempts,
         interruptedDevelopment: _interruptedDevelopment, prepared: _prepared, attemptedCheckedRecovery: _attemptedCheckedRecovery,
         reviewTestFiles: _reviewTestFiles,
+        deviceWait: _deviceWait,
         ...item }) => ({ ...item,
         ...(delivery ? { dependsOn: delivery.dependsOn, mode: "delivery" } : {}),
         ...(approval ? { flowId: approval.flowId } : {}),
@@ -539,6 +551,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       const scope = workerScope(connection.repo, c);
       const branch = c.prepared?.branch ?? `feat/${c.number}-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
       const prepared = c.prepared ?? await delivery.prepare({ number: c.number, spec, branch, publisher: remote, upstream,
+        ...(c.deviceWait ? { requireDevice: true as const } : {}),
         ...(recoverCheckedHead ? { recoverCheckedHead } : {}),
         ...(c.failure && (c.retryCount || c.pendingWorkerAttempt) ? { previousFailure: c.failure } : {}),
         ...(spec.sourceFrom?.length && delivery.reviewSourceHandoff ? { sourceHandoff: {
@@ -565,7 +578,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
                 || !delivery.recoverDeviceTestAttempts?.has(pendingAttempt)) throw new IssueDeliverySourcesChanged();
             }
             save({ ...latest, ...(c.sourceRefresh ? { sourceRefresh: { ...c.sourceRefresh, state: "passed", woken: true } } : {}),
-              phase: "developing" }, recoveringAttempt ? "source-refresh-reviewed" : c.sourceRefresh?.woken ? "source-refresh-resumed" : "woken");
+              phase: c.deviceWait ? "waitingDevice" : "developing" }, recoveringAttempt ? "source-refresh-reviewed" : c.sourceRefresh?.woken ? "source-refresh-resumed" : "woken");
           },
           async review(proof: SourceHandoff, sources: Record<string, string>, signal: AbortSignal) {
             const finding = await delivery.reviewSourceHandoff?.(current(), proof, sources, signal);
@@ -580,11 +593,15 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
           async revalidateWorker(signal: AbortSignal) {
             signal.throwIfAborted();
             const latest = await connection.read(c.number);
-            if (!permits(c.claimedBy) || !stillAssignee(c, latest) || latest.pulls.length
+            const account = await connection.account();
+            if (account.toLowerCase() !== c.account.toLowerCase() || !permits(c.claimedBy) || !stillAssignee(c, latest) || latest.pulls.length
               || (delivery.reviewScopeCurrent && !delivery.reviewScopeCurrent(current()))) {
               throw new IssueVerificationUncertain("needs-reconciliation");
             }
             const claim = current();
+            if (claim.deviceWait && (delivery.executionMode !== "device"
+              || !claim.deviceWait.offered && !canWaitForDevice(connection.repo, claim, delivery)
+              || claim.deviceWait.binding !== deviceWaitBinding(connection.repo, claim))) throw new IssueDeliverySourcesChanged();
             if (claim.pendingWorkerAttempt) {
               const recoveryScope = workerScope(connection.repo, claim);
               const sourceReady = claim.phase === "checkingSources" && claim.sourceRefresh?.state === "reviewing"
@@ -596,7 +613,13 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
             }
             signal.throwIfAborted();
           } } : {}),
-        ...(c.pendingWorkerAttempt ? { workerOffered: attemptId => {
+        ...(c.deviceWait ? { workerOffered: (attemptId: string) => {
+          abort.signal.throwIfAborted();
+          const latest = current();
+          if (latest.phase !== "waitingDevice" || latest.deviceWait?.offered
+            || latest.deviceWait?.binding !== deviceWaitBinding(connection.repo, latest)) throw new IssueDeliverySourcesChanged();
+          save({ ...latest, phase: "deviceOffered", deviceWait: { ...latest.deviceWait, offered: attemptId } }, "device-offered");
+        } } : c.pendingWorkerAttempt ? { workerOffered: attemptId => {
           const pendingAttempt = c.pendingWorkerAttempt;
           const latest = current();
           if (!pendingAttempt || latest.pendingWorkerAttempt !== pendingAttempt || latest.phase !== "developing"
@@ -608,7 +631,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
             retryCount: (latest.recoveryDispatchAttempt ? latest.retryCount ?? 0 : 0) + 1 }, "worker-redispatched");
         } } : {}),
         ...(c.approval ? { flowId: c.approval.flowId, planVersion: c.approval.version } : {}) },
-        sessionId => { if (current().sessionId !== sessionId) save({ ...current(), sessionId }, "connected"); }, abort.signal,
+        sessionId => { if (current().sessionId !== sessionId) save({ ...current(), sessionId,
+          ...(current().deviceWait ? { phase: "developing" as const } : {}) }, "connected"); }, abort.signal,
         accountAssignment => save({ ...current(), accountAssignment }, "account-assigned"));
       if (!c.prepared) {
         abort.signal.throwIfAborted();
@@ -636,6 +660,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       save({ ...current(), pull, phase: "submitted" }, "published");
     } catch (error) {
       const last = current();
+      if (last.phase === "waitingDevice" && canWaitForDevice(connection.repo, last, delivery)
+        && (abort.signal.aborted || error instanceof IssueVerificationUncertain && error.reason === "interrupted")) return;
       const stale = error instanceof IssueDeliverySourcesChanged;
       const refreshingSources = last.sourceRefresh?.state === "reviewing";
       const uncertain = stale || refreshingSources || !!last.target || abort.signal.aborted || error instanceof IssueVerificationUncertain;
@@ -682,7 +708,9 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       const recoverCheckedHead = c.phase === "deliveryFailed" && !c.attemptedCheckedRecovery && !c.target && !c.pull && !c.pulls.length
         && c.failure?.stage === "preflight" && c.failure.reason === "unavailable" && !c.delivery.dependsOn.length
         && delivery.reviewScopeCurrent?.(c) ? delivery.recoverCheckedHeads?.[String(c.number)] : undefined;
-      if (c.phase !== "waiting" && c.phase !== "readyToPublish" && !recoverCheckedHead && !refresh) continue;
+      if (c.phase !== "waiting" && c.phase !== "waitingDevice" && c.phase !== "readyToPublish" && !recoverCheckedHead && !refresh) continue;
+      if (c.phase === "waitingDevice" && c.deviceWait && (!canWaitForDevice(claimTracker.repo, c, delivery)
+        || c.deviceWait.binding !== deviceWaitBinding(claimTracker.repo, c))) continue;
       if (c.approval && !delivery.conversation) continue;
       if (delivery.requireQuality && !qualityBindingCurrent(c.approval?.quality)) {
         save({ ...c, phase: "uncertain" }, "quality-check-required");
@@ -696,11 +724,13 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       if (!upstream.every(pull => pull?.state === "MERGED" && pull.mergeCommit)) continue;
       const checkSources = !!(c.delivery.sourceFrom?.length && delivery.reviewSourceHandoff);
       const amendment = activePrePrAmendment(c);
+      const deviceWait = c.deviceWait ?? (canWaitForDevice(claimTracker.repo, c, delivery)
+        ? { version: 1 as const, binding: deviceWaitBinding(claimTracker.repo, c) } : undefined);
       const selected: Claim = recoverCheckedHead ? { ...c, attemptedCheckedRecovery: true, phase: "developing" }
         : c.phase === "readyToPublish" ? c : { ...c, ...(refresh ? { sourceRefresh: { ...c.sourceRefresh, revision: refresh.revision, state: "reviewing" } } : {}),
           ...(refresh && amendment ? { sourceRefresh: { ...c.sourceRefresh, revision: refresh.revision,
             state: "reviewing", amendmentId: amendment.id } } : {}),
-          phase: checkSources ? "checkingSources" : "developing" };
+          ...(deviceWait ? { deviceWait } : {}), phase: checkSources ? "checkingSources" : deviceWait ? "waitingDevice" : "developing" };
       if (selected !== c) save(selected, refresh ? "approved-source-refresh" : recoverCheckedHead ? "checked-recovery-queued" : checkSources ? "dependency-source-checking"
         : c.retriedWorkerAttempt ? "worker-redispatched" : upstream.length ? "woken" : "dispatched");
       if (refresh) startedSourceRefresh = true;
@@ -850,7 +880,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
             if (prior.phase === "uncertain" && prior.claimUncertain && stillAssignee(prior, issue)) {
               return { issue, resume: prior, deliverySpec, authorization };
             }
-            if (["waiting", "checkingSources", "developing", "readyToPublish", "publishing", "submitted", "deliveryFailed"].includes(prior.phase)) return undefined;
+            if (["waiting", "waitingDevice", "deviceOffered", "checkingSources", "developing", "readyToPublish", "publishing", "submitted", "deliveryFailed"].includes(prior.phase)) return undefined;
           }
           if (prior || issue.state !== "OPEN" || issue.assignees.length || issue.pulls.length) {
             throw new IssueActionError(409, "工单状态已变化，请重新规划。");

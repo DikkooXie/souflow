@@ -188,6 +188,7 @@ export function openActivityStore(path = ":memory:", now = Date.now, thresholds 
   let closed = false;
 
   const load = db.prepare("SELECT version, payload FROM workbench_checkpoints WHERE area = ? ORDER BY rowid");
+  const issueExecutionEvents = db.prepare("SELECT details FROM activity_events WHERE kind = 'github.issue' AND lower(subject) = lower(?)");
   const reviewTestEvents = db.prepare(`
     SELECT details FROM activity_events WHERE kind = 'github.issue' AND subject = ?
       AND json_extract(details, '$.reviewFix.from') = ? AND json_extract(details, '$.reviewFix.repairId') = ?
@@ -237,6 +238,15 @@ export function openActivityStore(path = ":memory:", now = Date.now, thresholds 
           }
         },
       };
+    },
+    hasIssueExecutionHistory(subject: string) {
+      return issueExecutionEvents.all(subject).some(row => {
+        const detail = JSON.parse(String(row.details ?? "null"));
+        return !detail || !!(detail.session || detail.codexAccount || detail.branch || detail.head || detail.patchCheck
+          || detail.reviewFix || detail.workerAttempt || detail.recoveredAttempt)
+          || ["connected", "account-assigned", "local-check-complete", "checked", "published", "patch-repair"].includes(detail.action)
+          || detail.failure && detail.failure.stage !== "preflight";
+      });
     },
     legacyReviewTestFailure(subject: string, head: string, repairId: string) {
       const [last, prior] = reviewTestEvents.all(subject, head, repairId).map(row => {
