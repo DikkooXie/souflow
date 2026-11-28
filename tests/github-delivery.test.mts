@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,6 +11,7 @@ import { createGitHubDelivery, githubPull } from "../src/connections/github-deli
 import { type DeliveryTracker, issueRevision, type IssueDetail, type IssuePull } from "../src/connections/issue-tracker.mts";
 import { qualitySources } from "../src/execution/codex-quality-review.mts";
 import { recoverCheckedWorkspace } from "../src/execution/checked-issue-recovery.mts";
+import { restoreFailedReviewDraft } from "../src/execution/failed-review-draft.mts";
 import { contentDigest } from "../src/execution/code-worker-protocol.mts";
 import { createDispatchMonitor } from "../src/execution/dispatch-monitor.mts";
 import { checkoutReviewedIssueBase, createIssueDeveloper, type DeliveryFailure, isolatedCheckFailed, IssueDeliveryFailed, IssueDeliverySourcesChanged, parseDeliveryPlan,
@@ -107,17 +108,19 @@ test("补充续修明确测试失败后只在原修订单内使用诊断纠正�
   const tracker: DeliveryTracker = { repo: "a/b", candidates: async () => [], read: async () => issue, account: async () => "member",
     assign: async () => assert.fail(), delivery: { checkout: async () => assert.fail(), checkoutPublished: async () => {},
       find: async () => pull, publish: async () => assert.fail(), updatePublished: async () => assert.fail() } };
-  for (let i = 0; i < 2; i++) {
+  const draft = { artifact: "issue-7-trial", sha256: hash };
+  for (const [i, repair] of [retry, retry, { ...retry, failedDraft: draft }, { ...retry, failedDraft: draft }].entries()) {
     const dispatch = createIssueDispatch(tracker, { load: () => [stored], save(_id, value) { stored = value; return true; } },
       async () => "", () => true, 1, new Map(), { specs: new Map(), conversation: true, pollMs: 60_000, reviewScopeCurrent: () => true,
-        reviewFix: retry, async publishRepair(batch) {
+        reviewFix: repair, async publishRepair(batch) {
           assert.deepEqual(batch, original.batch);
           return new Map([["REPAIR", { ...issue, number: 9 }]]);
         },
-        async prepare({ spec, reviewTarget }) {
+        async prepare({ spec, reviewTarget, failedReviewDraft }) {
           assert.deepEqual(spec.files, [...fix.files, testFile]);
           assert.match(spec.instructions, /TypeScript 类型检查失败/);
           assert.equal(reviewTarget?.head, head);
+          assert.deepEqual(failedReviewDraft, i >= 2 ? { ...draft, testFiles: [testFile] } : undefined);
           prepares++;
           throw new IssueDeliveryFailed(failure);
         },
@@ -126,9 +129,43 @@ test("补充续修明确测试失败后只在原修订单内使用诊断纠正�
     await setImmediate();
     await dispatch.close();
   }
-  assert.equal(prepares, 1);
+  assert.equal(prepares, 2);
   assert.equal(stored.reviewFix?.retriedTests, true);
+  assert.deepEqual(stored.reviewFix?.replayedDraft, draft);
   assert.equal(stored.reviewFix?.state, "failed");
+});
+
+test("恢复同一失败候选需要原提交、允许路径和补丁摘要匹配", async t => {
+  const root = await mkdtemp(join(tmpdir(), "souflow-failed-review-draft-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const name = "issue-7-trial";
+  const source = join(root, name, "source");
+  await mkdir(join(source, "src"), { recursive: true });
+  const git = (dir: string, ...args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" });
+  git(source, "init", "--quiet");
+  git(source, "config", "user.name", "fixture");
+  git(source, "config", "user.email", "fixture@example.test");
+  const file = "src/main.mts";
+  const fixed = "export const value = 2;\n";
+  await writeFile(join(source, file), "export const value = 1;\n");
+  git(source, "add", file);
+  git(source, "commit", "-qm", "baseline");
+  const head = git(source, "rev-parse", "HEAD").trim();
+  await writeFile(join(source, file), fixed);
+  const sha256 = contentDigest(git(source, "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "HEAD", "--"));
+  for (const scenario of ["match", "wrong-digest", "outside-scope"] as const) {
+    const work = join(root, scenario);
+    await mkdir(work);
+    const checkout = join(work, "source");
+    git(root, "clone", "--quiet", source, checkout);
+    const action = restoreFailedReviewDraft(root, work, checkout, 7, head,
+      { artifact: name, sha256: scenario === "wrong-digest" ? "a".repeat(64) : sha256 },
+      scenario === "outside-scope" ? [] : [file], 5000, new AbortController().signal);
+    if (scenario === "match") {
+      assert.deepEqual(await action, [file]);
+      assert.equal(await readFile(join(checkout, file), "utf8"), fixed);
+    } else await assert.rejects(action, scenario === "wrong-digest" ? /摘要不符/ : /超出原修改范围/);
+  }
 });
 
 test("旧续修只有本次失败回执能证明测试失败，继承的诊断不能作为依据", () => {
