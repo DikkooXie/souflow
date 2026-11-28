@@ -15,6 +15,7 @@ import { createIssueDispatch, IssueActionError, type Claim, type IssueDeliveryOp
 import { createGitHubDeliveryReviewer } from "./github-delivery-review.mts";
 import { readApprovedReviewFixes } from "./approved-review-fix.mts";
 import { readApprovedSourceRefresh } from "./approved-source-refresh.mts";
+import { createPrePrAmendments, type PrePrAmendmentEvent } from "./pre-pr-amendment.mts";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
 import { hostname } from "node:os";
@@ -147,7 +148,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       throw error;
     }
   })();
-  const { codex, inbox, flows, dispatch, acceptance, github, issuePlanning } = (() => {
+  const { codex, inbox, flows, dispatch, acceptance, github, issuePlanning, issueAmendments } = (() => {
     try {
       if (database) bindWorkbench(audit, live ? resolve(live[0]) : "", !!memberFor);
       const codex = live ? createCodexInbox(live[0], {
@@ -245,8 +246,14 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       };
       if (issuePlanning) reviewSourceHandoff = (claim, proof, sources, signal) =>
         issuePlanning.reviewHandoff(claim, flows.list().find(flow => flow.id === claim.approval?.flowId), proof, sources, signal);
+      const issueAmendments = github && issuePlanning && issueTracker ? createPrePrAmendments(
+        audit.checkpoint<PrePrAmendmentEvent>(`github-pre-pr-amendments:${issueTracker.repo.toLowerCase()}`), {
+          candidate: github.amendmentCandidate, claim: github.amendmentClaim,
+          scope: claim => issuePlanning.reviewScope(claim, flows.list().find(flow => flow.id === claim.approval?.flowId)),
+          authorize: github.authorizeAmendment,
+        }) : undefined;
       flows.reopenReady();
-      return { codex, inbox, flows, dispatch, acceptance, github, issuePlanning };
+      return { codex, inbox, flows, dispatch, acceptance, github, issuePlanning, issueAmendments };
     } catch (error) {
       closeStore();
       throw error;
@@ -298,7 +305,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       return reviews.length ? [{ flowId: flow.id, reviews }] : [];
     }) : [];
     return {
-      ...state, requests: [...state.requests, ...reviewCards, ...issueCards, ...repairCards],
+      ...state, requests: [...state.requests, ...reviewCards, ...issueCards, ...repairCards, ...(issueAmendments?.cards(actor) ?? [])],
       ...(issuePlanning ? { issuePlans: issuePlanning.statuses(conversations, actor) } : {}),
       ...(deliveryReviews.length ? { deliveryReviews } : {}),
       flows: conversations.map(flow => ({ ...flow, ...(replanFeedback(flow, actor, member) ? { canReplan: true } : {}) })),
@@ -506,6 +513,17 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         });
       }
       const retrySelection = /^\/api\/workflows\/([a-f0-9-]+)\/github-selection\/retry$/.exec(path)?.[1];
+      const amendmentFlow = /^\/api\/workflows\/([a-f0-9-]+)\/github-amendments$/.exec(path)?.[1];
+      if (amendmentFlow && issueAmendments) {
+        if (!allowed("implementer", "github.amendment.prepare", amendmentFlow)) return;
+        const flow = flows.list().find(item => item.id === amendmentFlow && item.requestedBy === githubActor);
+        if (!flow) return send(404, { error: "需求对话不存在。" });
+        const body = await readJson(request);
+        if ("status" in body) return send(body.status, { error: body.error });
+        const status = issueAmendments.submit(flow.id, githubActor, body.value);
+        return send(status, status === 200 ? state() : { error: status === 422 ? "请固定原批次、失败尝试、两个源码版本、测试范围和验证步骤。"
+          : status === 503 ? "暂时无法保存修订。" : "原工单或修订版本已变化，请核对原对话。" });
+      }
       if (retrySelection && issuePlanning) {
         if (!allowed("implementer", "github.selection.retry", retrySelection)) return;
         const flow = flows.list().find(item => item.id === retrySelection && item.requestedBy === githubActor);
@@ -598,6 +616,14 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           if (codex) return send(404, { error: "该操作用于本地演示。" });
           status = demo.disconnect(action[1]);
         } else {
+          if (issueAmendments?.has(action[1])) {
+            if (!allowed("implementer", "github.amendment.authorize", action[1])) return;
+            const body = await readJson(request, answerBodyBytes);
+            if ("status" in body) return send(body.status, { error: body.error });
+            const result = await issueAmendments.answer(action[1], githubActor, body.value);
+            return send(result, result === 200 ? state() : { ...state(), error: result === 422 ? "请选择有效授权选项。"
+              : result === 503 ? "暂时无法保存修订授权。" : "修订与原工单、最新失败尝试或当前主干不符。" });
+          }
           if (github?.hasRepair(action[1])) {
             if (!allowed("implementer", "github.repair.authorize", action[1])) return;
             const body = await readJson(request, answerBodyBytes);

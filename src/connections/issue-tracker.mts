@@ -33,6 +33,7 @@ export type IssueTracker = {
 };
 
 export type IssuePublisher = {
+  currentRevision?(): Promise<string>;
   checkout(target: string, signal: AbortSignal): Promise<{ base: string; author: string; email: string }>;
   publish(input: { workspace: string; issue: number; branch: string; base: string; head: string; title: string }, signal: AbortSignal): Promise<IssuePull>;
   find(branch: string, head: string, knownPull?: number): Promise<IssuePull | undefined>;

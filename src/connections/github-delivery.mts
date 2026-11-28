@@ -49,6 +49,13 @@ export function createGitHubDelivery(repo: string, api: (args: string[]) => Prom
   }
   return {
     find,
+    async currentRevision() {
+      const query = "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){defaultBranchRef{target{oid}}}}";
+      const { data } = JSON.parse(await api(["graphql", "-f", `query=${query}`, "-f", `owner=${owner}`, "-f", `name=${name}`]));
+      const head = data?.repository?.defaultBranchRef?.target?.oid;
+      if (typeof head !== "string" || !revision.test(head)) throw Error("无法固定 GitHub 默认分支提交。");
+      return head;
+    },
     async reviewChanges(pull, signal) {
       if (!pull.head || !revision.test(pull.head) || !Number.isSafeInteger(pull.number) || pull.number < 1) {
         throw Error("缺少可复核的 PR 提交。");
