@@ -1,0 +1,6 @@
+1|remote.device|created
+2|remote.code|connected
+3|remote.code|offered
+4|remote.code|accepted
+5|remote.code|started
+6|remote.code|failed
