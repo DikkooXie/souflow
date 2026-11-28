@@ -2,7 +2,21 @@
 
 维护者用本页核对原对话 v14 的 #107 如何实际开发、测试并自动创建 PR，以及为什么该交付仍待修复与验收。
 
-本页执行结果的阶段快照截至 **2026-11-28 21:07（Asia/Singapore，UTC+08:00）**，另记录随后明确的新版接入路径。后续续修及复验以新记录追加，不将本快照写成最终验收。
+原交付快照截至 **2026-11-28 21:07（Asia/Singapore，UTC+08:00）**。同日的[原 PR 自动续修记录](#原-pr-自动续修记录)补充了此后的结果。
+
+## 原 PR 自动续修记录
+
+原对话批准 #148 后，souflow 保留了计划 v14、原 Issue #107 和 PR #145。第一次修正通过类型检查，接下来的静态检查在一个已批准的测试文件里发现可能对空值解构。截图中的「退出码 1」是当时的工作台回执。对同一候选单独运行测试得到 265 通过、3 跳过。[平台修复 #150](https://github.com/DikkooXie/souflow/pull/150)
+
+![静态检查拦下候选后，原工作台保留关联 PR](10-candidate-rejected.jpg)
+
+工作台升级到 `93186d5` 后，从原 PR 的固定提交重建候选，在隔离容器识别出阻断规则。审计 1238–1241 依次记录续修开始、连接 Codex、检查通过和发布。GitHub 与工作台回读到同一提交 `dd404c59`，复用了原分支、原 PR 和 #148 授权。此次诊断触发一轮续修。原始工单的设备开工计数仍为一次。[发布回执](148-published.json) · [自动提交](https://github.com/DikkooXie/souflow/pull/145/commits/dd404c59dd4794d1ef8c38bb6ae6838afe6f79bf) · [平台修复 #152](https://github.com/DikkooXie/souflow/pull/152)
+
+![souflow 发布续修后，原工作台显示已提交到草稿 PR 145](11-original-pr-updated.jpg)
+
+`dd404c59` 的新一轮复核发现，成员身份失效后，迟到的确认响应可能恢复旧下载链接。新版设备的本人首单、断线后回执去重和撤销后零开工也需要对应部署版本的真机证据。原工作台随后取得新的修复授权，创建 #154。双机试用中，实施成员已亲自批准另一张验收工单，souflow 自动创建并认领 #153。这两项分别记录为续修开工与工单认领，整体验收仍待完成。[修复 Issue #154](https://github.com/DikkooXie/souflow/issues/154) · [真机验收 Issue #153](https://github.com/DikkooXie/souflow/issues/153)
+
+## 原交付快照
 
 2026-11-28，原址工作台在 [`6911147f85ef0d7eff0c6697e6a856af544085de`](https://github.com/DikkooXie/souflow/commit/6911147f85ef0d7eff0c6697e6a856af544085de) 恢复原工单，主 Mac 使用本机 Codex 在独立工作区执行。原计划仍为 v14，固定目标源码为 `c458c1da5452739274de8a30658f0235df77e686`，补充范围沿用已批准的修订 `31e2fc20`。本轮执行 `b2dab1f6` 产出提交 [`dcf1dd0779bd3ce535e9236500110febacb4fc48`](https://github.com/DikkooXie/souflow/commit/dcf1dd0779bd3ce535e9236500110febacb4fc48)，由 souflow 自动创建关联 #107 的[草稿 PR #145](https://github.com/DikkooXie/souflow/pull/145)。
 

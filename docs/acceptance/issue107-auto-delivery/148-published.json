@@ -1,0 +1,77 @@
+{
+  "issue": 107,
+  "repairIssue": 148,
+  "originalPull": 145,
+  "planVersion": 14,
+  "workbench": "93186d5f2c398c7d55bf6a88c25c33af69f40355",
+  "from": "dcf1dd0779bd3ce535e9236500110febacb4fc48",
+  "to": "dd404c59dd4794d1ef8c38bb6ae6838afe6f79bf",
+  "flow": "5b62f311-ad41-42a8-81f3-674709117c14",
+  "events": [
+    {
+      "seq": 1206,
+      "action": "review-repair-approved",
+      "commit": "dcf1dd0779bd3ce535e9236500110febacb4fc48"
+    },
+    {
+      "seq": 1210,
+      "action": "creation-reserved",
+      "commit": null
+    },
+    {
+      "seq": 1211,
+      "action": "creation-confirmed",
+      "commit": null
+    },
+    {
+      "seq": 1212,
+      "action": "review-repair-linked",
+      "commit": "dcf1dd0779bd3ce535e9236500110febacb4fc48"
+    },
+    {
+      "seq": 1213,
+      "action": "review-fix-connected",
+      "commit": "dcf1dd0779bd3ce535e9236500110febacb4fc48"
+    },
+    {
+      "seq": 1218,
+      "action": "review-fix-failed",
+      "commit": "dcf1dd0779bd3ce535e9236500110febacb4fc48"
+    },
+    {
+      "seq": 1223,
+      "action": "review-fix-draft-replay-started",
+      "commit": "dcf1dd0779bd3ce535e9236500110febacb4fc48"
+    },
+    {
+      "seq": 1224,
+      "action": "review-fix-connected",
+      "commit": "dcf1dd0779bd3ce535e9236500110febacb4fc48"
+    },
+    {
+      "seq": 1225,
+      "action": "review-fix-failed",
+      "commit": "dcf1dd0779bd3ce535e9236500110febacb4fc48"
+    },
+    {
+      "seq": 1238,
+      "action": "review-fix-draft-replay-started",
+      "commit": "dcf1dd0779bd3ce535e9236500110febacb4fc48"
+    },
+    {
+      "seq": 1239,
+      "action": "review-fix-connected",
+      "commit": "dcf1dd0779bd3ce535e9236500110febacb4fc48"
+    },
+    {
+      "seq": 1240,
+      "action": "review-fix-checked",
+      "commit": "dcf1dd0779bd3ce535e9236500110febacb4fc48"
+    },
+    {
+      "seq": 1241,
+      "action": "review-fix-published",
+      "commit": "dd404c59dd4794d1ef8c38bb6ae6838afe6f79bf"
+    }
+  ]
+}
