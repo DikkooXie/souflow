@@ -1,0 +1,1 @@
+{"id": "802f356e-2a8e-4168-96a7-0ee63b0c2807", "device": "74149e1b-a9f8-4038-8f74-43a281c7f453", "repo": "DikkooXie/souflow", "issue": 137, "state": "failed", "stage": "patch", "diagnostics": [{"code": "file-size", "attempt": 1, "edit": 1}, {"code": "file-size", "attempt": 2, "edit": 1}]}
