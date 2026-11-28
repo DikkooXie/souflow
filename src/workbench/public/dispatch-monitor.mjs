@@ -161,6 +161,7 @@ export function createMonitorView(node, selectFlow, onViewChange) {
           node("p", "monitor-meta", `${item.name} · 分配时 ${item.slots} 个执行位，已有 ${item.assignedLoad} 个修改文件的工作量`),
           node("p", "monitor-meta", `计划 v${item.plan.version} · 提交 ${item.revision.slice(0, 8)} · 上下文 ${item.digest.slice(0, 8)}`));
         if (item.receipt?.thread) row.append(node("p", "monitor-meta", `Codex 会话 …${item.receipt.thread.slice(-8)}`));
+        if (item.patchDiagnosticSummary) row.append(node("p", "monitor-meta", item.patchDiagnosticSummary));
         return row;
       }));
     if (!active.children.length) active.append(node("li", "monitor-empty", "目前没有活动会话或待处理工单。"));

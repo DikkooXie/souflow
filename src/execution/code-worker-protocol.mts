@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { codeEditFileHardLimit, type CodeWorkerConfig, readCodeWorkerConfig } from "../config/runtime.mts";
 import { deliveryPath, maxCodeProposalBytes } from "./local-code-changes.mts";
 import { readIsolationEvidence, type IsolationEvidence } from "./isolation-evidence.mts";
+import { readPatchDiagnostics, type PatchDiagnostic } from "./patch-diagnostics.mts";
 
 export const workerProtocolVersion = 1;
 export const workerId = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
@@ -28,11 +29,18 @@ export type CandidateFile = { path: string; before: string; after: string; mode:
 export type CodeReceipt = { id: string; digest: string } & (
   | { phase: "accepted"; at: number }
   | { phase: "started"; at: number; thread: string }
-  | { phase: "tested"; at: number; output: string; patch: string }
+  | { phase: "tested"; at: number; output: string; patch: string; patchDiagnostics?: PatchDiagnostic[] }
   | { phase: "declined" | "interrupted"; at: number }
-  | { phase: "failed"; at: number; failureStage?: WorkerFailureStage; isolation?: IsolationEvidence;
+  | { phase: "failed"; at: number; failureStage?: WorkerFailureStage; isolation?: IsolationEvidence; patchDiagnostics?: PatchDiagnostic[];
       candidateDigest?: string; candidateFiles?: CandidateFile[]; candidatePatch?: string; candidatePatchDigest?: string }
 );
+
+export function compactCodeFailure(receipt: CodeReceipt): CodeReceipt {
+  return { id: receipt.id, digest: receipt.digest, at: receipt.at, phase: "failed",
+    ...(receipt.phase === "tested" ? { failureStage: "patch" }
+      : receipt.phase === "failed" && receipt.failureStage ? { failureStage: receipt.failureStage } : {}),
+    ...("patchDiagnostics" in receipt && receipt.patchDiagnostics ? { patchDiagnostics: receipt.patchDiagnostics } : {}) };
+}
 
 function object(input: unknown): Record<string, unknown> | undefined {
   if (input && typeof input === "object" && !Array.isArray(input)) return input as Record<string, unknown>;
@@ -91,6 +99,8 @@ export function readCodeReceipt(input: unknown, config = readCodeWorkerConfig())
   if (!value || !matches(value.id, workerId) || !matches(value.digest, workerDigest) || !positive(value.at)) return;
   const fields = { id: value.id, digest: value.digest, at: value.at };
   const phase = value.phase;
+  const patchDiagnostics = value.patchDiagnostics === undefined ? undefined : readPatchDiagnostics(value.patchDiagnostics);
+  if (value.patchDiagnostics !== undefined && (!patchDiagnostics || !["failed", "tested"].includes(String(phase)))) return;
   if (phase === "accepted" || phase === "declined" || phase === "interrupted") return { ...fields, phase };
   if (phase === "failed") {
     const stage = value.failureStage;
@@ -122,9 +132,10 @@ export function readCodeReceipt(input: unknown, config = readCodeWorkerConfig())
         || Buffer.byteLength(candidatePatch) > maxCodeProposalBytes || !candidatePatch.startsWith("diff --git ")
         || !matches(candidatePatchDigest, workerDigest) || contentDigest(candidatePatch) !== candidatePatchDigest
         || !candidateDigest || !candidateFiles)) return;
-    if (stage === undefined) return { ...fields, phase };
+    if (stage === undefined) return patchDiagnostics ? undefined : { ...fields, phase };
     if (stage === "checkout" || stage === "codex" || stage === "patch" || stage === "dependencies" || stage === "tests") {
       return { ...fields, phase, failureStage: stage, ...(isolation ? { isolation } : {}),
+        ...(patchDiagnostics ? { patchDiagnostics } : {}),
         ...(typeof candidateDigest === "string" && parsedCandidateFiles ? { candidateDigest, candidateFiles: parsedCandidateFiles } : {}),
         ...(typeof candidatePatch === "string" ? { candidatePatch, candidatePatchDigest: candidatePatchDigest as string } : {}) };
     }
@@ -133,5 +144,6 @@ export function readCodeReceipt(input: unknown, config = readCodeWorkerConfig())
     return { ...fields, phase, thread: value.thread };
   }
   if (phase === "tested" && typeof value.output === "string" && Buffer.byteLength(value.output) <= maxCodeProposalBytes
-      && matches(value.patch, workerDigest)) return { ...fields, phase, output: value.output, patch: value.patch };
+      && matches(value.patch, workerDigest)) return { ...fields, phase, output: value.output, patch: value.patch,
+        ...(patchDiagnostics ? { patchDiagnostics } : {}) };
 }
