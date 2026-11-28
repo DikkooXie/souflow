@@ -647,6 +647,7 @@ test("批准关联修复后安全回读建单结果，只续修同一 PR 并复�
   const revision = issueRevision(original);
   const writes: string[] = [];
   let accountReads = 0;
+  let prepareAttempts = 0;
   let publishedRepair: IssueDetail | undefined;
   const rows = new Map<string, IssuePublication>();
   let stored: Claim = { ...original, pull, requestId: "approved", claimedBy: "member", account: "member", phase: "submitted", syncedAt: 0,
@@ -685,16 +686,27 @@ test("批准关联修复后安全回读建单结果，只续修同一 PR 并复�
     },
   };
   const reviewed: string[] = [];
+  const candidatePatch = "diff --git a/src/main.mts b/src/main.mts\n";
   const open = () => createIssueDispatch(tracker, { load: () => [stored], save(_key, value) { stored = structuredClone(value); return true; } },
     async () => assert.fail(), () => true, 1, new Map([["member", tracker]]), {
       specs: new Map(), conversation: true, pollMs: 60_000,
       publishRepair: createPlannedIssuePublication({ load: () => [...rows.values()], save(key, value) { rows.set(key, value); return true; } }),
-      async prepare({ reviewTarget, spec: fix, number, branch }) {
+      async prepare({ reviewTarget, spec: fix, number, branch, previousCandidate, previousFailure }) {
         assert.deepEqual(reviewTarget, { branch: "feat/47-original", head, base: "main" });
         assert.equal(number, 47);
         assert.deepEqual(fix.files, spec.files);
         assert.match(fix.instructions, /两次数据库写入失败/);
         assert.equal(stored.reviewRepairs?.[0]?.issue, 66);
+        prepareAttempts++;
+        if (prepareAttempts === 1) {
+          throw new IssueDeliveryFailed({ stage: "tests", reason: "check-failed",
+            isolation: { step: "quality", outcome: "exit", exitCode: 2, diagnostics: ["tests/main.test.mts:4:2 TS2322"] },
+            candidateDigest: hash, candidateFiles: [{ path: "src/main.mts", before: "e".repeat(64), after: "f".repeat(64), mode: 0o100644 },
+            ], candidatePatch, candidatePatchDigest: contentDigest(candidatePatch) });
+        }
+        assert.deepEqual(previousFailure?.isolation?.diagnostics, ["tests/main.test.mts:4:2 TS2322"]);
+        assert.doesNotMatch(fix.instructions, /diff --git/);
+        assert.deepEqual(previousCandidate, { patch: candidatePatch, sha256: contentDigest(candidatePatch) });
         writes.push("开发并测试");
         return { workspace: "fixture", branch, base: "main", head: revised, checked: { head: revised, passingTests: ["[AC-1] 只记一条"] } };
       },
@@ -740,7 +752,10 @@ test("批准关联修复后安全回读建单结果，只续修同一 PR 并复�
     assert.deepEqual(restored.repairCards("member"), []);
     await restored.refresh();
     await setImmediate();
+    for (let attempt = 0; String(stored.reviewFix?.state) !== "complete" && attempt < 10; attempt++) await setImmediate();
     assert.deepEqual(writes, ["创建修复单", "开发并测试", "更新原 PR"]);
+    assert.equal(prepareAttempts, 2);
+    assert.equal(stored.reviewFix?.retriedTests, true);
     assert.match(publishedRepair?.body ?? "", /原工单 #47 · 原 PR #53/);
     await restored.refresh();
     await setImmediate();
@@ -751,6 +766,44 @@ test("批准关联修复后安全回读建单结果，只续修同一 PR 并复�
     assert.deepEqual(result?.repairs, [{ head, issue: 66, completedHead: revised, state: "complete", url: "https://github.com/a/b/issues/66" }]);
     assert.deepEqual(reviewed, [head, revised]);
   } finally { await restored.close(); }
+});
+
+test("已关联修复 Issue 的执行失败没有候选补丁时，刷新不会重复开工", async () => {
+  const head = "a".repeat(40);
+  const hash = "d".repeat(64);
+  const quality = { policy: 1, flowDigest: hash, batchDigest: hash };
+  const pull: IssuePull = { number: 53, url: "https://github.com/a/b/pull/53", state: "OPEN", head, baseName: "main" };
+  const issue: IssueDetail = { number: 47, url: "https://github.com/a/b/issues/47", title: "交付", body: "验收",
+    state: "OPEN", assignees: ["member"], pulls: [pull] };
+  const revision = issueRevision(issue);
+  const approval = { flowId: "flow", planId: "plan", version: 1, issueRevision: revision, quality };
+  const receipt = { packetId: hash, key: { repo: "a/b", issue: 47, issueRevision: revision, pull: 53, head,
+    mergeBase: head, plan: { id: "plan", version: 1, quality } }, status: "block" as const,
+    implementation: { status: "block" as const, summary: "实现失败", evidence: [] }, requirements: { criteria: [] } };
+  const reviewObservation = JSON.stringify([pull.number, pull.head, pull.baseName, approval, revision, true, undefined]);
+  const original: Claim = { ...issue, pull, requestId: "approved", claimedBy: "member", account: "member", phase: "submitted", syncedAt: 0,
+    target: { branch: "feat/47-original", head, base: "main" }, delivery: { ...spec, baseRevision: head }, approval,
+    observedIssueRevision: revision, observedReviewLink: true, deliveryReviews: [{ observed: reviewObservation, receipt }] };
+  const proposed = repairFromReceipt("a/b", original, receipt);
+  assert.ok(proposed && "fix" in proposed);
+  let stored: Claim = { ...original, reviewRepairs: [{ id: proposed.id, head, decision: "approved", at: 1, issue: 66 }],
+    reviewFix: { from: head, state: "failed", repairId: proposed.id }, failure: { stage: "dependencies", reason: "unavailable" } };
+  let starts = 0;
+  const tracker: DeliveryTracker = { repo: "a/b", candidates: async () => [], read: async () => issue, account: async () => "member",
+    assign: async () => assert.fail("续修不能重新认领"), delivery: { checkout: async () => assert.fail(),
+      find: async () => pull, publish: async () => assert.fail(), checkoutPublished: async () => assert.fail(),
+      updatePublished: async () => assert.fail() } };
+  const dispatch = createIssueDispatch(tracker, { load: () => [stored], save(_key, value) { stored = structuredClone(value); return true; } },
+    async () => assert.fail(), () => true, 1, new Map([['member', tracker]]), {
+      specs: new Map(), conversation: true, pollMs: 60_000,
+      publishRepair: async () => { starts++; return new Map(); },
+      async prepare() { starts++; throw new Error("不应重试失败修复"); },
+    });
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) { await dispatch.refresh(); await setImmediate(); }
+    assert.equal(starts, 0);
+    assert.equal(stored.reviewFix?.state, "failed");
+  } finally { await dispatch.close(); }
 });
 
 test("复核执行位释放后继续检查已合并的工单", async () => {
@@ -907,14 +960,14 @@ test("交付失败留存可用诊断，仅在原授权内重试一次", async t 
     phase: "waiting", delivery: { ...spec, baseRevision }, approval: { flowId: "flow", planId: "plan", version: 1,
       issueRevision: issueRevision(issue), quality: { policy: 1, flowDigest: hash, batchDigest: hash } } };
 
-  for (const scenario of ["normal", "legacy", "scope", "reassigned", "changed", "linked", "published", "unconfigured",
+  for (const scenario of ["normal", "legacy", "scope", "reassigned", "changed", "linked", "published", "unconfigured", "worker-recheck-failed",
     "old-format", "old-format-unconfigured", "new-format"] as const) {
     await t.test(scenario, async sub => {
       const directory = await mkdtemp(join(tmpdir(), "souflow-delivery-retry-"));
       sub.after(() => rm(directory, { recursive: true, force: true }));
       const path = join(directory, "audit.sqlite");
       let stored = structuredClone(first);
-      if (scenario !== "normal" && scenario !== "scope") stored.phase = "deliveryFailed";
+      if (scenario !== "normal" && scenario !== "scope" && scenario !== "worker-recheck-failed") stored.phase = "deliveryFailed";
       if (scenario === "published") stored.target = { branch: "feat/7-existing", head: baseRevision };
       if (scenario.includes("format")) {
         stored.retryCount = 1;
@@ -944,6 +997,7 @@ test("交付失败留存可用诊断，仅在原授权内重试一次", async t 
         const dispatch = createIssueDispatch(tracker, checkpoint, async () => assert.fail("不能改走另一类派发"),
           audit.record, 1, new Map([["member", tracker]]), {
             specs: new Map(), conversation: true, requireQuality: true, pollMs: 60_000,
+            ...(scenario === "worker-recheck-failed" ? { hasWorkerAttempt: () => true } : {}),
             ...(!scenario.includes("unconfigured") ? { recoverFailedIssue: 7 } : {}),
             async prepare(input) {
               attempts.push(input.previousFailure);
@@ -952,6 +1006,7 @@ test("交付失败留存可用诊断，仅在原授权内重试一次", async t 
                 input.repairing?.({ code: "edit-count", count: 17 });
                 throw new IssueDeliveryFailed({ stage: "patch", reason: "format", patchIssue: { code: "edit-count", count: 17 } });
               }
+              if (scenario === "worker-recheck-failed") throw new IssueDeliveryFailed({ stage: "tests", reason: "check-failed" });
               if (scenario !== "legacy") throw new IssueDeliveryFailed({ stage: "patch", reason: scenario === "scope" ? "scope" : "match" });
               return { workspace: "fixture", branch: input.branch, base: baseRevision, head: "c".repeat(40) };
             },
@@ -973,6 +1028,7 @@ test("交付失败留存可用诊断，仅在原授权内重试一次", async t 
       await run();
       await run();
       assert.deepEqual(attempts, scenario === "normal" ? [undefined, { stage: "patch", reason: "match" }]
+        : scenario === "worker-recheck-failed" ? [undefined]
         : scenario === "legacy" ? [{ stage: "legacy", reason: "unavailable" }] : scenario === "scope" ? [undefined]
         : scenario === "old-format" ? [{ stage: "patch", reason: "format" }] : []);
       assert.equal(published, scenario === "legacy" ? 1 : 0);
@@ -999,7 +1055,7 @@ test("确有设备失败回执的已授权工单只重试一次，仍复核授�
   const approval = { flowId: "flow", planId: "plan", version: 4, issueRevision: issueRevision(issue), quality };
   for (const scenario of ["old", "current", "restart-before-failure-save", "restart-without-receipt", "missing-receipt",
     "stale-approval", "changed-issue", "linked-pr", "already-pushed", "recovery-configured", "recovery-other-attempt",
-    "recovery-previous-attempt", "recovery-codex-failure", "recovery-exhausted"] as const) {
+    "recovery-previous-attempt", "recovery-codex-failure", "recovery-diagnostics", "recovery-exhausted"] as const) {
     await t.test(scenario, async () => {
       const events: { action?: string; workerAttempt?: string }[] = [];
       let prepares = 0;
@@ -1014,7 +1070,10 @@ test("确有设备失败回执的已授权工单只重试一次，仍复核授�
       if (scenario.startsWith("recovery-")) stored = { ...stored, phase: "deliveryFailed",
         retryCount: scenario === "recovery-exhausted" ? 2 : 1,
         retriedWorkerAttempt: scenario === "recovery-previous-attempt" ? "confirmed-attempt" : "first-attempt",
-        failure: { stage: "device", reason: "device-failed", workerStage: scenario === "recovery-codex-failure" ? "codex" : "tests" } };
+        failure: { stage: "device", reason: "device-failed", workerStage: scenario === "recovery-codex-failure" ? "codex" : "tests",
+          ...(scenario === "recovery-diagnostics" || scenario === "recovery-exhausted" ? { isolation: { step: "quality" as const, outcome: "exit" as const,
+            exitCode: 2, diagnostics: ["src/example.mts:3:4 TS2322"] },
+            candidateDigest: contentDigest("candidate") } : {}) } };
       const tracker: DeliveryTracker = {
         repo: "a/b", candidates: async () => [], read: async () => observed, account: async () => "member", assign: async () => {},
         delivery: { checkout: async () => ({ base: "main", author: "fixture", email: "fixture@example.test" }), find: async () => undefined,
@@ -1027,34 +1086,56 @@ test("确有设备失败回执的已授权工单只重试一次，仍复核授�
           return true;
         } }, async () => "", () => true, 2, new Map(), {
           specs: new Map(), conversation: true, requireQuality: true, pollMs: 60_000,
-          ...(scenario.startsWith("recovery-") ? { recoverDeviceTestAttempts:
+          ...(scenario.startsWith("recovery-") || scenario === "restart-before-failure-save" ? { recoverDeviceTestAttempts:
             new Set([scenario === "recovery-other-attempt" ? "different-attempt" : "confirmed-attempt"]) } : {}),
           reviewScopeCurrent: () => scenario !== "stale-approval",
           failedWorkerAttempt(scope) {
             assert.deepEqual(scope, { repo: "a/b", issue: 7, issueRevision: approval.issueRevision,
               plan: { flowId: "flow", version: 4, flowDigest: quality.flowDigest, batchDigest: quality.batchDigest } });
-            return scenario === "missing-receipt" || scenario === "restart-without-receipt" ? undefined : "confirmed-attempt";
+            return scenario === "missing-receipt" || scenario === "restart-without-receipt" ? undefined : {
+              id: "confirmed-attempt", failureStage: scenario === "recovery-codex-failure" ? "codex" : "tests",
+              ...(scenario === "recovery-diagnostics" || scenario === "recovery-exhausted" ? { isolation: { step: "quality" as const, outcome: "exit" as const,
+                exitCode: 2, diagnostics: ["src/example.mts:3:4 TS2322"] }, candidateDigest: contentDigest("candidate"),
+                candidateFiles: [{ path: "src/example.mts", before: "a".repeat(64), after: "b".repeat(64), mode: 0o100644 as const }],
+                candidatePatch: "diff --git a/src/example.mts b/src/example.mts\n",
+                candidatePatchDigest: contentDigest("diff --git a/src/example.mts b/src/example.mts\n") } : {}) };
           },
           async prepare(input, _connected, signal) {
             prepares++;
             assert.deepEqual(input.spec, { ...spec, baseRevision });
+            if (scenario === "recovery-diagnostics" || scenario === "recovery-exhausted") {
+              assert.match(input.previousFailure?.isolation?.diagnostics?.[0] ?? "", /TS2322/);
+              assert.match(input.previousFailure?.candidateDigest ?? "", /^[a-f0-9]{64}$/);
+              assert.match(input.previousFailure?.candidatePatch ?? "", /^diff --git/);
+            }
             await input.revalidateWorker?.(signal);
             throw new IssueDeliveryFailed({ stage: "device", reason: "device-failed", workerStage: "tests" });
           },
         });
         try {
+          if ((scenario === "recovery-diagnostics" || scenario === "recovery-exhausted") && restart === 0) {
+            const snapshot = dispatch.snapshot(true);
+            const item = snapshot.items.find(candidate => candidate.number === issue.number);
+            const evidence = (item as { failureEvidence?: { diagnostics: string[]; summary: string; candidateDigest?: string } } | undefined)?.failureEvidence;
+              assert.equal(evidence?.diagnostics[0], "src/example.mts:3:4 TS2322");
+            assert.match(evidence?.summary ?? "", /退出码 2/);
+            assert.match(evidence?.candidateDigest ?? "", /^[a-f0-9]{64}$/);
+            assert.doesNotMatch(JSON.stringify(item), /diff --git/);
+          }
           for (let i = 0; i < 3; i++) {
             await dispatch.refresh();
             await setImmediate();
           }
         } finally { await dispatch.close(); }
       }
-      assert.equal(prepares, ["old", "restart-before-failure-save", "recovery-configured"].includes(scenario) ? 1 : scenario === "current" ? 2 : 0);
+      assert.equal(prepares, ["restart-before-failure-save", "recovery-configured", "recovery-diagnostics"].includes(scenario) ? 1 : scenario === "current" ? 1 : 0);
       const retries = events.filter(event => event.action === "worker-retry-queued");
-      assert.equal(retries.length, ["old", "current", "changed-issue", "restart-before-failure-save"].includes(scenario) ? 1 : 0);
+      assert.equal(retries.length, ["restart-before-failure-save", "recovery-configured", "recovery-diagnostics"].includes(scenario) ? 1 : 0);
       if (retries.length) assert.equal(retries[0]?.workerAttempt, "confirmed-attempt");
-      const recovery = events.filter(event => event.action === "worker-test-recovery-queued");
-      assert.deepEqual(recovery.map(event => event.workerAttempt), scenario === "recovery-configured" ? ["confirmed-attempt"] : []);
+      if (scenario === "recovery-exhausted") {
+        assert.equal(stored.retryCount, 2);
+        assert.deepEqual(stored.failure?.isolation?.diagnostics, ["src/example.mts:3:4 TS2322"]);
+      }
     });
   }
 });

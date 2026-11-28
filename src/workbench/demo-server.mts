@@ -181,8 +181,8 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           legacyReviewTestFailure: audit.legacyReviewTestFailure,
           ...(issueDelivery.reviewFix ? { reviewFix: issueDelivery.reviewFix } : {}),
           ...(issueDelivery.reviewFixes ? { reviewFixes: issueDelivery.reviewFixes } : {}),
-          ...(issueDelivery.sourceRefresh && remoteLink?.code ? { sourceRefresh: issueDelivery.sourceRefresh,
-            hasWorkerAttempt: remoteLink.code.hasAttempt } : {}),
+          ...(issueDelivery.sourceRefresh ? { sourceRefresh: issueDelivery.sourceRefresh } : {}),
+          ...(remoteLink?.code ? { hasWorkerAttempt: remoteLink.code.hasAttempt } : {}),
           ...(publishIssues ? { publishRepair: publishIssues } : {}),
           ...(remoteLink?.code ? { failedWorkerAttempt: remoteLink.code.failedAttempt } : {}),
           async reviewSourceHandoff(claim, proof, sources, signal) {
@@ -750,7 +750,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const recoverFailedIssue = process.env.SOULFLOW_GITHUB_RECOVER_FAILED_ISSUE === undefined ? undefined
     : integerSetting("SOULFLOW_GITHUB_RECOVER_FAILED_ISSUE", 0, 1, Number.MAX_SAFE_INTEGER);
   if (recoverFailedIssue !== undefined && !conversationDelivery) throw Error("恢复旧工单前请启用对话工单交付。");
-  const deviceTestAttempts = process.env.SOULFLOW_GITHUB_RECOVER_DEVICE_TEST_ATTEMPTS?.split(",").map(id => id.trim()).filter(Boolean) ?? [];
+  const recoveryAttemptsValue = process.env.SOULFLOW_GITHUB_RECOVER_DEVICE_ATTEMPTS
+    ?? process.env.SOULFLOW_GITHUB_RECOVER_DEVICE_TEST_ATTEMPTS;
+  const deviceTestAttempts = recoveryAttemptsValue?.split(",").map(id => id.trim()).filter(Boolean) ?? [];
   if (deviceTestAttempts.length && (!conversationDelivery || deviceTestAttempts.some(id => !workerId.test(id)))) {
     throw Error("设备检查恢复需要启用对话工单交付并提供有效的派发 ID。");
   }

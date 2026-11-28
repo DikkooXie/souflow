@@ -115,6 +115,22 @@ test("AC-3 同一设备未就绪或满载时无新任务，恢复空位后继续
   assert.equal(audit.filter(event => (event.details as { action?: string })?.action === "offered").length, 2);
 });
 
+test("等待设备不消耗已派发任务的执行和失败回执宽限", async t => {
+  const config = readCodeWorkerConfig({ SOULFLOW_CODE_WORKER_RECEIPT_GRACE_MS: "1000" });
+  const pool = createCodeWorkerPool(database().checkpoint, new Set([first.id]), config);
+  const stop = new AbortController();
+  t.after(() => { stop.abort(); pool.close(); });
+  const execution = pool.execute(work, stop.signal, 100, () => {}, revalidate);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const delivery = await pool.poll(first, stop.signal);
+  assert.ok(delivery.status === 200 && delivery.offer);
+  assert.equal(pool.receipt(first, { id: delivery.offer.id, digest: delivery.offer.digest, at: 101, phase: "accepted" }), 200);
+  await new Promise(resolve => setTimeout(resolve, 75));
+  assert.equal(pool.receipt(first, { id: delivery.offer.id, digest: delivery.offer.digest, at: 201, phase: "failed",
+    failureStage: "tests", isolation: { step: "quality", outcome: "timeout" } }), 200);
+  assert.equal((await execution).phase, "failed");
+});
+
 function database() {
   const stored = new Map<string, WorkerAttempt>();
   const audit: BusinessEvent[] = [];
@@ -194,24 +210,57 @@ test("只有最近一条与原审批匹配的设备失败回执可用于恢复",
   t.after(pool.close);
   const signal = new AbortController().signal;
   const waiting = pool.poll(first, signal);
-  const pending = pool.execute(work, signal, 1000, () => {}, revalidate);
+  const candidatePatch = "diff --git a/src/worker.mts b/src/worker.mts\n--- a/src/worker.mts\n+++ b/src/worker.mts\n";
+  const pending = pool.execute(work, signal, 1000, () => {}, revalidate, receipt => receipt.candidatePatch === candidatePatch);
   const delivery = await waiting;
   assert.ok(delivery.status === 200 && delivery.offer);
   const { id, digest } = delivery.offer;
   assert.equal(pool.receipt(first, { id, digest, at: 100, phase: "accepted" }), 200);
-  const failure = { id, digest, at: 101, phase: "failed", failureStage: "codex" } as const;
-  assert.deepEqual(readCodeReceipt(failure), failure);
+  const isolation = { step: "quality", outcome: "exit", exitCode: 2,
+    diagnostics: ["src/example.mts:3:4 TS2322"] } as const;
+  const [authorizedFile] = work.files;
+  assert.ok(authorizedFile);
+  const candidateFiles = [{ path: authorizedFile.path, before: authorizedFile.sha256, after: contentDigest("updated"), mode: 0o100644 as const }];
+  const candidateDigest = contentDigest(JSON.stringify(candidateFiles));
+  const failure = readCodeReceipt({ id, digest, at: 101, phase: "failed", failureStage: "tests",
+    isolation, candidateDigest, candidateFiles, candidatePatch, candidatePatchDigest: contentDigest(candidatePatch) });
+  assert.ok(failure?.phase === "failed");
+  assert.doesNotMatch(JSON.stringify(failure), /ghp_12345678901234567890/);
+  assert.equal(failure.isolation?.diagnostics?.length, 1);
   assert.equal(readCodeReceipt({ ...failure, failureStage: "external error" }), undefined);
-  assert.equal(readCodeReceipt({ ...failure, failureStage: undefined })?.phase, "failed");
+  assert.equal(readCodeReceipt({ ...failure, candidateDigest: "invalid" }), undefined);
+  assert.equal(readCodeReceipt({ ...failure, isolation: { ...isolation, outcome: "timeout" } }), undefined);
+  assert.equal(readCodeReceipt({ ...failure, isolation: { ...isolation,
+    diagnostics: ["src/secret.mts:4:5 TS2345 Authorization: Bearer ghp_12345678901234567890"] } }), undefined);
+  assert.equal(readCodeReceipt({ ...failure, candidateFiles: [{ ...candidateFiles[0], path: "src/unauthorized.mts" }] }), undefined);
+  assert.equal(readCodeReceipt({ ...failure, candidateFiles: [{ ...candidateFiles[0], before: "f".repeat(64) }] }), undefined);
+  assert.equal(readCodeReceipt({ ...failure, candidatePatch: "raw output" }), undefined);
+  assert.equal(readCodeReceipt({ ...failure, candidateFiles: [{ ...candidateFiles[0], extra: "sensitive payload" }] }), undefined);
+  assert.equal(readCodeReceipt({ ...failure, failureStage: undefined }), undefined);
+  assert.equal(readCodeReceipt({ ...failure, failureStage: undefined, isolation: undefined, candidateDigest: undefined,
+    candidateFiles: undefined, candidatePatch: undefined, candidatePatchDigest: undefined })?.phase, "failed");
   assert.equal(pool.receipt(first, failure), 200);
+  const auditCount = audit.length;
+  assert.equal(pool.receipt(first, failure), 200);
+  assert.equal(audit.length, auditCount);
   assert.equal((await pending).phase, "failed");
-  assert.equal(checkpoint.load()[0]?.receipt?.failureStage, "codex");
-  assert.equal((audit.at(-1)?.details as { failureStage?: string } | undefined)?.failureStage, "codex");
+  assert.equal(checkpoint.load()[0]?.receipt?.failureStage, "tests");
+  assert.equal(checkpoint.load()[0]?.receipt?.isolation?.diagnostics?.length, 1);
+  assert.equal(checkpoint.load()[0]?.receipt?.candidateDigest, candidateDigest);
+  assert.equal((pool.snapshot().attempts[0]?.receipt as { candidatePatch?: string } | undefined)?.candidatePatch, undefined);
+  assert.equal((audit.at(-1)?.details as { failureStage?: string } | undefined)?.failureStage, "tests");
+  assert.doesNotMatch(JSON.stringify(audit), /ghp_12345678901234567890/);
+  assert.doesNotMatch(JSON.stringify(audit), /diff --git/);
   pool.close();
 
   const restarted = createCodeWorkerPool(checkpoint, devices);
   t.after(restarted.close);
-  assert.equal(restarted.failedAttempt(work), id);
+  assert.equal(restarted.failedAttempt(work)?.id, id);
+  assert.deepEqual(restarted.failedAttempt(work)?.candidateFiles, candidateFiles);
+  assert.equal(restarted.failedAttempt(work)?.candidatePatch, candidatePatch);
+  assert.equal(restarted.hasAttempt(repo, work.issue), true);
+  assert.equal(restarted.snapshot().attempts[0]?.receipt?.isolation?.diagnostics?.length, 1);
+  assert.equal(audit.filter(event => (event.details as { action?: string })?.action === "offered").length, 1);
   for (const scope of [{ ...work, repo: "other/repo" }, { ...work, issue: 11 }, { ...work, issueRevision: "f".repeat(64) },
     ...Object.keys(work.plan).map(key => ({ ...work, plan: { ...work.plan, [key]: key === "version" ? 3 : "changed" } }))]) {
     assert.equal(restarted.failedAttempt(scope), undefined);
@@ -226,6 +275,33 @@ test("只有最近一条与原审批匹配的设备失败回执可用于恢复",
   restarted.close();
   await next;
   assert.equal(restarted.failedAttempt(later), undefined);
+});
+
+test("失败诊断按检查阶段匹配，派发上下文可携带已校验的上一份候选补丁", () => {
+  const id = randomUUID();
+  const candidate = "diff --git a/src/worker.mts b/src/worker.mts\n";
+  const retryWork = { ...work, previousCandidatePatch: { patch: candidate, sha256: contentDigest(candidate) } };
+  const offer = { version: workerProtocolVersion, id, digest: contentDigest(JSON.stringify(retryWork)), work: retryWork };
+  assert.equal(readCodeOffer(offer)?.work.previousCandidatePatch?.patch, candidate);
+  const invalidWork = { ...retryWork, previousCandidatePatch: { patch: "unverified", sha256: contentDigest(candidate) } };
+  assert.equal(readCodeOffer({ ...offer, work: invalidWork, digest: contentDigest(JSON.stringify(invalidWork)) }), undefined);
+  assert.ok(readCodeReceipt({ id, digest, at: 101, phase: "failed", failureStage: "dependencies",
+    isolation: { step: "dependencies", outcome: "exit", exitCode: 1 } })?.phase === "failed");
+  assert.equal(readCodeReceipt({ id, digest, at: 101, phase: "failed", failureStage: "tests",
+    isolation: { step: "dependencies", outcome: "exit", exitCode: 1 } }), undefined);
+});
+
+test("合法的恢复补丁独立计量，不挤占最大源码上下文预算", () => {
+  const config = readCodeWorkerConfig();
+  const largeContext = JSON.stringify({ editableFiles: [{ path: "src/large.mts", text: "x".repeat(864_500) }] });
+  const patch = `diff --git a/before/src/large.mts b/after/src/large.mts\n${"x".repeat(108_900)}`;
+  const largeWork: CodeWork = { ...work, files: Array.from({ length: 15 }, (_, index) => ({
+    path: `src/file-${String(index).padStart(2, "0")}.mts`, sha256: digest, bytes: 52_800,
+  })), context: largeContext, previousCandidatePatch: { patch, sha256: contentDigest(patch) } };
+  const offer = { version: workerProtocolVersion, id: randomUUID(), digest: contentDigest(JSON.stringify(largeWork)), work: largeWork };
+  assert.ok(Buffer.byteLength(largeContext) < config.maxContextBytes);
+  assert.ok(Buffer.byteLength(JSON.stringify({ offer })) < config.messageBytes);
+  assert.ok(readCodeOffer(offer, config));
 });
 
 test("满载设备仅上报在线，空闲设备才会收到工单", async t => {
