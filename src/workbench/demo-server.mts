@@ -17,6 +17,7 @@ import { createGitHubDeliveryReviewer } from "./github-delivery-review.mts";
 import { readApprovedReviewFixes } from "./approved-review-fix.mts";
 import { readApprovedSourceRefresh } from "./approved-source-refresh.mts";
 import { readLegacyDeviceWait } from "./device-wait.mts";
+import { loadTrustedVerification, readTrustedVerificationConfig, type TrustedVerificationConfig } from "./trusted-verification.mts";
 import { createPrePrAmendments, type PrePrAmendmentEvent } from "./pre-pr-amendment.mts";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
@@ -94,7 +95,8 @@ type WorkbenchOptions = {
   members?: MemberKeys;
   issueTracker?: IssueTracker;
   verifyIssue?: VerifyIssue;
-  issueDelivery?: Omit<IssueDeliveryOptions, "prepare"> & { image: string; model?: string; planningModel?: string; timeoutMs: number };
+  issueDelivery?: Omit<IssueDeliveryOptions, "prepare"> & { image: string; model?: string; planningModel?: string; timeoutMs: number;
+    verificationBundle?: TrustedVerificationConfig };
   memberTrackers?: ReadonlyMap<string, IssueTracker>;
   hostName?: string;
   codexAccounts?: CodexAccountDispatch;
@@ -173,6 +175,8 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         ? createPlannedIssuePublication(audit.checkpoint<IssuePublication>(`github-publications:${issueTracker.repo.toLowerCase()}`)) : undefined;
       let reviewScope: ((claim: Claim) => DeliveryReviewScope | undefined) | undefined;
       let reviewSourceHandoff: NonNullable<IssueDeliveryOptions["reviewSourceHandoff"]> | undefined;
+      const trustedVerification = issueDelivery?.verificationBundle && live && issueTracker
+        ? { repo: issueTracker.repo, bundle: loadTrustedVerification(issueDelivery.verificationBundle, live[0]) } : undefined;
       const github = issueTracker && monitor ? createIssueDispatch(issueTracker,
         audit.checkpoint<Claim>(`github-issues:${issueTracker.repo.toLowerCase()}`),
         verifyIssue ?? createIssueVerifier(monitor, codexAccounts ? { codexAccounts } : {}),
@@ -197,7 +201,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
             return reviewSourceHandoff(claim, proof, sources, signal);
           },
           ...(live ? { review: issueDelivery.review ?? createGitHubDeliveryReviewer(live[0], claim => reviewScope?.(claim),
-            createCodexDeliveryReviewer(live[0], issueDelivery.timeoutMs, qualityModel ?? issueDelivery.planningModel)),
+            createCodexDeliveryReviewer(live[0], issueDelivery.timeoutMs, qualityModel ?? issueDelivery.planningModel), trustedVerification),
             reviewScopeCurrent: issueDelivery.reviewScopeCurrent ?? (claim => !!reviewScope?.(claim)) } : {}),
           prepare: createIssueDeveloper(monitor, { ...issueDelivery, root: `${database}.artifacts/github`,
             ...(codexAccounts ? { codexAccounts } : {}), ...(remoteLink?.code ? { workers: remoteLink.code } : {}) }),
@@ -776,12 +780,15 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const reviewFix = process.env.SOULFLOW_GITHUB_REVIEW_FIX;
   const sourceRefresh = process.env.SOULFLOW_GITHUB_SOURCE_REFRESH;
   const deviceWaitRecovery = process.env.SOULFLOW_GITHUB_RECOVER_DEVICE_WAIT;
+  const verificationBundle = process.env.SOULFLOW_GITHUB_VERIFICATION_EVIDENCE;
   delete process.env.SOULFLOW_GITHUB_REVIEW_FIX;
   delete process.env.SOULFLOW_GITHUB_SOURCE_REFRESH;
   delete process.env.SOULFLOW_GITHUB_RECOVER_DEVICE_WAIT;
+  delete process.env.SOULFLOW_GITHUB_VERIFICATION_EVIDENCE;
   if (reviewFix !== undefined && !conversationDelivery) throw Error("PR 续修需要启用对话工单交付。");
   if (sourceRefresh !== undefined && !conversationDelivery) throw Error("源码复核续派需要启用对话工单交付。");
   if (deviceWaitRecovery !== undefined && !conversationDelivery) throw Error("设备等待恢复需要启用对话工单交付。");
+  if (verificationBundle !== undefined && !conversationDelivery) throw Error("运行验收证据需要启用对话工单交付。");
   const recoverFailedIssue = process.env.SOULFLOW_GITHUB_RECOVER_FAILED_ISSUE === undefined ? undefined
     : integerSetting("SOULFLOW_GITHUB_RECOVER_FAILED_ISSUE", 0, 1, Number.MAX_SAFE_INTEGER);
   if (recoverFailedIssue !== undefined && !conversationDelivery) throw Error("恢复旧工单前请启用对话工单交付。");
@@ -810,6 +817,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     ...(reviewFix === undefined ? {} : { reviewFixes: readApprovedReviewFixes(reviewFix) }),
     ...(sourceRefresh === undefined ? {} : { sourceRefresh: readApprovedSourceRefresh(sourceRefresh) }),
     ...(deviceWaitRecovery === undefined ? {} : { recoverDeviceWait: readLegacyDeviceWait(deviceWaitRecovery) }),
+    ...(verificationBundle === undefined ? {} : { verificationBundle: readTrustedVerificationConfig(verificationBundle) }),
     pollMs: integerSetting("SOULFLOW_GITHUB_POLL_MS", 20_000, 5000, 3_600_000),
     timeoutMs: runtimeInteger("SOULFLOW_GITHUB_DELIVERY_TIMEOUT_MS", 1000, 3_600_000),
   } : undefined;

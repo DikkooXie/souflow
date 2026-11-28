@@ -5,13 +5,14 @@ import type { QualityBinding, Quote, Verification } from "./dispatch-quality.mts
 export type DeliveryReviewKey = {
   repo: string; issue: number; issueRevision: string; pull: number; head: string; mergeBase: string;
   plan: { id: string; version: number; quality: QualityBinding };
+  verification?: { digest: string; integration: string; observedAt: string; expiresAt: string };
 };
 export type DeliveryCriterion = Verification & { text: string };
 export type DeliveryReviewScope = {
   request: string; criteria: readonly DeliveryCriterion[]; files: readonly string[];
 };
 export type DeliveryEvidence = { id: string; text: string } & (
-  { kind: "change" | "rule" } | { kind: "verification"; criteria: readonly string[] });
+  { kind: "change" | "rule" } | { kind: "verification"; criteria: readonly string[]; outcome?: "pass" | "partial" | "fail" });
 export type DeliveryReviewPacket = {
   key: DeliveryReviewKey;
   request: string;
@@ -94,7 +95,10 @@ function parseReview(axis: DeliveryReviewAxis, raw: string | undefined, packet: 
     const finding = parseFinding(row, new Map([...facts, [criterionRef, expected.get(id) ?? ""]]));
     expected.delete(id);
     if (!finding.evidence.some(quote => quote.ref === criterionRef)
-      || (finding.status === "pass" && !packet.evidence.some(evidence => evidence.kind === "verification" && evidence.criteria.includes(id)
+      || (finding.status === "pass" && packet.evidence.some(evidence => evidence.kind === "verification"
+        && evidence.criteria.includes(id) && (evidence.outcome === "partial" || evidence.outcome === "fail")))
+      || (finding.status === "pass" && !packet.evidence.some(evidence => evidence.kind === "verification"
+        && (evidence.outcome === undefined || evidence.outcome === "pass") && evidence.criteria.includes(id)
         && finding.evidence.some(quote => quote.ref === evidence.id)))) throw Error("需求复核缺少该验收项或实际验证的证据。");
     return { criterion: id, ...finding };
   });
