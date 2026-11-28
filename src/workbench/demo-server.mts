@@ -4,6 +4,7 @@ import { createPlannedIssuePublication, type IssuePublication } from "./planned-
 import { readFile } from "node:fs/promises";
 import { X509Certificate } from "node:crypto";
 import { createIssueDeveloper } from "../execution/issue-delivery.mts";
+import { createRepairCandidateInspector } from "../execution/repair-candidate-inspection.mts";
 import { createCodexDeliveryReviewer } from "../execution/codex-delivery-review.mts";
 import { createCodexQualityReviewer, createCodexTicketSourceReviewer, qualitySources } from "../execution/codex-quality-review.mts";
 import type { DeliveryReviewScope } from "../planning/delivery-review.mts";
@@ -195,6 +196,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
             reviewScopeCurrent: issueDelivery.reviewScopeCurrent ?? (claim => !!reviewScope?.(claim)) } : {}),
           prepare: createIssueDeveloper(monitor, { ...issueDelivery, root: `${database}.artifacts/github`,
             ...(codexAccounts ? { codexAccounts } : {}), ...(remoteLink?.code ? { workers: remoteLink.code } : {}) }),
+          inspectRepairCandidate: createRepairCandidateInspector({ ...issueDelivery, root: `${database}.artifacts/github` }),
         }) : undefined;
       const issuePlanning = live && github && issueTracker && issueDelivery?.conversation && reviewQuality
         ? createConversationDelivery(github, audit.checkpoint<IssueProposal>(`github-proposals:${issueTracker.repo.toLowerCase()}`),

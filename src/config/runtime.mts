@@ -36,6 +36,9 @@ export const legacyCodeEditFileBytes = 36_000;
 export const codeEditFileBytes = (env?: NodeJS.ProcessEnv) =>
   runtimeInteger("SOULFLOW_CODE_EDIT_FILE_MAX_BYTES", 1, codeEditFileHardLimit, env);
 
+export const repairContinuationLimit = (env?: NodeJS.ProcessEnv) =>
+  runtimeInteger("SOULFLOW_GITHUB_REPAIR_MAX_ROUNDS", 1, 16, env);
+
 export function readCodeWorkerConfig(env?: NodeJS.ProcessEnv) {
   const waitMs = runtimeInteger("SOULFLOW_CODE_WORKER_WAIT_MS", 100, 300_000, env);
   const httpTimeoutMs = runtimeInteger("SOULFLOW_CODE_WORKER_HTTP_TIMEOUT_MS", waitMs + 1, 600_000, env);

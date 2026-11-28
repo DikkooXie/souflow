@@ -14,6 +14,7 @@ import { qualitySources } from "./codex-quality-review.mts";
 import { checkoutApprovedRefresh, IssueDeliverySourcesChanged, proveRefreshedSources, proveSourceHandoff, type SourceHandoff, type SourceProducer } from "./dependency-source-handoff.mts";
 import { diagnoseIsolationFailure, type IsolationEvidence } from "./isolation-evidence.mts";
 import { verifyCandidatePatch } from "./candidate-patch-evidence.mts";
+import { readCandidateSnapshot, type CandidateSnapshot } from "./candidate-snapshot.mts";
 import type { DispatchMonitor } from "./dispatch-monitor.mts";
 import { IssueVerificationUncertain } from "./issue-verification.mts";
 import type { CodeWorkerPool } from "./code-worker-pool.mts";
@@ -40,6 +41,7 @@ export type DeliveryFailure = {
   candidateFiles?: import("./code-worker-protocol.mts").CandidateFile[];
   candidatePatch?: string;
   candidatePatchDigest?: string;
+  candidateSnapshot?: CandidateSnapshot;
 };
 export type PrepareIssue = (input: {
   number: number; flowId?: string; planVersion?: number; spec: DeliverySpec; branch: string; upstream: string[]; publisher: IssuePublisher;
@@ -49,7 +51,7 @@ export type PrepareIssue = (input: {
   repairing?: (issue: PatchIssue) => void;
   workerProof?: Pick<CodeWork, "repo" | "issueRevision" | "plan">;
   recoverCheckedHead?: string;
-  failedReviewDraft?: FailedReviewDraft & { testFiles: readonly string[]; evidence?: FailedReviewDraftEvidence };
+  failedReviewDraft?: FailedReviewDraft & { testFiles: readonly string[]; evidence?: FailedReviewDraftEvidence | CandidateSnapshot };
   revalidateWorker?: (signal: AbortSignal) => Promise<void>;
   workerOffered?: (attemptId: string) => void;
   sourceHandoff?: {
@@ -170,13 +172,15 @@ export async function isolatedIssueCheck(workspace: string, image: string, timeo
     const deadline = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
     const runner = fileURLToPath(new URL("./isolated-issue-check.sh", import.meta.url));
     const runnerPath = "/souflow-issue-check.sh";
+    const diagnostics = fileURLToPath(new URL("./quality-diagnostics.mjs", import.meta.url));
     // 安装只针对合并后的锁文件，补丁应用后的检查使用无网络、只读工作区。
     try {
       const { stdout } = await exec("docker", ["run", "--rm", "--name", name, "--pull=never", "--cap-drop=ALL",
         "--security-opt=no-new-privileges", "--pids-limit=256", "--tmpfs", "/tmp:exec",
         "--mount", `type=bind,source=${workspace},target=/workspace${install ? "" : ",readonly"}`,
         "--workdir", "/workspace", "-e", "npm_config_cache=/tmp/npm-cache",
-        ...(!install ? ["--network=none", "--mount", `type=bind,source=${runner},target=${runnerPath},readonly`] : []),
+        ...(!install ? ["--network=none", "--mount", `type=bind,source=${runner},target=${runnerPath},readonly`,
+          "--mount", `type=bind,source=${diagnostics},target=/quality-diagnostics.mjs,readonly`] : []),
         image, ...(install ? ["npm", "ci", "--ignore-scripts"] : ["sh", runnerPath])],
       { maxBuffer: 2 * 1024 * 1024, signal: deadline });
       return install ? [] : passingAcceptanceTests(stdout);
@@ -372,10 +376,11 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
       catch (error) {
         if (reviewTarget && error instanceof IssueDeliveryFailed && error.failure.isolation) {
           const candidatePatch = await readFile(applied.patchPath, "utf8");
+          const candidateSnapshot = await readCandidateSnapshot(workspace, revision, spec.files, signal);
           throw new IssueDeliveryFailed({ ...error.failure, candidateDigest: contentDigest(JSON.stringify(checked.changes)),
             candidateFiles: checked.changes.map(file => ({ path: file.path, before: file.before, after: file.after,
               mode: (file.mode === 0o100755 ? 0o100755 : 0o100644) as 0o100644 | 0o100755 })),
-            candidatePatch, candidatePatchDigest: applied.patchSha256 });
+            candidatePatch, candidatePatchDigest: applied.patchSha256, candidateSnapshot });
         }
         throw error;
       }

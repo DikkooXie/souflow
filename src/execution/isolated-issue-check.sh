@@ -24,4 +24,15 @@ fi
 exec "$node_bin" "$@"
 SOUFLOW_NODE
 chmod +x "$shim_dir/node"
-PATH="$shim_dir:$PATH" npm run check
+if PATH="$shim_dir:$PATH" npm run check; then
+  exit 0
+else
+  check_status=$?
+fi
+# 失败后单独取机器报告，不把 info 当阻断，也不把原文带到调度记录中。
+diagnostics="$(dirname "$0")/quality-diagnostics.mjs"
+if [ -x node_modules/.bin/biome ] && [ -f "$diagnostics" ]; then
+  node_modules/.bin/biome lint --reporter=json --max-diagnostics=none src tests > "$shim_dir/biome.json" 2>/dev/null || true
+  "$shim_dir/node-bin" "$diagnostics" "$shim_dir/biome.json"
+fi
+exit "$check_status"

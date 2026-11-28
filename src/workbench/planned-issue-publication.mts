@@ -56,6 +56,8 @@ export function preparePlannedIssues(batch: PlannedIssueBatch, repo: string) {
   });
 }
 
+export class PublishedRepairChanged extends Error {}
+
 export async function readPublishedRepair(batch: PlannedIssueBatch, tracker: IssueTracker, number: number) {
   const prepared = preparePlannedIssues(batch, tracker.repo);
   const row = prepared[0];
@@ -63,7 +65,7 @@ export async function readPublishedRepair(batch: PlannedIssueBatch, tracker: Iss
   const expected = render(batch, row.draft, row.marker, []);
   const issue = await tracker.read(number);
   if (issue.number !== number || issue.state !== "OPEN" || issue.title !== expected.title || issue.body !== expected.body) {
-    throw Error("已关联修复 Issue 与原授权不一致。");
+    throw new PublishedRepairChanged("已关联修复 Issue 与原授权不一致。");
   }
   return issue;
 }
