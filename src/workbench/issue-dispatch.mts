@@ -16,13 +16,14 @@ import type { PatchIssue } from "../execution/local-code-changes.mts";
 import type { DeliveryReviewReceipt } from "../planning/delivery-review.mts";
 import { qualityBindingCurrent, type QualityBinding, type TicketSourceFinding } from "../planning/dispatch-quality.mts";
 import type { ApprovedReviewFix } from "./approved-review-fix.mts";
+import { selectApprovedRepairReplay } from "./approved-repair-replay.mts";
 import { matchesSourceRefresh, type ApprovedSourceRefresh } from "./approved-source-refresh.mts";
 import { activePrePrAmendment, amendedSpec, amendmentRecoveryBound, type ApprovedPrePrAmendment } from "./pre-pr-amendment.mts";
 import { createPrePrAmendmentAuthorization } from "./pre-pr-amendment-authorization.mts";
 import { queueWorkerRecovery } from "./worker-recovery.mts";
 import { approvedRepairFiles, readRepairDecision, repairDecisionCard, repairFromApproval, repairFromReceipt } from "./delivery-review-repair.mts";
 import type { ReviewIssueDelivery } from "./github-delivery-review.mts";
-import { type createPlannedIssuePublication, hasPublicationMarker } from "./planned-issue-publication.mts";
+import { type createPlannedIssuePublication, hasPublicationMarker, readPublishedRepair } from "./planned-issue-publication.mts";
 
 export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; prepare: PrepareIssue; pollMs: number; conversation?: boolean;
   requireQuality?: boolean; recoverFailedIssue?: number; reviewFix?: ApprovedReviewFix; review?: ReviewIssueDelivery;
@@ -62,7 +63,8 @@ export type Claim = Remote & {
   recoveryDispatchAttempt?: string; interruptedDevelopment?: boolean;
   recoveredWorkerAttempts?: string[];
   reviewFix?: { from: string; state: "running" | "publishing" | "complete" | "failed"; pendingHead?: string; base?: string; repairId?: string;
-    testFiles?: string[]; retriedTests?: boolean; testFailureNote?: string; testCheckFailed?: boolean; replayedDraft?: FailedReviewDraft };
+    testFiles?: string[]; retriedTests?: boolean; testFailureNote?: string; testCheckFailed?: boolean; replayedDraft?: FailedReviewDraft;
+    replayedCandidate?: { sha256: string; digest: string; files: import("../execution/code-worker-protocol.mts").CandidateFile[] } };
   reviewTestFiles?: string[];
   reviewRepairs?: ReviewRepairDecision[];
   sourceHandoff?: { proof: SourceHandoff; finding: TicketSourceFinding };
@@ -108,6 +110,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   const jobs = new Set<Promise<void>>();
   const deliveries = new Set<number>();
   const reviewJobs = new Map<number, Promise<void>>();
+  const replayPreflights = new Set<number>();
   const reviewUnavailable = new Map<number, string>();
   let pending: { id: string; actor: string; task: Promise<void> } | undefined;
   let refreshing: Promise<void> | undefined;
@@ -354,9 +357,11 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       || (target.base && target.base !== fix.base)
       || !approved?.baseRevision || !qualityBindingCurrent(c.approval?.quality)
       || !scope || !fix.files.every(path => scope.includes(path)) || !permits(c.claimedBy)) return;
-    const supplemental = !authorized && fix.testFiles?.length ? repairFromApproval(tracker.repo, c, fix) : undefined;
-    if (fix.testFiles?.length && (!supplemental || !activeReviewScope(c) || !delivery.publishRepair)) return;
-    const repair = authorized?.repair ?? supplemental;
+    const replay = fix.repairId ? selectApprovedRepairReplay(c, fix, currentRepair(c)) : undefined;
+    if (fix.repairId && (!replay || replayPreflights.has(c.number))) return;
+    const supplemental = !authorized && !replay && fix.testFiles?.length ? repairFromApproval(tracker.repo, c, fix) : undefined;
+    if (fix.testFiles?.length && (!replay && !supplemental || !activeReviewScope(c) || !delivery.publishRepair)) return;
+    const repair = authorized?.repair ?? replay?.repair ?? supplemental;
     const autoCorrection = !!(authorized && retry && c.reviewFix?.repairId === repair?.id && c.reviewFix?.state === "failed"
       && c.reviewFix?.testCheckFailed && !c.reviewFix?.retriedTests && c.failure?.candidatePatch);
     const recorded = supplemental && c.reviewRepairs?.find(item => item.id === supplemental.id);
@@ -364,7 +369,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     const priorTestFailure = !!(fix.testFailureNote && recorded?.issue && supplemental && c.reviewFix?.from === fix.head
       && c.reviewFix.repairId === supplemental.id && c.reviewFix.state === "failed"
       && (c.reviewFix.testCheckFailed ?? delivery.legacyReviewTestFailure?.(subject(c.number), fix.head, supplemental.id)));
-    const replayDraft = priorTestFailure && c.reviewFix?.retriedTests && !c.reviewFix.replayedDraft ? fix.failedDraft : undefined;
+    const replayDraft = replay || priorTestFailure && c.reviewFix?.retriedTests && !c.reviewFix.replayedDraft ? fix.failedDraft : undefined;
     const repeatTests = priorTestFailure && !c.reviewFix?.retriedTests && !fix.failedDraft;
     if ((fix.testFailureNote && !repeatTests && !replayDraft)
       || (!authorized && c.reviewFix?.from === fix.head && !repeatLink && !repeatTests && !replayDraft)) return;
@@ -377,11 +382,14 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       ...(autoCorrection && c.failure?.isolation
         ? { retriedTests: true, testFailureNote: describeIsolationEvidence(c.failure.isolation) } : {}),
       ...((repeatTests || replayDraft) && fix.testFailureNote ? { retriedTests: true, testFailureNote: scrubAuditText(fix.testFailureNote) } : {}),
+      ...(replay ? { replayedCandidate: { sha256: replay.candidate.sha256, digest: replay.candidate.digest, files: replay.candidate.files } } : {}),
       ...(replayDraft ? { replayedDraft: replayDraft } : {}) };
     if (supplemental && !recorded) save({ ...c, reviewRepairs: [...(c.reviewRepairs ?? []),
       { id: supplemental.id, head: fix.head, decision: "approved", at: Date.now() }] }, "review-repair-maintainer-approved");
-    save({ ...(claims.get(c.number) ?? c), reviewFix: state },
+    const markStarted = () => save({ ...(claims.get(c.number) ?? c), reviewFix: state },
       replayDraft ? "review-fix-draft-replay-started" : repeatTests ? "review-fix-test-retry-started" : "review-fix-started");
+    if (replay) replayPreflights.add(c.number);
+    else markStarted();
     const current = () => claims.get(c.number) ?? c;
     let autoCorrectionNeeded = false;
     const verify = async () => {
@@ -391,16 +399,28 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       if (account.toLowerCase() !== c.account.toLowerCase() || !stillAssignee(c, issue)
         || !issue.pulls.some(item => item.number === fix.pull) || pull?.state !== "OPEN"
         || pull.head !== fix.head || pull.baseName !== fix.base
-        || (authorized && currentRepair(current())?.id !== authorized.repair.id)
+        || ((authorized || replay) && currentRepair(current())?.id !== repair?.id)
         || (supplemental && !activeReviewScope(current()))) {
         throw Error("PR 或原工单授权已变化。");
+      }
+      if (replay) {
+        const decision = current().reviewRepairs?.find(row => row.id === replay.repair.id && row.decision === "approved");
+        if (decision?.head !== fix.head || decision.issue !== replay.issue || decision.completedHead) throw Error("原修复授权已变化。");
+        await readPublishedRepair(replay.repair.batch, connection, replay.issue);
       }
       return pull.baseName;
     };
     const job = (async () => {
       try {
         const base = await verify();
-        if (repair) {
+        if (replay) {
+          // 只读预检断连尚未开工，不消耗候选；异步期间的授权与失败回执必须仍完全一致。
+          if (!isDeepStrictEqual(selectApprovedRepairReplay(current(), fix, currentRepair(current())), replay)) {
+            throw Error("固定候选恢复授权已变化。");
+          }
+          markStarted();
+        }
+        if (repair && !replay) {
           const issued = await delivery.publishRepair?.(repair.batch, connection, abort.signal, c.account);
           const issue = issued?.get("REPAIR");
           if (issue?.state !== "OPEN") throw Error("关联修复 Issue 未确认或已关闭。");
@@ -417,7 +437,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
             ? { previousCandidate: { patch: c.failure.candidatePatch, sha256: c.failure.candidatePatchDigest } } : {}),
           ...(autoCorrection && c.failure ? { previousFailure: c.failure } : {}),
           branch: target.branch, upstream: [], publisher: remote, reviewTarget: { ...target, base: fix.base },
-          ...(replayDraft && fix.testFiles ? { failedReviewDraft: { ...replayDraft, testFiles: fix.testFiles } } : {}),
+          ...(replayDraft && fix.testFiles ? { failedReviewDraft: { ...replayDraft, testFiles: fix.testFiles,
+            ...(replay ? { evidence: replay.candidate } : {}) } } : {}),
           ...(c.approval ? { flowId: c.approval.flowId, planVersion: c.approval.version } : {}),
           repairing: diagnostic => save(current(), "patch-repair", diagnostic),
         }, sessionId => save({ ...current(), sessionId }, "review-fix-connected"), abort.signal,
@@ -445,9 +466,10 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     })();
     jobs.add(job);
     void job.then(() => {
+      replayPreflights.delete(c.number);
       jobs.delete(job);
       if (autoCorrectionNeeded && !abort.signal.aborted) dispatchReviewFix(true);
-    }, () => jobs.delete(job));
+    }, () => { replayPreflights.delete(c.number); jobs.delete(job); });
   }
   async function develop(c: Claim, spec: DeliverySpec, upstream: string[], recoverCheckedHead?: string) {
     const connection = memberTrackers.get(c.claimedBy) ?? tracker;
