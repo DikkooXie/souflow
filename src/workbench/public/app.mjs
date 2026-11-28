@@ -556,8 +556,6 @@ function acceptResponse(requestId) {
 }
 
 function clearMemberState() {
-  // 身份边界使当时已发出的请求失效，包括仍在读取正文的响应。
-  latestResponse = requestNumber;
   promptBox.value = "";
   personalDeviceList.replaceChildren();
   drafts.clear();
@@ -569,6 +567,8 @@ function clearMemberState() {
 
 function rejectAuthentication(requestId) {
   if (!acceptResponse(requestId)) return;
+  // 登录失效后，先前发出的轮询不能恢复成员状态。
+  cycle += 1;
   clearMemberState();
   authenticationRequired = true;
   member = undefined;

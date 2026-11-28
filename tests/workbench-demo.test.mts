@@ -133,6 +133,23 @@ test("AC-3 同一成员保留草稿，切换成员或登出清空草稿", async 
   assert.equal(page.prompt.value, "");
 });
 
+test("AC-3 先返回的轮询切换成员，后返回的当前 401 清空身份", async () => {
+  const page = await loadWorkbenchPage();
+  const label = page.get("#member-label");
+  await page.take()(200, memberSnapshot("alice"));
+
+  const switched = page.poll();
+  const unauthorized = page.poll();
+  await switched(200, memberSnapshot("bob"));
+  assert.equal(label.textContent, "bob");
+  assert.equal(page.form.hidden, false);
+
+  await unauthorized(401);
+  assert.equal(label.textContent, "");
+  assert.equal(label.hidden, true);
+  assert.equal(page.form.hidden, true);
+});
+
 test("AC-3 迟到的轮询保留当前提交和新对话，当前 401 清理成员状态", async () => {
   const page = await loadWorkbenchPage();
   const label = page.get("#member-label");
