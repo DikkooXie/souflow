@@ -11,12 +11,13 @@ import type { PatchIssue } from "../execution/local-code-changes.mts";
 import type { DeliveryReviewReceipt } from "../planning/delivery-review.mts";
 import { qualityBindingCurrent, type QualityBinding, type TicketSourceFinding } from "../planning/dispatch-quality.mts";
 import type { ApprovedReviewFix } from "./approved-review-fix.mts";
-import { readRepairDecision, repairDecisionCard, repairFromReceipt } from "./delivery-review-repair.mts";
+import { readRepairDecision, repairDecisionCard, repairFromApproval, repairFromReceipt } from "./delivery-review-repair.mts";
 import type { ReviewIssueDelivery } from "./github-delivery-review.mts";
 import { type createPlannedIssuePublication, hasPublicationMarker } from "./planned-issue-publication.mts";
 
 export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; prepare: PrepareIssue; pollMs: number; conversation?: boolean;
   requireQuality?: boolean; recoverFailedIssue?: number; reviewFix?: ApprovedReviewFix; review?: ReviewIssueDelivery;
+  reviewFixes?: readonly ApprovedReviewFix[];
   publishRepair?: ReturnType<typeof createPlannedIssuePublication>;
   reviewScopeCurrent?: (claim: Claim) => boolean;
   failedWorkerAttempt?: (scope: WorkerFailureScope) => string | undefined;
@@ -42,7 +43,9 @@ export type Claim = Remote & {
   deliveryReviews?: { observed: string; receipt: DeliveryReviewReceipt }[];
   claimUncertain?: boolean;
   failure?: DeliveryFailure; retryCount?: number; retriedWorkerAttempt?: string; interruptedDevelopment?: boolean;
-  reviewFix?: { from: string; state: "running" | "publishing" | "complete" | "failed"; pendingHead?: string; base?: string; repairId?: string };
+  reviewFix?: { from: string; state: "running" | "publishing" | "complete" | "failed"; pendingHead?: string; base?: string; repairId?: string;
+    testFiles?: string[] };
+  reviewTestFiles?: string[];
   reviewRepairs?: ReviewRepairDecision[];
   sourceHandoff?: { proof: SourceHandoff; finding: TicketSourceFinding };
 };
@@ -206,6 +209,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
         checked: _checked, deliveryReviews: _reviews, reviewRepairs: _repairs, sourceHandoff: _sourceHandoff,
         observedIssueRevision: _issueRevision, observedReviewLink: _reviewLink, retriedWorkerAttempt: _retriedWorkerAttempt,
         interruptedDevelopment: _interruptedDevelopment, prepared: _prepared, attemptedCheckedRecovery: _attemptedCheckedRecovery,
+        reviewTestFiles: _reviewTestFiles,
         ...item }) => ({ ...item,
         ...(delivery ? { dependsOn: delivery.dependsOn, mode: "delivery" } : {}),
         ...(approval ? { flowId: approval.flowId } : {}),
@@ -286,6 +290,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       || !state.base || pull.baseName !== state.base || pull.number !== c.pull?.number) return;
     const reviewRepairs = state.repairId ? c.reviewRepairs?.map(item => item.id === state.repairId ? { ...item, completedHead: head } : item) : c.reviewRepairs;
     save({ ...c, target: { ...target, head, base: state.base }, pull, reviewFix: { ...state, state: "complete" },
+      ...(state.testFiles?.length ? { reviewTestFiles: [...new Set([...(c.reviewTestFiles ?? []), ...state.testFiles])] } : {}),
       ...(reviewRepairs ? { reviewRepairs } : {}) }, "review-fix-published");
   }
   function authorizedRepair(retry: boolean) {
@@ -302,21 +307,37 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   function dispatchReviewFix(retry = false) {
     if (!delivery?.conversation || jobs.size >= maxActive) return;
     const authorized = authorizedRepair(retry);
-    const fix = authorized?.repair.fix ?? delivery.reviewFix;
-    if (!fix) return;
+    if (authorized) startReviewFix(authorized.repair.fix, retry, authorized);
+    const configured = delivery.reviewFixes ?? (delivery.reviewFix ? [delivery.reviewFix] : []);
+    for (const fix of configured) {
+      if (jobs.size >= maxActive) break;
+      startReviewFix(fix, retry);
+    }
+  }
+  function startReviewFix(fix: ApprovedReviewFix, retry: boolean, authorized?: ReturnType<typeof authorizedRepair>) {
+    if (!delivery) return;
     const c = claims.get(fix.issue);
     const target = c?.target;
     const approved = c?.delivery;
     if (c?.phase !== "submitted" || !target || target.head !== fix.head || c.pull?.number !== fix.pull
       || (target.base && target.base !== fix.base)
-      || (!authorized && c.reviewFix?.from === fix.head) || !approved?.baseRevision || !qualityBindingCurrent(c.approval?.quality)
-      || !fix.files.every(path => approved.files.includes(path)) || !permits(c.claimedBy)) return;
+      || !approved?.baseRevision || !qualityBindingCurrent(c.approval?.quality)
+      || !fix.files.every(path => approved.files.includes(path) || c.reviewTestFiles?.includes(path)) || !permits(c.claimedBy)) return;
+    const supplemental = !authorized && fix.testFiles?.length ? repairFromApproval(tracker.repo, c, fix) : undefined;
+    if (fix.testFiles?.length && (!supplemental || !activeReviewScope(c) || !delivery.publishRepair)) return;
+    const repair = authorized?.repair ?? supplemental;
+    const recorded = supplemental && c.reviewRepairs?.find(item => item.id === supplemental.id);
+    const repeatLink = retry && supplemental && c.reviewFix?.repairId === supplemental.id && c.reviewFix.state === "failed" && !recorded?.issue;
+    if (!authorized && c.reviewFix?.from === fix.head && !repeatLink) return;
     const connection = memberTrackers.get(c.claimedBy) ?? tracker;
     const remote = publisher(connection);
     if (!remote?.checkoutPublished || !remote.updatePublished) return;
     const update = remote.updatePublished;
-    const state = { from: fix.head, state: "running" as const, ...(authorized ? { repairId: authorized.repair.id } : {}) };
-    save({ ...c, reviewFix: state }, "review-fix-started");
+    const state = { from: fix.head, state: "running" as const, ...(repair ? { repairId: repair.id } : {}),
+      ...(fix.testFiles ? { testFiles: fix.testFiles } : {}) };
+    if (supplemental && !recorded) save({ ...c, reviewRepairs: [...(c.reviewRepairs ?? []),
+      { id: supplemental.id, head: fix.head, decision: "approved", at: Date.now() }] }, "review-repair-maintainer-approved");
+    save({ ...(claims.get(c.number) ?? c), reviewFix: state }, "review-fix-started");
     const current = () => claims.get(c.number) ?? c;
     const verify = async () => {
       const [account, issue, pull] = await Promise.all([
@@ -325,7 +346,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       if (account.toLowerCase() !== c.account.toLowerCase() || !stillAssignee(c, issue)
         || !issue.pulls.some(item => item.number === fix.pull) || pull?.state !== "OPEN"
         || pull.head !== fix.head || pull.baseName !== fix.base
-        || (authorized && currentRepair(current())?.id !== authorized.repair.id)) {
+        || (authorized && currentRepair(current())?.id !== authorized.repair.id)
+        || (supplemental && !activeReviewScope(current()))) {
         throw Error("PR 或原工单授权已变化。");
       }
       return pull.baseName;
@@ -333,17 +355,18 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     const job = (async () => {
       try {
         const base = await verify();
-        if (authorized) {
-          const issued = await delivery.publishRepair?.(authorized.repair.batch, connection, abort.signal, c.account);
+        if (repair) {
+          const issued = await delivery.publishRepair?.(repair.batch, connection, abort.signal, c.account);
           const issue = issued?.get("REPAIR");
           if (issue?.state !== "OPEN") throw Error("关联修复 Issue 未确认或已关闭。");
           const latest = current();
-          const reviewRepairs = latest.reviewRepairs?.map(item => item.id === authorized.repair.id ? { ...item, issue: issue.number } : item) ?? [];
+          const reviewRepairs = latest.reviewRepairs?.map(item => item.id === repair.id ? { ...item, issue: issue.number } : item) ?? [];
           save({ ...latest, reviewRepairs }, "review-repair-linked");
           await verify();
         }
         const prepared = await delivery.prepare({
-          number: c.number, spec: { ...approved, files: fix.files, instructions: `只处理本轮评审要求。\n${fix.instructions}` },
+          number: c.number, spec: { ...approved, files: [...fix.files, ...(fix.testFiles ?? [])],
+            instructions: `只处理本轮评审要求。\n${fix.instructions}` },
           branch: target.branch, upstream: [], publisher: remote, reviewTarget: { ...target, base: fix.base },
           ...(c.approval ? { flowId: c.approval.flowId, planVersion: c.approval.version } : {}),
           repairing: diagnostic => save(current(), "patch-repair", diagnostic),
