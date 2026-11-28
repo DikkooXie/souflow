@@ -50,6 +50,7 @@ export type PrepareIssue = (input: {
   reviewTarget?: DeliveryTarget & { base: string };
   repairing?: (issue: PatchIssue) => void;
   workerProof?: Pick<CodeWork, "repo" | "issueRevision" | "plan">;
+  requireDevice?: true;
   recoverCheckedHead?: string;
   failedReviewDraft?: FailedReviewDraft & { testFiles: readonly string[]; evidence?: FailedReviewDraftEvidence | CandidateSnapshot };
   revalidateWorker?: (signal: AbortSignal) => Promise<void>;
@@ -198,8 +199,9 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
 }): PrepareIssue {
   const { root, image, model, timeoutMs, codexAccounts, workers, startTask = startCodexReadOnlyTask } = options;
   return async ({ number, flowId, planVersion, spec, branch, upstream, publisher, previousFailure, previousCandidate,
-    reviewTarget, repairing, workerProof, revalidateWorker, workerOffered, sourceHandoff, recoverCheckedHead, failedReviewDraft }, connected, signal, assigned) => {
+    reviewTarget, repairing, workerProof, requireDevice, revalidateWorker, workerOffered, sourceHandoff, recoverCheckedHead, failedReviewDraft }, connected, signal, assigned) => {
     const runOnDevice = !!(workers && workerProof && !reviewTarget);
+    if (requireDevice && !runOnDevice) throw new IssueDeliverySourcesChanged();
     const session = runOnDevice ? undefined : monitor.begin({
       title: `GitHub #${number}`, task: "开发与测试", ticketId: `#${number}`, flowId, ...(planVersion ? { planVersion } : {}),
     });

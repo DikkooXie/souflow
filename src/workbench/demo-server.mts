@@ -16,6 +16,7 @@ import { createIssueDispatch, IssueActionError, type Claim, type IssueDeliveryOp
 import { createGitHubDeliveryReviewer } from "./github-delivery-review.mts";
 import { readApprovedReviewFixes } from "./approved-review-fix.mts";
 import { readApprovedSourceRefresh } from "./approved-source-refresh.mts";
+import { readLegacyDeviceWait } from "./device-wait.mts";
 import { createPrePrAmendments, type PrePrAmendmentEvent } from "./pre-pr-amendment.mts";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
@@ -177,6 +178,9 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
         verifyIssue ?? createIssueVerifier(monitor, codexAccounts ? { codexAccounts } : {}),
         audit.record, dispatchConcurrency, memberTrackers, issueDelivery && {
           specs: issueDelivery.specs, pollMs: issueDelivery.pollMs, conversation: true, requireQuality: true,
+          executionMode: codeDevices?.size && remoteLink?.code ? "device" : "local",
+          hasIssueExecutionHistory: audit.hasIssueExecutionHistory,
+          ...(issueDelivery.recoverDeviceWait ? { recoverDeviceWait: issueDelivery.recoverDeviceWait } : {}),
           ...(issueDelivery.recoverFailedIssue ? { recoverFailedIssue: issueDelivery.recoverFailedIssue } : {}),
           ...(issueDelivery.recoverDeviceTestAttempts ? { recoverDeviceTestAttempts: issueDelivery.recoverDeviceTestAttempts } : {}),
           ...(issueDelivery.recoverCheckedHeads ? { recoverCheckedHeads: issueDelivery.recoverCheckedHeads } : {}),
@@ -184,7 +188,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           ...(issueDelivery.reviewFix ? { reviewFix: issueDelivery.reviewFix } : {}),
           ...(issueDelivery.reviewFixes ? { reviewFixes: issueDelivery.reviewFixes } : {}),
           ...(issueDelivery.sourceRefresh ? { sourceRefresh: issueDelivery.sourceRefresh } : {}),
-          ...(remoteLink?.code ? { hasWorkerAttempt: remoteLink.code.hasAttempt } : {}),
+          ...(remoteLink?.code ? { hasWorkerAttempt: remoteLink.code.hasAttempt, hasAnyWorkerAttempt: remoteLink.code.hasAnyAttempt } : {}),
           ...(publishIssues ? { publishRepair: publishIssues } : {}),
           ...(remoteLink?.code ? { failedWorkerAttempt: remoteLink.code.failedAttempt } : {}),
           inspectRepairCandidate: createRepairCandidateInspector({ ...issueDelivery, root: `${database}.artifacts/github` }),
@@ -771,10 +775,13 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const conversationDelivery = process.env.SOULFLOW_GITHUB_CONVERSATION_DELIVERY === "1";
   const reviewFix = process.env.SOULFLOW_GITHUB_REVIEW_FIX;
   const sourceRefresh = process.env.SOULFLOW_GITHUB_SOURCE_REFRESH;
+  const deviceWaitRecovery = process.env.SOULFLOW_GITHUB_RECOVER_DEVICE_WAIT;
   delete process.env.SOULFLOW_GITHUB_REVIEW_FIX;
   delete process.env.SOULFLOW_GITHUB_SOURCE_REFRESH;
+  delete process.env.SOULFLOW_GITHUB_RECOVER_DEVICE_WAIT;
   if (reviewFix !== undefined && !conversationDelivery) throw Error("PR 续修需要启用对话工单交付。");
   if (sourceRefresh !== undefined && !conversationDelivery) throw Error("源码复核续派需要启用对话工单交付。");
+  if (deviceWaitRecovery !== undefined && !conversationDelivery) throw Error("设备等待恢复需要启用对话工单交付。");
   const recoverFailedIssue = process.env.SOULFLOW_GITHUB_RECOVER_FAILED_ISSUE === undefined ? undefined
     : integerSetting("SOULFLOW_GITHUB_RECOVER_FAILED_ISSUE", 0, 1, Number.MAX_SAFE_INTEGER);
   if (recoverFailedIssue !== undefined && !conversationDelivery) throw Error("恢复旧工单前请启用对话工单交付。");
@@ -802,6 +809,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     recoverCheckedHeads,
     ...(reviewFix === undefined ? {} : { reviewFixes: readApprovedReviewFixes(reviewFix) }),
     ...(sourceRefresh === undefined ? {} : { sourceRefresh: readApprovedSourceRefresh(sourceRefresh) }),
+    ...(deviceWaitRecovery === undefined ? {} : { recoverDeviceWait: readLegacyDeviceWait(deviceWaitRecovery) }),
     pollMs: integerSetting("SOULFLOW_GITHUB_POLL_MS", 20_000, 5000, 3_600_000),
     timeoutMs: runtimeInteger("SOULFLOW_GITHUB_DELIVERY_TIMEOUT_MS", 1000, 3_600_000),
   } : undefined;
