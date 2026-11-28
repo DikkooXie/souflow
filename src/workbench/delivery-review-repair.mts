@@ -7,6 +7,7 @@ import { approvedReviewFixInstructionLimit, type ApprovedReviewFix } from "./app
 import type { DecisionCard } from "./demo-state.mts";
 import type { Claim } from "./issue-dispatch.mts";
 import { preparePlannedIssues, type PlannedIssueBatch } from "./planned-issue-publication.mts";
+import { activePrePrAmendment } from "./pre-pr-amendment.mts";
 
 const authorize = "授权创建修复 Issue 并续修";
 const decline = "拒绝本次续修";
@@ -21,6 +22,13 @@ const question = {
 
 export type ReviewRepair = { id: string; fix: ApprovedReviewFix; batch: PlannedIssueBatch };
 type RepairUnavailable = { reason: string };
+
+export function approvedRepairFiles(claim: Claim): string[] {
+  const amendment = activePrePrAmendment(claim);
+  const applied = amendment && claim.sourceRefresh?.state === "passed"
+    && claim.sourceRefresh.amendmentId === amendment.id && claim.sourceRefresh.revision === amendment.revision;
+  return [...new Set([...(claim.delivery?.files ?? []), ...(applied ? amendment.testFiles : []), ...(claim.reviewTestFiles ?? [])])];
+}
 
 export function readRepairDecision(input: unknown): "approved" | "declined" | undefined {
   const answer = readDecisionAnswers([question], input)?.authorization;
@@ -41,7 +49,7 @@ export function repairFromReceipt(repo: string, claim: Claim, receipt: DeliveryR
     ...receipt.requirements.criteria.filter(item => item.status === "block").map(item => `${item.criterion} · ${item.summary}`),
   ].map(line => scrubAuditText(line.replace(/[\r\n]+/g, " ")));
   if (!findings.length) return;
-  const scope = [...delivery.files, ...(claim.reviewTestFiles ?? [])];
+  const scope = approvedRepairFiles(claim);
   const instructions = findings.join("\n");
   if (instructions.length > approvedReviewFixInstructionLimit) return { reason: "复核问题超过单次续修的内容限制。请核对完整复核记录。" };
   const body = [

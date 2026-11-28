@@ -20,7 +20,7 @@ import { matchesSourceRefresh, type ApprovedSourceRefresh } from "./approved-sou
 import { activePrePrAmendment, amendedSpec, amendmentRecoveryBound, type ApprovedPrePrAmendment } from "./pre-pr-amendment.mts";
 import { createPrePrAmendmentAuthorization } from "./pre-pr-amendment-authorization.mts";
 import { queueWorkerRecovery } from "./worker-recovery.mts";
-import { readRepairDecision, repairDecisionCard, repairFromApproval, repairFromReceipt } from "./delivery-review-repair.mts";
+import { approvedRepairFiles, readRepairDecision, repairDecisionCard, repairFromApproval, repairFromReceipt } from "./delivery-review-repair.mts";
 import type { ReviewIssueDelivery } from "./github-delivery-review.mts";
 import { type createPlannedIssuePublication, hasPublicationMarker } from "./planned-issue-publication.mts";
 
@@ -349,10 +349,11 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     const c = claims.get(fix.issue);
     const target = c?.target;
     const approved = c?.delivery;
+    const scope = c && approvedRepairFiles(c);
     if (c?.phase !== "submitted" || !target || target.head !== fix.head || c.pull?.number !== fix.pull
       || (target.base && target.base !== fix.base)
       || !approved?.baseRevision || !qualityBindingCurrent(c.approval?.quality)
-      || !fix.files.every(path => approved.files.includes(path) || c.reviewTestFiles?.includes(path)) || !permits(c.claimedBy)) return;
+      || !scope || !fix.files.every(path => scope.includes(path)) || !permits(c.claimedBy)) return;
     const supplemental = !authorized && fix.testFiles?.length ? repairFromApproval(tracker.repo, c, fix) : undefined;
     if (fix.testFiles?.length && (!supplemental || !activeReviewScope(c) || !delivery.publishRepair)) return;
     const repair = authorized?.repair ?? supplemental;

@@ -19,7 +19,7 @@ import { checkoutReviewedIssueBase, createIssueDeveloper, type DeliveryFailure, 
   passingAcceptanceTests } from "../src/execution/issue-delivery.mts";
 import { type Claim, createIssueDispatch } from "../src/workbench/issue-dispatch.mts";
 import { createPlannedIssuePublication, type IssuePublication } from "../src/workbench/planned-issue-publication.mts";
-import { repairFromApproval, repairFromReceipt } from "../src/workbench/delivery-review-repair.mts";
+import { approvedRepairFiles, repairFromApproval, repairFromReceipt } from "../src/workbench/delivery-review-repair.mts";
 import { readApprovedReviewFix, readApprovedReviewFixes } from "../src/workbench/approved-review-fix.mts";
 import { readApprovedSourceRefresh } from "../src/workbench/approved-source-refresh.mts";
 
@@ -667,6 +667,14 @@ test("批准关联修复后安全回读建单结果，只续修同一 PR 并复�
   let stored: Claim = { ...original, pull, requestId: "approved", claimedBy: "member", account: "member", phase: "submitted", syncedAt: 0,
     target: { branch: "feat/47-original", head, base: "main" }, delivery: { ...spec, baseRevision: mergeBase },
     approval: { flowId: "flow", planId: "plan", version: 1, issueRevision: revision, quality } };
+  const testFiles = ["tests/receipt.test.mts", "tests/dispatch.test.mts"];
+  stored.sourceRefresh = { revision: mergeBase, state: "passed", amendmentId: "amendment" };
+  stored.prePrAmendments = [{ id: "amendment", actor: "member", flowId: "flow", requestId: "approved", issue: 47,
+    version: 1, issueRevision: revision, attemptId: "worker", blockedRevision: head, revision: mergeBase,
+    testFiles, validation: [], approvedAt: 1 }];
+  assert.deepEqual(approvedRepairFiles({ ...stored, claimedBy: "other" }), spec.files);
+  assert.deepEqual(approvedRepairFiles({ ...stored, sourceRefresh: { ...stored.sourceRefresh, state: "blocked" } }), spec.files);
+  assert.deepEqual(approvedRepairFiles({ ...stored, sourceRefresh: { ...stored.sourceRefresh, amendmentId: "other" } }), spec.files);
   const tracker: DeliveryTracker = {
     repo: "a/b", candidates: async () => [],
     async account() { return ++accountReads === 2 ? "other-account" : "member"; },
@@ -708,7 +716,7 @@ test("批准关联修复后安全回读建单结果，只续修同一 PR 并复�
       async prepare({ reviewTarget, spec: fix, number, branch, previousCandidate, previousFailure }) {
         assert.deepEqual(reviewTarget, { branch: "feat/47-original", head, base: "main" });
         assert.equal(number, 47);
-        assert.deepEqual(fix.files, spec.files);
+        assert.deepEqual(fix.files, [...spec.files, ...testFiles]);
         assert.match(fix.instructions, /两次数据库写入失败/);
         assert.equal(stored.reviewRepairs?.[0]?.issue, 66);
         prepareAttempts++;
@@ -744,7 +752,7 @@ test("批准关联修复后安全回读建单结果，只续修同一 PR 并复�
     const card = first.repairCards("member")[0];
     assert.ok(card);
     assert.match(card.prompt, /原工单 #47 · 原 PR #53/);
-    assert.match(card.prompt, /允许修改 src\/main.mts/);
+    assert.ok(card.prompt.includes(`允许修改 ${[...spec.files, ...testFiles].join("、")}`));
     assert.deepEqual(first.repairCards("other"), []);
     const answer = { authorization: "授权创建修复 Issue 并续修" };
     assert.equal(first.answerRepair(card.id, "other", answer), 409);
