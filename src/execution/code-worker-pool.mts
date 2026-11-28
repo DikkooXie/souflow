@@ -1,16 +1,17 @@
 import { randomUUID } from "node:crypto";
 import type { Checkpoint, RecordBusiness } from "../audit/activity-store.mts";
 import { legacyCodeEditFileBytes, readCodeWorkerConfig } from "../config/runtime.mts";
-import { contentDigest, type CodeOffer, type CodeReceipt, type CodeWork, validCodeWork,
+import { contentDigest, type CodeOffer, type CodeReceipt, type CodeWork, type WorkerFailureStage, validCodeWork,
   workerProtocolVersion } from "./code-worker-protocol.mts";
 import { IssueVerificationUncertain } from "./issue-verification.mts";
 
 type State = "offered" | CodeReceipt["phase"];
+export type WorkerFailureScope = Pick<CodeWork, "repo" | "issue" | "issueRevision" | "plan">;
 export type WorkerAttempt = {
   id: string; device: string; name: string; instance: string; repo: string; issue: number; revision: string;
   flowId: string; digest: string; issueRevision: string; state: State; assignedAt: number; updatedAt: number;
   plan: CodeWork["plan"]; weight: number; slots: number; assignedLoad: number;
-  receipt?: { digest: string; at: number; thread?: string; patch?: string };
+  receipt?: { digest: string; at: number; thread?: string; patch?: string; failureStage?: WorkerFailureStage };
 };
 type Device = { id: string; name: string; instance: string; repo: string; slots: number; ready: boolean; local?: boolean; editFileBytes?: number };
 type Ready = { device: Device; send: (offer?: CodeOffer) => void };
@@ -35,7 +36,8 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
       details: { action: state, repo, issue, revision, device, digest, assignedLoad, slots, at: now(),
         issueRevision: attempt.issueRevision, planVersion: attempt.plan.version, batchDigest: attempt.plan.batchDigest,
         direction: state === "offered" ? "to-device" : fromDevice ? "from-device" : "host",
-        ...(fromDevice && receipt ? { deviceAt: receipt.at, thread: receipt.thread, patch: receipt.patch } : {}) } })) return false;
+        ...(fromDevice && receipt ? { deviceAt: receipt.at, thread: receipt.thread, patch: receipt.patch,
+          failureStage: receipt.failureStage } : {}) } })) return false;
     attempts.set(id, attempt);
     return true;
   }
@@ -67,6 +69,14 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
   return {
     config,
     permits: (id: string) => allowed.has(id),
+    failedAttempt(scope: WorkerFailureScope) {
+      // 按持久化派发顺序检查最后一次。同一工单有更新的尝试时，不能凭旧回执再次派发。
+      const latest = [...attempts.values()].reverse().find(row =>
+        row.repo.toLowerCase() === scope.repo.toLowerCase() && row.issue === scope.issue);
+      if (latest?.state === "failed" && latest.receipt && latest.issueRevision === scope.issueRevision
+        && latest.plan.flowId === scope.plan.flowId && latest.plan.version === scope.plan.version
+        && latest.plan.flowDigest === scope.plan.flowDigest && latest.plan.batchDigest === scope.plan.batchDigest) return latest.id;
+    },
     async poll(device: Device, signal: AbortSignal) {
       if (!allowed.has(device.id) || closed || signal.aborted) return { status: 403 } as const;
       if (waiters.has(device.id)) return { status: 409 } as const;
@@ -116,7 +126,8 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
       if (!save({ ...attempt, state: receipt.phase, updatedAt: now(), receipt: { digest, at: receipt.at,
         ...("thread" in receipt ? { thread: receipt.thread } : attempt.receipt?.thread
           ? { thread: attempt.receipt.thread } : {}),
-        ...("patch" in receipt ? { patch: receipt.patch } : {}) } }, true)) return 503;
+        ...("patch" in receipt ? { patch: receipt.patch } : {}),
+        ...(receipt.phase === "failed" && receipt.failureStage ? { failureStage: receipt.failureStage } : {}) } }, true)) return 503;
       const current = online.get(device.id);
       if (current) current.at = now();
       if (receipt.phase === "started") active?.started(receipt.thread);

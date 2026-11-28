@@ -9,7 +9,7 @@ import { openActivityStore } from "../audit/activity-store.mts";
 import { codeEditFileBytes, type CodeWorkerConfig, loadLocalEnv, readCodeWorkerConfig, runtimeInteger, runtimeSetting } from "../config/runtime.mts";
 import { startCodexReadOnlyTask } from "../execution/codex-command-attempt.mts";
 import { contentDigest, readCodeOffer, readWorkerCapacity, workerDigest, workerId,
-  workerProtocolVersion, type CodeOffer, type CodeReceipt } from "../execution/code-worker-protocol.mts";
+  workerProtocolVersion, type CodeOffer, type CodeReceipt, type WorkerFailureStage } from "../execution/code-worker-protocol.mts";
 import { isolatedIssueCheck } from "../execution/issue-delivery.mts";
 import { applyCheckedCodeChanges, codeResultSchema, maxCodeProposalBytes, maxEdits, prepareCodeProposal,
   readEditableFile } from "../execution/local-code-changes.mts";
@@ -54,7 +54,7 @@ function connector(endpoint: URL, config: { id: string; key: string; certificate
 }
 
 async function doWork(offer: CodeOffer, root: string, image: string, timeoutMs: number, signal: AbortSignal,
-  publish: (receipt: ReceiptContent) => Promise<void>) {
+  publish: (receipt: ReceiptContent) => Promise<void>, enter: (stage: WorkerFailureStage) => void) {
   const work = offer.work;
   const target = await mkdtemp(join(root, "issue-"));
   const workspace = join(target, "source");
@@ -79,6 +79,7 @@ async function doWork(offer: CodeOffer, root: string, image: string, timeoutMs: 
     let output: string | undefined;
     let started: Promise<void> | undefined;
     const checked = await prepareCodeProposal(target, sources, async issue => {
+      enter("codex");
       signal.throwIfAborted();
       const attempt = startCodexReadOnlyTask({
         workspace, ...(model ? { model } : {}), localLoginOnly: true, disableWebSearch: true,
@@ -105,11 +106,15 @@ async function doWork(offer: CodeOffer, root: string, image: string, timeoutMs: 
         if (!started) throw Error("没有收到 Codex 会话确认。");
         await started;
         output = attempt.output();
+        enter("patch");
         return output;
       } finally { signal.removeEventListener("abort", stop); }
     });
+    enter("tests");
     await isolatedIssueCheck(workspace, image, timeoutMs, signal, true);
+    enter("patch");
     await applyCheckedCodeChanges(target, workspace, sources, checked);
+    enter("tests");
     await isolatedIssueCheck(workspace, image, timeoutMs, signal, false);
     if (output === undefined) throw Error("设备未生成补丁。");
     return { phase: "tested", output, patch: contentDigest(JSON.stringify(checked.changes)) } as const;
@@ -187,14 +192,16 @@ async function main() {
       const active = new Map<string, Promise<void>>();
       async function run(offer: CodeOffer) {
         let completed: ReceiptContent;
+        let failureStage: WorkerFailureStage = "checkout";
         await publish(offer, { phase: "accepted" });
         process.stdout.write(`已收到 GitHub #${offer.work.issue}。\n`);
         try {
           const deadline = AbortSignal.any([stop.signal, AbortSignal.timeout(timeoutMs)]);
-          completed = await doWork(offer, root, checkImage, timeoutMs, deadline, async detail => { await publish(offer, detail); });
+          completed = await doWork(offer, root, checkImage, timeoutMs, deadline,
+            async detail => { await publish(offer, detail); }, stage => { failureStage = stage; });
         } catch {
           stop.signal.throwIfAborted();
-          completed = { phase: "failed" };
+          completed = { phase: "failed", failureStage };
         }
         const phase = await publish(offer, completed);
         process.stdout.write(`GitHub #${offer.work.issue} ${phase === "tested" ? "本机检查已通过，结果已回传" : "未完成，已回报主机"}。\n`);
