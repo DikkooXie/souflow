@@ -93,12 +93,14 @@ input.on("line", line => {
       send({ id: message.id, result: { thread: { id: threadId }, model: scenario === "question-model-mismatch" ? "fixture" : message.params.model ?? "fixture" } });
       return;
     case "turn/start": {
-      if (scenario === "long-code-result" || scenario === "quality-result") {
+      if (scenario === "long-code-result" || scenario === "recovered-code-result" || scenario === "quality-result") {
         const text = scenario === "quality-result" ? process.argv[3] : JSON.stringify({
           report: "代码替换", edits: [{ path: "src/demo.mts", before: "original", after: "x".repeat(18_000) }],
         });
         const item = { type: "agentMessage", phase: "final_answer", text };
         send({ id: message.id, result: { turn: { id: turnId } } },
+          ...(scenario === "recovered-code-result" ? [{ method: "item/completed", params: { threadId, turnId,
+            item: { ...item, text: "x".repeat(320_001) } } }] : []),
           { method: "item/completed", params: { threadId, turnId, item } },
           { method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed" } } });
         return;

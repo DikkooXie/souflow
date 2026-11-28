@@ -18,10 +18,11 @@ const digest = (bytes: string | Buffer) => createHash("sha256").update(bytes).di
 const gitFileMode = (mode: number) => (mode & 0o100) ? 0o100755 : 0o100644;
 type PatchFile = { path: string; before: string; after: string; mode: number };
 export type LocalCodePatch = { patchSha256: string; changes: PatchFile[] };
-type PatchRejectionReason = "format" | "scope" | "redacted" | "match" | "size" | "empty";
+type PatchRejectionReason = "format" | "scope" | "redacted" | "match" | "size" | "empty" | "apply";
 export type PatchIssue = {
   code: "output-missing" | "output-too-large" | "json" | "envelope" | "edit-count" | "edit-fields"
-    | "unauthorized-file" | "redaction-marker" | "anchor-missing" | "anchor-ambiguous" | "file-size" | "patch-size" | "no-change";
+    | "unauthorized-file" | "redaction-marker" | "anchor-missing" | "anchor-ambiguous" | "file-size" | "patch-size" | "no-change"
+    | "workspace-changed" | "apply-failed" | "prepare-failed";
   edit?: number;
   count?: number;
   bytes?: number;
@@ -49,6 +50,9 @@ export const codeResultSchema = {
 
 function codeEdits(output: string | undefined, sources: EditableSources) {
   if (!output?.trim()) throw new PatchRejection("format", { code: "output-missing" }, "未收到结构化补丁。");
+  if (Buffer.byteLength(output) > maxCodeProposalBytes) {
+    throw new PatchRejection("size", { code: "output-too-large" }, "补丁回复超过接收容量。");
+  }
   // 仅解开完整的单个 JSON 代码块，禁止从任意说明文字提取局部补丁。
   const fenced = /^\s*```(?:json)?[ \t]*\r?\n([\s\S]+)\r?\n```[ \t]*\s*$/i.exec(output);
   let parsed: unknown;
@@ -184,7 +188,9 @@ export async function applyCheckedCodeChanges(target: string, workspace: string,
   const { files, proposed, patch, changes } = checked;
   for (const path of files) {
     const current = await readEditableFile(workspace, path);
-    if (current.content !== sources.get(path)?.content) throw Error("工作区内容在执行期间发生变化。");
+    if (current.content !== sources.get(path)?.content) {
+      throw new PatchRejection("apply", { code: "workspace-changed" }, "工作区内容在执行期间发生变化。");
+    }
   }
   for (const path of files) await writeFile(join(workspace, path), proposed.get(path) ?? "");
   const patchPath = join(target, "changes.patch");

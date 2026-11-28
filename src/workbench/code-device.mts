@@ -9,12 +9,13 @@ import { openActivityStore } from "../audit/activity-store.mts";
 import { codeEditFileBytes, type CodeWorkerConfig, loadLocalEnv, readCodeWorkerConfig, runtimeInteger, runtimeSetting } from "../config/runtime.mts";
 import { probeCodeDeviceLogin } from "../execution/code-device-login.mts";
 import { startCodexReadOnlyTask } from "../execution/codex-command-attempt.mts";
-import { contentDigest, readCodeOffer, readWorkerCapacity, workerDigest, workerId,
+import { compactCodeFailure, contentDigest, readCodeOffer, readWorkerCapacity, workerDigest, workerId,
   workerProtocolVersion, type CodeOffer, type CodeReceipt, type WorkerFailureStage } from "../execution/code-worker-protocol.mts";
 import { isolatedIssueCheck, IssueDeliveryFailed } from "../execution/issue-delivery.mts";
 import { applyCheckedCodeChanges, codeResultSchema, maxCodeProposalBytes, maxEdits, prepareCodeProposal,
   readEditableFile } from "../execution/local-code-changes.mts";
 import { lockWorkbench } from "./recovery.mts";
+import { createPatchOutputGuard, patchFailureDiagnostic, type PatchDiagnostic } from "../execution/patch-diagnostics.mts";
 
 const exec = promisify(execFile);
 type ReceiptContent = CodeReceipt extends infer Receipt ? Receipt extends CodeReceipt ? Omit<Receipt, "id" | "digest" | "at"> : never : never;
@@ -56,7 +57,8 @@ function connector(endpoint: URL, config: { id: string; key: string; certificate
 }
 
 async function doWork(offer: CodeOffer, root: string, image: string, timeoutMs: number, signal: AbortSignal,
-  publish: (receipt: ReceiptContent) => Promise<void>, enter: (stage: WorkerFailureStage) => void) {
+  publish: (receipt: ReceiptContent) => Promise<void>, enter: (stage: WorkerFailureStage) => void,
+  patchState: { diagnostics: PatchDiagnostic[]; attempt: 1 | 2; applying: boolean }) {
   const work = offer.work;
   const target = await mkdtemp(join(root, "issue-"));
   const workspace = join(target, "source");
@@ -81,11 +83,14 @@ async function doWork(offer: CodeOffer, root: string, image: string, timeoutMs: 
     let output: string | undefined;
     let started: Promise<void> | undefined;
     const checked = await prepareCodeProposal(target, sources, async issue => {
+      patchState.attempt = issue ? 2 : 1;
       enter("codex");
       signal.throwIfAborted();
+      const outputGuard = createPatchOutputGuard();
       const attempt = startCodexReadOnlyTask({
         workspace, ...(model ? { model } : {}), localLoginOnly: true, disableWebSearch: true,
         outputMaxBytes: maxCodeProposalBytes, outputSchema: codeResultSchema,
+        onOutputOverflow: outputGuard.observe,
         untrustedContext: work.previousCandidatePatch
           ? JSON.stringify({ ...JSON.parse(work.context), previousCandidatePatch: work.previousCandidatePatch }) : work.context,
         onEvent() {},
@@ -113,12 +118,13 @@ async function doWork(offer: CodeOffer, root: string, image: string, timeoutMs: 
         await started;
         output = attempt.output();
         enter("patch");
-        return output;
+        return outputGuard.read(output);
       } finally { signal.removeEventListener("abort", stop); }
-    });
+    }, issue => { patchState.diagnostics.push({ ...issue, attempt: 1 }); });
     enter("dependencies");
     await isolatedIssueCheck(workspace, image, timeoutMs, signal, true);
     enter("patch");
+    patchState.applying = true;
     const applied = await applyCheckedCodeChanges(target, workspace, sources, checked);
     enter("tests");
     try { await isolatedIssueCheck(workspace, image, timeoutMs, signal, false); }
@@ -133,7 +139,8 @@ async function doWork(offer: CodeOffer, root: string, image: string, timeoutMs: 
       throw error;
     }
     if (output === undefined) throw Error("设备未生成补丁。");
-    return { phase: "tested", output, patch: contentDigest(JSON.stringify(checked.changes)) } as const;
+    return { phase: "tested", output, patch: contentDigest(JSON.stringify(checked.changes)),
+      ...(patchState.diagnostics.length ? { patchDiagnostics: patchState.diagnostics } : {}) } as const;
   } finally {
     await rm(target, { recursive: true, force: true });
   }
@@ -226,7 +233,7 @@ async function main() {
         const instance = state.instance;
         // 超限是确定性失败，回报简短状态，避免在断线重试循环里反复发送。
         if (Buffer.byteLength(JSON.stringify({ instance, receipt })) > limits.messageBytes) {
-          receipt = { ...base, phase: "failed" };
+          receipt = compactCodeFailure(receipt);
         }
         while (!stop.signal.aborted) {
           const result = await send("receipt", { instance, receipt }, stop.signal).catch(() => undefined);
@@ -248,16 +255,19 @@ async function main() {
       const active = new Map<string, Promise<void>>();
       async function run(offer: CodeOffer) {
         let completed: ReceiptContent;
-        let failureStage: WorkerFailureStage = "checkout";
+        const state: { failureStage: WorkerFailureStage } = { failureStage: "checkout" };
+        const patchState = { diagnostics: [] as PatchDiagnostic[], attempt: 1 as 1 | 2, applying: false };
         await publish(offer, { phase: "accepted" });
         process.stdout.write(`已收到 GitHub #${offer.work.issue}。\n`);
         try {
           const deadline = AbortSignal.any([stop.signal, AbortSignal.timeout(timeoutMs)]);
           completed = await doWork(offer, root, checkImage, timeoutMs, deadline,
-            async detail => { await publish(offer, detail); }, stage => { failureStage = stage; });
+            async detail => { await publish(offer, detail); }, stage => { state.failureStage = stage; }, patchState);
         } catch (error) {
           stop.signal.throwIfAborted();
-          completed = { phase: "failed", failureStage,
+          if (state.failureStage === "patch") patchState.diagnostics.push(patchFailureDiagnostic(error, patchState.attempt, patchState.applying));
+          completed = { phase: "failed", failureStage: state.failureStage,
+            ...(patchState.diagnostics.length ? { patchDiagnostics: patchState.diagnostics } : {}),
             ...(error instanceof IssueDeliveryFailed && error.failure.isolation ? { isolation: error.failure.isolation } : {}),
             ...(error instanceof IssueDeliveryFailed && error.failure.candidateDigest
               ? { candidateDigest: error.failure.candidateDigest, candidateFiles: error.failure.candidateFiles } : {}),

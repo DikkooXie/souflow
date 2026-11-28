@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { startCodexReadOnlyTask } from "../src/execution/codex-command-attempt.mts";
+import { createPatchOutputGuard } from "../src/execution/patch-diagnostics.mts";
 import { codeResultSchema, maxCodeProposalBytes, maxEdits, type PatchIssue, PatchRejection,
   prepareCodeProposal } from "../src/execution/local-code-changes.mts";
 
@@ -38,6 +39,24 @@ test("代码回复超过 16 KiB 时完整接收，超出独立容量时保留安
   const applied = await prepareCodeProposal(await patchWorkspace(t), sources, async () => patch.output());
   assert.equal(applied.proposed.get(path)?.length, 18_015);
   assert.equal(patch.overflow(), undefined);
+});
+
+test("#137 正常 Codex 回复的 undefined 超限通知仍进入实际替换校验", async t => {
+  const fixture = fileURLToPath(new URL("./fixtures/codex-app-server.mjs", import.meta.url));
+  for (const scenario of ["long-code-result", "recovered-code-result"]) {
+    const guard = createPatchOutputGuard();
+    const notices: (number | undefined)[] = [];
+    const attempt = startCodexReadOnlyTask({ command: [process.execPath, fixture, scenario],
+      workspace: process.cwd(), prompt: "验证正常补丁", outputMaxBytes: maxCodeProposalBytes,
+      outputSchema: codeResultSchema, onEvent() {}, onOutputOverflow(bytes) { notices.push(bytes); guard.observe(bytes); } });
+    t.after(attempt.close);
+    assert.equal(await attempt.finished, "completed");
+    assert.deepEqual(notices, scenario === "long-code-result" ? [undefined] : [maxCodeProposalBytes + 1, undefined]);
+    const checked = await prepareCodeProposal(await patchWorkspace(t), sources, async () => guard.read(attempt.output()));
+    assert.equal(checked.proposed.get(path)?.length, 18_015);
+    guard.observe(maxCodeProposalBytes + 1);
+    assert.throws(() => guard.read(attempt.output()), (error: unknown) => error instanceof PatchRejection && error.issue.code === "output-too-large");
+  }
 });
 
 test("可修正的补丁仅重新生成一次，修正前没有源码写入", async t => {

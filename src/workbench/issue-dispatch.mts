@@ -8,6 +8,7 @@ import type { AccountAssignment } from "../execution/codex-account-dispatch.mts"
 import type { WorkerFailureScope } from "../execution/code-worker-pool.mts";
 import type { WorkerFailureStage } from "../execution/code-worker-protocol.mts";
 import { describeIsolationEvidence } from "../execution/isolation-evidence.mts";
+import { describePatchDiagnostics, type PatchDiagnostic } from "../execution/patch-diagnostics.mts";
 import type { SourceHandoff, SourceProducer } from "../execution/dependency-source-handoff.mts";
 import { IssueDeliveryFailed, IssueDeliverySourcesChanged, type CheckedIssue, type DeliveryFailure, type DeliverySpec, type DeliveryTarget, type PreparedDelivery, type PrepareIssue } from "../execution/issue-delivery.mts";
 import { IssueVerificationUncertain, type VerifyIssue } from "../execution/issue-verification.mts";
@@ -30,6 +31,7 @@ export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; p
   publishRepair?: ReturnType<typeof createPlannedIssuePublication>;
   reviewScopeCurrent?: (claim: Claim) => boolean;
   failedWorkerAttempt?: (scope: WorkerFailureScope) => { id: string; failureStage?: WorkerFailureStage;
+    patchDiagnostics?: PatchDiagnostic[];
     isolation?: import("../execution/isolation-evidence.mts").IsolationEvidence; candidateDigest?: string;
     candidateFiles?: import("../execution/code-worker-protocol.mts").CandidateFile[]; candidatePatch?: string;
     candidatePatchDigest?: string } | undefined;
@@ -72,6 +74,7 @@ const phases = { claiming: "正在认领", waiting: "等待上游 PR 合并", ch
 const stageNames = { preflight: "工单状态核对", checkout: "工作区准备", codex: "Codex 运行", dependencies: "依赖安装",
   patch: "补丁校验与应用", tests: "隔离检查", commit: "生成本地提交", publish: "远端发布", legacy: "旧版执行", device: "设备执行" };
 const reasonNames = { unavailable: "暂无更细的失败记录", format: "替换格式无效", scope: "涉及未授权文件", redacted: "涉及已脱敏字段",
+  apply: "补丁应用失败",
   match: "替换原文无法唯一定位", size: "文件大小超出边界", empty: "没有实际代码差异", "check-failed": "质量命令退出失败",
   "device-failed": "执行设备已确认失败" };
 
@@ -213,6 +216,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     const attempt = scope && delivery.failedWorkerAttempt(scope);
     if (!attempt) return c;
     const failure: DeliveryFailure = { stage: "device", reason: "device-failed",
+      ...(attempt.patchDiagnostics ? { patchDiagnostics: attempt.patchDiagnostics } : {}),
       ...(attempt.failureStage ? { workerStage: attempt.failureStage } : {}), ...(attempt.isolation ? { isolation: attempt.isolation } : {}),
       ...(attempt.candidateDigest ? { candidateDigest: attempt.candidateDigest, candidateFiles: attempt.candidateFiles } : {}),
       ...(attempt.candidatePatch ? { candidatePatch: attempt.candidatePatch, candidatePatchDigest: attempt.candidatePatchDigest } : {}) };
@@ -271,8 +275,10 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
         ...(delivery ? { dependsOn: delivery.dependsOn, mode: "delivery" } : {}),
         ...(approval ? { flowId: approval.flowId } : {}),
         ...(failure ? { failureMessage: `${stageNames[failure.workerStage ?? failure.stage]} · ${reasonNames[failure.reason]}`,
-          ...(failure.isolation ? { failureEvidence: {
-            summary: describeIsolationEvidence(failure.isolation), diagnostics: failure.isolation.diagnostics ?? [],
+          ...(failure.isolation || failure.patchDiagnostics ? { failureEvidence: {
+            summary: [failure.isolation && describeIsolationEvidence(failure.isolation),
+              failure.patchDiagnostics && describePatchDiagnostics(failure.patchDiagnostics)].filter(Boolean).join("；"),
+            diagnostics: failure.isolation?.diagnostics ?? [],
             ...(failure.candidateDigest ? { candidateDigest: failure.candidateDigest } : {}),
             ...(failure.candidateFiles ? { candidateFiles: failure.candidateFiles.map(file => ({ path: file.path,
               before: file.before, after: file.after, mode: file.mode })) } : {}),

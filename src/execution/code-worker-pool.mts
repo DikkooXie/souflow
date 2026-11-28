@@ -5,6 +5,7 @@ import { contentDigest, type CandidateFile, type CodeOffer, type CodeReceipt, ty
   workerProtocolVersion } from "./code-worker-protocol.mts";
 import type { IsolationEvidence } from "./isolation-evidence.mts";
 import { IssueVerificationUncertain } from "./issue-verification.mts";
+import { describePatchDiagnostics, type PatchDiagnostic } from "./patch-diagnostics.mts";
 
 type State = "offered" | CodeReceipt["phase"] | "cancelled";
 export type WorkerFailureScope = Pick<CodeWork, "repo" | "issue" | "issueRevision" | "plan">;
@@ -13,11 +14,12 @@ export type WorkerAttempt = {
   flowId: string; digest: string; issueRevision: string; state: State; assignedAt: number; updatedAt: number;
   plan: CodeWork["plan"]; weight: number; slots: number; assignedLoad: number; files: CodeWork["files"];
   receipt?: { digest: string; at: number; thread?: string; patch?: string; failureStage?: WorkerFailureStage;
+    patchDiagnostics?: PatchDiagnostic[];
     isolation?: IsolationEvidence; candidateDigest?: string; candidateFiles?: CandidateFile[]; candidatePatch?: string; candidatePatchDigest?: string };
 };
 type Device = { id: string; name: string; instance: string; repo: string; slots: number; ready: boolean; local?: boolean; editFileBytes?: number };
 type Ready = { device: Device; send: (offer?: CodeOffer) => void };
-type Running = { offer: CodeOffer; settled: (receipt: CodeReceipt) => void; started: (thread: string) => void; interrupt: () => void;
+type Running = { offer: CodeOffer; settled: (receipt: CodeReceipt) => void; started: (thread: string) => void; startedReceipt?: string; interrupt: () => void;
   verifyCandidate?: (receipt: Extract<CodeReceipt, { phase: "failed" }>) => boolean };
 const unfinished = (state: State) => state === "offered" || state === "accepted" || state === "started";
 const supportsFiles = (device: Device, work: CodeWork) =>
@@ -41,6 +43,8 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
         direction: state === "offered" ? "to-device" : fromDevice ? "from-device" : "host",
         ...(fromDevice && receipt ? { deviceAt: receipt.at, thread: receipt.thread, patch: receipt.patch,
           failureStage: receipt.failureStage, isolation: receipt.isolation, candidateDigest: receipt.candidateDigest,
+          patchDiagnostics: receipt.patchDiagnostics,
+          ...(receipt.patchDiagnostics ? { patchDiagnosticSummary: describePatchDiagnostics(receipt.patchDiagnostics) } : {}),
           candidateFiles: receipt.candidateFiles, candidatePatchDigest: receipt.candidatePatchDigest } : {}) } })) return false;
     attempts.set(id, attempt);
     return true;
@@ -88,6 +92,7 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
       const latest = latestForScope(scope);
       if (latest?.state === "failed" && latest.receipt) return { id: latest.id,
         ...(latest.receipt.failureStage ? { failureStage: latest.receipt.failureStage } : {}),
+        ...(latest.receipt.patchDiagnostics ? { patchDiagnostics: latest.receipt.patchDiagnostics } : {}),
         ...(latest.receipt.isolation ? { isolation: latest.receipt.isolation } : {}),
         ...(latest.receipt.candidateDigest ? { candidateDigest: latest.receipt.candidateDigest } : {}),
         ...(latest.receipt.candidateFiles ? { candidateFiles: latest.receipt.candidateFiles } : {}),
@@ -138,8 +143,14 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
           || (unfinished(attempt.state) && !running.has(attempt.id))) return 410;
       const digest = contentDigest(JSON.stringify(receipt));
       const active = running.get(attempt.id);
+      const notifyStarted = () => {
+        if (receipt.phase !== "started" || !active || active.startedReceipt === digest) return;
+        // 业务回调可能写库失败；成功返回后才确认，重放仍可补齐尚未成功的开工通知。
+        active.started(receipt.thread);
+        active.startedReceipt = digest;
+      };
       if (attempt.receipt?.digest === digest) {
-        if (receipt.phase === "started") active?.started(receipt.thread);
+        notifyStarted();
         return 200;
       }
       const permitted = attempt.state === "offered" ? ["accepted", "declined", "interrupted"]
@@ -156,6 +167,7 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
         ...("thread" in receipt ? { thread: receipt.thread } : attempt.receipt?.thread
           ? { thread: attempt.receipt.thread } : {}),
         ...("patch" in receipt ? { patch: receipt.patch } : {}),
+        ...("patchDiagnostics" in receipt && receipt.patchDiagnostics ? { patchDiagnostics: receipt.patchDiagnostics } : {}),
         ...(receipt.phase === "failed" && receipt.failureStage ? { failureStage: receipt.failureStage } : {}),
         ...(receipt.phase === "failed" && receipt.isolation ? { isolation: receipt.isolation } : {}),
         ...(receipt.phase === "failed" && receipt.candidateDigest ? { candidateDigest: receipt.candidateDigest,
@@ -164,7 +176,7 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
           candidatePatchDigest: receipt.candidatePatchDigest } : {}) } }, true)) return 503;
       const current = online.get(device.id);
       if (current) current.at = now();
-      if (receipt.phase === "started") active?.started(receipt.thread);
+      notifyStarted();
       if (!unfinished(receipt.phase)) active?.settled(receipt);
       changed();
       return 200;
@@ -248,9 +260,10 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
         })),
         attempts: rows.filter((attempt, index) => unfinished(attempt.state) || index >= rows.length - config.recentAttempts)
           .map(({ instance: _instance, ...attempt }) => {
-            if (!attempt.receipt?.candidatePatch) return attempt;
+            if (!attempt.receipt) return { ...attempt, patchDiagnosticSummary: undefined };
             const { candidatePatch: _candidatePatch, ...receipt } = attempt.receipt;
-            return { ...attempt, receipt };
+            return { ...attempt, receipt,
+              ...(receipt.patchDiagnostics ? { patchDiagnosticSummary: describePatchDiagnostics(receipt.patchDiagnostics) } : {}) };
           }),
       };
     },

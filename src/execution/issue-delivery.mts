@@ -18,6 +18,7 @@ import type { DispatchMonitor } from "./dispatch-monitor.mts";
 import { IssueVerificationUncertain } from "./issue-verification.mts";
 import type { CodeWorkerPool } from "./code-worker-pool.mts";
 import { contentDigest, type CodeWork, type WorkerFailureStage } from "./code-worker-protocol.mts";
+import type { PatchDiagnostic } from "./patch-diagnostics.mts";
 import { applyCheckedCodeChanges, codeResultSchema, deliveryPath, maxCodeProposalBytes, maxEdits, type PatchIssue,
   PatchRejection, prepareCodeProposal, readEditableFile } from "./local-code-changes.mts";
 
@@ -30,8 +31,9 @@ export type CheckedIssue = { head: string; passingTests: string[] };
 export type PreparedDelivery = DeliveryTarget & { workspace: string; base: string; executionRevision?: string; checked?: CheckedIssue };
 export type DeliveryFailure = {
   stage: "preflight" | "checkout" | "codex" | "dependencies" | "patch" | "tests" | "commit" | "publish" | "legacy" | "device";
-  reason: "unavailable" | "format" | "scope" | "redacted" | "match" | "size" | "empty" | "check-failed" | "device-failed";
+  reason: "unavailable" | "format" | "scope" | "redacted" | "match" | "size" | "empty" | "apply" | "check-failed" | "device-failed";
   patchIssue?: PatchIssue;
+  patchDiagnostics?: PatchDiagnostic[];
   workerStage?: WorkerFailureStage;
   isolation?: IsolationEvidence;
   candidateDigest?: string;
@@ -101,6 +103,7 @@ const retryInstruction = {
   unavailable: "恢复旧工单时，优先用较短且唯一的原文锚点；逐字复制 before，按顺序考虑每次替换后的内容，并核对既有测试契约。",
   scope: "",
   redacted: "",
+  apply: "",
 } satisfies Record<DeliveryFailure["reason"], string>;
 
 export { IssueDeliverySourcesChanged };
@@ -289,6 +292,7 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
           !!receipt.candidatePatch && !!receipt.candidateFiles
             && verifyCandidatePatch(editable, receipt.candidateFiles, receipt.candidatePatch), workerOffered);
         if (result.phase === "failed") throw new IssueDeliveryFailed({ stage: "device", reason: "device-failed",
+          ...(result.patchDiagnostics ? { patchDiagnostics: result.patchDiagnostics } : {}),
           ...(result.failureStage ? { workerStage: result.failureStage } : {}), ...(result.isolation ? { isolation: result.isolation } : {}),
           ...(result.candidateDigest ? { candidateDigest: result.candidateDigest, candidateFiles: result.candidateFiles } : {}),
           ...(result.candidatePatch ? { candidatePatch: result.candidatePatch, candidatePatchDigest: result.candidatePatchDigest } : {}) });
