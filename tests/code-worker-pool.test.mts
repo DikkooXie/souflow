@@ -223,11 +223,15 @@ test("AC-1、AC-2、AC-3 最终 tested 回执同实例原样重放返回 200，�
   };
   assertTerminalUnchanged();
 
-  assert.equal(pool.receipt(first, tested), 200);
-  assertTerminalUnchanged();
+  await t.test("AC-2 同实例原样重放返回 200，保留完整终态及两类写入次数", () => {
+    assert.equal(pool.receipt(first, tested), 200);
+    assertTerminalUnchanged();
+  });
 
-  assert.equal(pool.receipt({ ...first, instance: `${first.instance}-different` }, tested), 409);
-  assertTerminalUnchanged();
+  await t.test("AC-3 仅替换实例后重放返回 409，保留完整终态及两类写入次数", () => {
+    assert.equal(pool.receipt({ ...first, instance: `${first.instance}-different` }, tested), 409);
+    assertTerminalUnchanged();
+  });
 });
 
 function database() {
