@@ -1,4 +1,5 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 import { randomUUID, X509Certificate } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { request } from "node:https";
@@ -123,26 +124,103 @@ async function doWork(offer: CodeOffer, root: string, image: string, timeoutMs: 
   }
 }
 
-async function main() {
-  loadLocalEnv();
-  const limits = readCodeWorkerConfig();
-  const configPath = process.argv[2] ?? runtimeSetting("SOULFLOW_CODE_WORKER_ENROLLMENT_FILE");
-  if (process.argv.length > 3 || !configPath) throw Error("请通过 SOULFLOW_CODE_WORKER_ENROLLMENT_FILE 指定设备接入文件。");
+async function codexReady(signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return false;
+  return new Promise(resolve => {
+    const server = spawn("codex", ["app-server"], { signal, stdio: ["pipe", "pipe", "ignore"] });
+    const lines = createInterface({ input: server.stdout });
+    let settled = false;
+    const finish = (ready: boolean) => {
+      if (settled) return;
+      settled = true;
+      lines.close();
+      server.stdin.destroy();
+      server.kill();
+      resolve(ready);
+    };
+    const send = (message: object) => server.stdin.write(`${JSON.stringify(message)}\n`);
+    server.once("error", () => finish(false));
+    server.once("close", () => finish(false));
+    server.stdin.on("error", () => finish(false));
+    lines.on("line", line => {
+      try {
+        const reply = JSON.parse(line);
+        if (reply?.id === 1) {
+          if (reply.error || !reply.result) { finish(false); return; }
+          send({ method: "initialized" });
+          send({ id: 2, method: "account/read", params: { refreshToken: false } });
+        } else if (reply?.id === 2) {
+          finish(!reply.error && reply.result?.account?.type === "chatgpt");
+        }
+      } catch {
+        finish(false);
+      }
+    });
+    send({ id: 1, method: "initialize", params: { clientInfo: { name: "souflow-code-device", version: String(workerProtocolVersion) } } });
+  });
+}
+
+async function readEnrollment(configPath: string | undefined) {
+  if (!configPath) throw Error("请通过 SOULFLOW_CODE_WORKER_ENROLLMENT_FILE 指定设备接入文件。");
   const file = resolve(configPath);
   const config = JSON.parse(await readFile(file, "utf8"));
+  if (typeof config?.endpoint !== "string" || typeof config.id !== "string" ||
+      typeof config.key !== "string" || typeof config.certificate !== "string") throw Error("设备接入文件无效。");
   const endpoint = new URL(config.endpoint);
   if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || endpoint.pathname !== "/" ||
       endpoint.search || endpoint.hash || !workerId.test(config.id) || !workerDigest.test(config.key)) throw Error("设备接入文件无效。");
   const certificate = new X509Certificate(config.certificate).toString();
-  await chmod(file, 0o600);
+  return { file, endpoint, id: config.id as string, key: config.key as string, certificate };
+}
+
+function readCapacity(limits: CodeWorkerConfig) {
   const repo = process.env.SOULFLOW_CODE_WORKER_REPO?.trim();
-  const image = process.env.SOULFLOW_GITHUB_CHECK_IMAGE?.trim();
   const slots = runtimeInteger("SOULFLOW_CODE_WORKER_SLOTS", 1, limits.maxSlots);
-  const timeoutMs = runtimeInteger("SOULFLOW_GITHUB_DELIVERY_TIMEOUT_MS", 1000, 3_600_000);
-  const capacity = readWorkerCapacity({ version: workerProtocolVersion, instance: randomUUID(), repo, slots, ready: true,
+  const capacity = readWorkerCapacity({ version: workerProtocolVersion, instance: randomUUID(), repo, slots, ready: false,
     editFileBytes: codeEditFileBytes() }, limits.maxSlots);
+  if (!capacity) throw Error("设备需配置仓库及有效并发设置。");
+  return capacity;
+}
+
+async function selfCheck(configPath: string | undefined, limits: CodeWorkerConfig) {
+  const enrollment = await readEnrollment(configPath).catch(() => undefined);
+  process.stdout.write(enrollment ? "接入文件有效。\n" : "接入文件缺失、无法读取或格式无效。\n");
+  const capacity = (() => {
+    try { return readCapacity(limits); } catch { return undefined; }
+  })();
+  if (!capacity) process.stdout.write("请检查设备仓库及并发配置。\n");
+
+  const [network, loggedIn] = await Promise.all([
+    enrollment && capacity ? connector(enrollment.endpoint, enrollment, limits)("wait", {
+      ...capacity, version: workerProtocolVersion, ready: false,
+    }, AbortSignal.timeout(limits.httpTimeoutMs)).catch(() => undefined) : undefined,
+    codexReady(AbortSignal.timeout(limits.httpTimeoutMs)),
+  ]);
+  if (!enrollment || !capacity) process.stdout.write("设备 HTTPS 接入检查跳过，请先修正配置。\n");
+  else if (!network) process.stdout.write("设备 HTTPS 接入失败，请检查网络、服务地址和证书。\n");
+  else if (network.status !== 200) process.stdout.write(`设备 HTTPS 已响应，但接入失败（HTTP ${network.status}）。\n`);
+  else process.stdout.write("设备 HTTPS 接入通过。\n");
+  process.stdout.write(loggedIn ? "本机 Codex 已登录。\n" : "无法确认本机 Codex 登录，请检查 Codex 安装和 ChatGPT 登录。\n");
+  if (!enrollment || network?.status !== 200 || !loggedIn) process.exitCode = 1;
+}
+
+async function main() {
+  loadLocalEnv();
+  const limits = readCodeWorkerConfig();
+  const args = process.argv.slice(2);
+  const check = args[0] === "--check";
+  const fileArgs = check ? args.slice(1) : args;
+  if (fileArgs.length > 1 || fileArgs[0]?.startsWith("--")) throw Error("设备启动参数无效。");
+  const configPath = fileArgs[0] ?? runtimeSetting("SOULFLOW_CODE_WORKER_ENROLLMENT_FILE");
+  if (check) { await selfCheck(configPath, limits); return; }
+  const config = await readEnrollment(configPath);
+  const capacity = readCapacity(limits);
+  const { slots } = capacity;
+  await chmod(config.file, 0o600);
+  const image = process.env.SOULFLOW_GITHUB_CHECK_IMAGE?.trim();
+  const timeoutMs = runtimeInteger("SOULFLOW_GITHUB_DELIVERY_TIMEOUT_MS", 1000, 3_600_000);
   const workspaceRoot = runtimeSetting("SOULFLOW_CODE_WORKER_ROOT");
-  if (!capacity || !image || !workspaceRoot) {
+  if (!image || !workspaceRoot) {
     throw Error("设备需配置仓库、隔离检查镜像及有效并发设置。");
   }
   const checkImage = image;
@@ -163,7 +241,7 @@ async function main() {
         if (!checkpoint.save("journal", state)) throw Error("设备无法写入回执状态。");
       };
       save();
-      const send = connector(endpoint, { id: config.id, key: config.key, certificate }, limits);
+      const send = connector(config.endpoint, config, limits);
       const publish = async (job: Pending, detail: ReceiptContent) => {
         const base = { id: job.id, digest: job.digest, at: Date.now() };
         let receipt: CodeReceipt = { ...base, ...detail };
@@ -209,7 +287,9 @@ async function main() {
       let connected = false;
       try {
         while (!stop.signal.aborted) {
-          const ready = active.size < slots;
+          const loggedIn = await codexReady(AbortSignal.any([stop.signal, AbortSignal.timeout(limits.httpTimeoutMs)]));
+          if (stop.signal.aborted) break;
+          const ready = loggedIn && active.size < slots;
           const wait = new AbortController();
           const polling = send("wait", { ...capacity, version: workerProtocolVersion, instance: state.instance, ready },
             AbortSignal.any([stop.signal, wait.signal])).catch(() => undefined);
@@ -223,7 +303,10 @@ async function main() {
           if (result.status !== 200) throw Error("工作台拒绝代码设备接入。");
           if (!connected) process.stdout.write("已连到 souflow，等待调度器派单。\n");
           connected = true;
-          if (result.offer === null) continue;
+          if (!ready || result.offer === null) {
+            if (!ready) await sleep(limits.retryMs, undefined, { signal: stop.signal });
+            continue;
+          }
           const offer = readCodeOffer(result.offer, limits);
           if (!offer || offer.work.repo.toLowerCase() !== capacity.repo) throw Error("设备收到无效或仓库不匹配的工单。");
           if (active.has(offer.id)) { await sleep(limits.retryMs, undefined, { signal: stop.signal }); continue; }
