@@ -184,6 +184,56 @@ test("等待设备不消耗已派发任务的执行和失败回执宽限", async
   assert.equal((await execution).phase, "failed");
 });
 
+test("AC-1、AC-2、AC-3 最终 tested 回执同实例原样重放返回 200，换实例返回 409，终态及两类写入保持一致", async t => {
+  const { checkpoint, audit } = database();
+  const testedSaves = new Map<string, number>();
+  const trackedCheckpoint: Checkpoint<WorkerAttempt> = {
+    load: checkpoint.load,
+    save(id, row, event) {
+      if (row.state === "tested") testedSaves.set(id, (testedSaves.get(id) ?? 0) + 1);
+      return checkpoint.save(id, row, event);
+    },
+  };
+  const pool = createCodeWorkerPool(trackedCheckpoint, new Set([first.id]));
+  t.after(pool.close);
+  const signal = new AbortController().signal;
+  const waiting = pool.poll(first, signal);
+  const execution = pool.execute(work, signal, 2000, () => {}, revalidate);
+  const settled = assert.doesNotReject(async () => {
+    assert.equal((await execution).phase, "tested");
+  });
+  const delivery = await waiting;
+  assert.ok(delivery.status === 200 && delivery.offer);
+  const { id, digest } = delivery.offer;
+  assert.equal(pool.receipt(first, { id, digest, at: 100, phase: "accepted" }), 200);
+  assert.equal(pool.receipt(first, { id, digest, at: 101, phase: "started", thread: "terminal-replay-thread" }), 200);
+  const tested = { id, digest, at: 102, phase: "tested", output: "完成", patch: contentDigest("terminal-replay-patch") } as const;
+  assert.equal(pool.receipt(first, tested), 200);
+  await settled;
+
+  const terminal = checkpoint.load().find(attempt => attempt.id === id);
+  assert.ok(terminal);
+  assert.equal(terminal.state, "tested");
+  const baseline = structuredClone(terminal);
+  const assertTerminalUnchanged = () => {
+    assert.deepEqual(checkpoint.load().find(attempt => attempt.id === id), baseline);
+    assert.equal(testedSaves.get(id), 1);
+    assert.equal(audit.filter(event => event.attemptId === id && event.kind === "remote.code"
+      && (event.details as { action?: string } | undefined)?.action === "tested").length, 1);
+  };
+  assertTerminalUnchanged();
+
+  await t.test("AC-2 同实例原样重放返回 200，保留完整终态及两类写入次数", () => {
+    assert.equal(pool.receipt(first, tested), 200);
+    assertTerminalUnchanged();
+  });
+
+  await t.test("AC-3 仅替换实例后重放返回 409，保留完整终态及两类写入次数", () => {
+    assert.equal(pool.receipt({ ...first, instance: `${first.instance}-different` }, tested), 409);
+    assertTerminalUnchanged();
+  });
+});
+
 function database() {
   const stored = new Map<string, WorkerAttempt>();
   const audit: BusinessEvent[] = [];
