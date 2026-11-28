@@ -6,9 +6,16 @@ export type IsolationEvidence = {
   outcome: "exit" | "timeout" | "cancelled" | "infrastructure";
   exitCode?: number;
   diagnostics?: readonly string[];
+  diagnosticsIncomplete?: true;
 };
 
-const diagnosticCode = /^(src\/[^\s]+|tests\/[^\s]+):(\d+):(\d+) (TS\d{4,5})$/;
+const diagnosticCode = /^(src\/[^\s]+|tests\/[^\s]+):(\d+):(\d+) (TS\d{4,5}|BIOME:(?:error|warning|info):lint\/[a-zA-Z0-9/]+)$/;
+
+export function blockingTestDiagnostic(value: string) {
+  const match = diagnosticCode.exec(value);
+  return match && validDiagnostic(value) && /^tests\/.+\.test\.[cm]?[jt]s$/.test(match[1] ?? "")
+    && !value.includes(" BIOME:info:") ? { path: match[1] as string, key: `${match[1]} ${match[4]}` } : undefined;
+}
 
 function normalizedDiagnostic(value: string) {
   if (value.includes("\n") || value.includes("\r")) return;
@@ -33,17 +40,19 @@ function record(value: unknown): Record<string, unknown> {
 }
 
 export function readIsolationEvidence(value: unknown, maxBytes = readCodeWorkerConfig().diagnosticMaxBytes): IsolationEvidence | undefined {
-  const { step, outcome, exitCode, diagnostics } = record(value);
+  const { step, outcome, exitCode, diagnostics, diagnosticsIncomplete } = record(value);
   if ((step !== "dependencies" && step !== "quality")
     || (outcome !== "exit" && outcome !== "timeout" && outcome !== "cancelled" && outcome !== "infrastructure")
     || (exitCode !== undefined && (typeof exitCode !== "number" || !Number.isInteger(exitCode) || exitCode < 1 || exitCode > 255))
     || (outcome === "exit" && (exitCode === undefined || exitCode >= 125))
     || (exitCode !== undefined && outcome !== "exit" && outcome !== "infrastructure")
+    || (diagnosticsIncomplete !== undefined && diagnosticsIncomplete !== true)
     || (diagnostics !== undefined && (step !== "quality" || outcome !== "exit" || !Array.isArray(diagnostics)
       || diagnostics.length < 1 || diagnostics.length > 16 || new Set(diagnostics).size !== diagnostics.length
       || !diagnostics.every(line => typeof line === "string" && Buffer.byteLength(line) <= maxBytes && validDiagnostic(line))
       || Buffer.byteLength(JSON.stringify(diagnostics)) > maxBytes))) return;
-  return { step, outcome, ...(exitCode === undefined ? {} : { exitCode }), ...(diagnostics ? { diagnostics: [...diagnostics] as string[] } : {}) };
+  return { step, outcome, ...(exitCode === undefined ? {} : { exitCode }), ...(diagnostics ? { diagnostics: [...diagnostics] as string[] } : {}),
+    ...(diagnosticsIncomplete ? { diagnosticsIncomplete: true } : {}) };
 }
 
 export function diagnoseIsolationFailure(error: unknown, install: boolean, signal: AbortSignal,
@@ -57,18 +66,22 @@ export function diagnoseIsolationFailure(error: unknown, install: boolean, signa
   }
   // 只提取受控的路径、位置和编译器编号，拒绝错误消息、源码行与命令参数。
   const lines = new Set<string>();
+  let incomplete = false;
   if (!install) for (const output of [stdout, stderr]) {
     if (typeof output !== "string") continue;
     for (const raw of output.split(/\r?\n/)) {
+      if (raw === "SOUFLOW_DIAGNOSTICS_INCOMPLETE") incomplete = true;
       const safe = normalizedDiagnostic(raw.trim());
-      if (!safe || Buffer.byteLength(JSON.stringify([...lines, safe])) > maxBytes) continue;
-      lines.add(safe);
-      if (lines.size >= 16) break;
+      const structured = raw.startsWith("SOUFLOW_DIAGNOSTIC ") ? raw.slice("SOUFLOW_DIAGNOSTIC ".length) : undefined;
+      const selected = safe ?? (structured && validDiagnostic(structured) && !structured.includes(" BIOME:info:") ? structured : undefined);
+      if (!selected) continue;
+      if (lines.size >= 16 || Buffer.byteLength(JSON.stringify([...lines, selected])) > maxBytes) { incomplete = true; continue; }
+      lines.add(selected);
     }
     if (lines.size >= 16) break;
   }
   const diagnostics = [...lines];
-  return { step, outcome: "exit", exitCode, ...(diagnostics.length ? { diagnostics } : {}) };
+  return { step, outcome: "exit", exitCode, ...(diagnostics.length ? { diagnostics } : {}), ...(incomplete ? { diagnosticsIncomplete: true } : {}) };
 }
 
 export function describeIsolationEvidence(evidence: IsolationEvidence) {

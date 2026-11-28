@@ -17,6 +17,9 @@ import type { DeliveryReviewReceipt } from "../planning/delivery-review.mts";
 import { qualityBindingCurrent, type QualityBinding, type TicketSourceFinding } from "../planning/dispatch-quality.mts";
 import type { ApprovedReviewFix } from "./approved-review-fix.mts";
 import { selectApprovedRepairReplay } from "./approved-repair-replay.mts";
+import { continuationBinding, createRepairContinuation, failureFingerprint, type PreparedRepairContinuation,
+  type RepairContinuation } from "./repair-continuation.mts";
+import type { InspectRepairCandidate } from "../execution/repair-candidate-inspection.mts";
 import { matchesSourceRefresh, type ApprovedSourceRefresh } from "./approved-source-refresh.mts";
 import { activePrePrAmendment, amendedSpec, amendmentRecoveryBound, type ApprovedPrePrAmendment } from "./pre-pr-amendment.mts";
 import { createPrePrAmendmentAuthorization } from "./pre-pr-amendment-authorization.mts";
@@ -26,6 +29,7 @@ import type { ReviewIssueDelivery } from "./github-delivery-review.mts";
 import { type createPlannedIssuePublication, hasPublicationMarker, readPublishedRepair } from "./planned-issue-publication.mts";
 
 export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; prepare: PrepareIssue; pollMs: number; conversation?: boolean;
+  inspectRepairCandidate?: InspectRepairCandidate;
   requireQuality?: boolean; recoverFailedIssue?: number; reviewFix?: ApprovedReviewFix; review?: ReviewIssueDelivery;
   reviewFixes?: readonly ApprovedReviewFix[];
   sourceRefresh?: ApprovedSourceRefresh;
@@ -62,6 +66,7 @@ export type Claim = Remote & {
   failure?: DeliveryFailure; retryCount?: number; retriedWorkerAttempt?: string; pendingWorkerAttempt?: string;
   recoveryDispatchAttempt?: string; interruptedDevelopment?: boolean;
   recoveredWorkerAttempts?: string[];
+  repairContinuation?: RepairContinuation;
   reviewFix?: { from: string; state: "running" | "publishing" | "complete" | "failed"; pendingHead?: string; base?: string; repairId?: string;
     testFiles?: string[]; retriedTests?: boolean; testFailureNote?: string; testCheckFailed?: boolean; replayedDraft?: FailedReviewDraft;
     replayedCandidate?: { sha256: string; digest: string; files: import("../execution/code-worker-protocol.mts").CandidateFile[] } };
@@ -126,6 +131,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       ...(c.failure ? { failure: safeFailure } : {}), ...(c.retryCount ? { retryCount: c.retryCount } : {}),
       ...(patchCheck ? { patchCheck } : {}),
       ...(c.reviewFix ? { reviewFix: c.reviewFix } : {}),
+      ...(c.repairContinuation ? { repairContinuation: c.repairContinuation } : {}),
       ...(event?.startsWith("review-repair-") ? { repair: c.reviewRepairs?.at(-1) } : {}),
       ...(event === "account-assigned" ? { codexAccount: c.accountAssignment } : {}),
       ...(event === "worker-retry-queued" || event === "worker-test-recovery-queued" ? { workerAttempt: c.pendingWorkerAttempt ?? c.retriedWorkerAttempt } : {}),
@@ -156,6 +162,11 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     const proposal = repairProposal(c);
     return proposal && "fix" in proposal ? proposal : undefined;
   }
+  const continuations = createRepairContinuation({ ...(delivery?.inspectRepairCandidate ? { inspect: delivery.inspectRepairCandidate } : {}), signal: abort.signal,
+    current: number => claims.get(number), repair: currentRepair,
+    connection: c => (memberTrackers.get(c.claimedBy) ?? tracker) as DeliveryTracker, save,
+    track(job) { jobs.add(job); void job.then(() => jobs.delete(job), () => jobs.delete(job)); },
+    start: (fix, prepared) => startReviewFix(fix, false, undefined, prepared) });
   function repairDecisions(actor: string) {
     return [...claims.values()].flatMap(c => {
       if (c.claimedBy !== actor || c.reviewFix?.from === c.pull?.head) return [];
@@ -326,6 +337,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   }
   function authorizedRepair(retry: boolean) {
     for (const claim of claims.values()) {
+      if (continuations.owns(claim)) continue;
       const repair = currentRepair(claim);
       const decision = repair && claim.reviewRepairs?.find(item => item.id === repair.id && item.decision === "approved");
       if (!repair || !decision) continue;
@@ -339,6 +351,11 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   }
   function dispatchReviewFix(retry = false) {
     if (!delivery?.conversation || jobs.size >= maxActive) return;
+    for (const claim of claims.values()) {
+      if (jobs.size >= maxActive) break;
+      continuations.enqueue(claim);
+    }
+    if (jobs.size >= maxActive) return;
     const authorized = authorizedRepair(retry);
     if (authorized) startReviewFix(authorized.repair.fix, retry, authorized);
     const configured = delivery.reviewFixes ?? (delivery.reviewFix ? [delivery.reviewFix] : []);
@@ -347,9 +364,10 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       startReviewFix(fix, retry);
     }
   }
-  function startReviewFix(fix: ApprovedReviewFix, retry: boolean, authorized?: ReturnType<typeof authorizedRepair>) {
+  function startReviewFix(fix: ApprovedReviewFix, retry: boolean, authorized?: ReturnType<typeof authorizedRepair>, automatic?: PreparedRepairContinuation) {
     if (!delivery) return;
     const c = claims.get(fix.issue);
+    if (c && !automatic && continuations.owns(c)) return;
     const target = c?.target;
     const approved = c?.delivery;
     const scope = c && approvedRepairFiles(c);
@@ -357,7 +375,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       || (target.base && target.base !== fix.base)
       || !approved?.baseRevision || !qualityBindingCurrent(c.approval?.quality)
       || !scope || !fix.files.every(path => scope.includes(path)) || !permits(c.claimedBy)) return;
-    const replay = fix.repairId ? selectApprovedRepairReplay(c, fix, currentRepair(c)) : undefined;
+    const replay = automatic ?? (fix.repairId ? selectApprovedRepairReplay(c, fix, currentRepair(c)) : undefined);
     if (fix.repairId && (!replay || replayPreflights.has(c.number))) return;
     const supplemental = !authorized && !replay && fix.testFiles?.length ? repairFromApproval(tracker.repo, c, fix) : undefined;
     if (fix.testFiles?.length && (!replay && !supplemental || !activeReviewScope(c) || !delivery.publishRepair)) return;
@@ -386,7 +404,9 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       ...(replayDraft ? { replayedDraft: replayDraft } : {}) };
     if (supplemental && !recorded) save({ ...c, reviewRepairs: [...(c.reviewRepairs ?? []),
       { id: supplemental.id, head: fix.head, decision: "approved", at: Date.now() }] }, "review-repair-maintainer-approved");
-    const markStarted = () => save({ ...(claims.get(c.number) ?? c), reviewFix: state },
+    const markStarted = () => save({ ...(claims.get(c.number) ?? c), reviewFix: state,
+      ...(automatic ? { repairContinuation: { ...automatic.previous, rounds: [...automatic.previous.rounds,
+        { failure: automatic.failure, diagnostics: automatic.diagnostics, candidate: automatic.candidate.digest }] } } : {}) },
       replayDraft ? "review-fix-draft-replay-started" : repeatTests ? "review-fix-test-retry-started" : "review-fix-started");
     if (replay) replayPreflights.add(c.number);
     else markStarted();
@@ -416,7 +436,9 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
         if (replay) {
           abort.signal.throwIfAborted();
           // 只读预检断连尚未开工，不消耗候选；异步期间的授权与失败回执必须仍完全一致。
-          if (!isDeepStrictEqual(selectApprovedRepairReplay(current(), fix, currentRepair(current())), replay)) {
+          if (automatic ? failureFingerprint(current()) !== automatic.failure
+            || !isDeepStrictEqual(continuationBinding(current(), currentRepair(current())), { repair: automatic.repair, issue: automatic.issue })
+            : !isDeepStrictEqual(selectApprovedRepairReplay(current(), fix, currentRepair(current())), replay)) {
             throw Error("固定候选恢复授权已变化。");
           }
           markStarted();
@@ -459,7 +481,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
           save({ ...latest, reviewFix: { ...state, state: "failed",
             testCheckFailed: failure?.stage === "tests" && failure.reason === "check-failed" },
             ...(failure ? { failure } : {}) }, "review-fix-failed");
-          if (failure?.stage === "tests" && failure.reason === "check-failed" && failure.candidatePatch && !state.retriedTests) {
+          if (failure?.stage === "tests" && failure.reason === "check-failed" && failure.candidatePatch && (!state.retriedTests || automatic)) {
             autoCorrectionNeeded = true;
           }
         }

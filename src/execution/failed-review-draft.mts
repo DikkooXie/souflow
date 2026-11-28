@@ -5,13 +5,15 @@ import { promisify } from "node:util";
 import { contentDigest, workerCommit, workerDigest, type CandidateFile } from "./code-worker-protocol.mts";
 import { deliveryPath, maxCodeProposalBytes, readEditableFile } from "./local-code-changes.mts";
 import { verifyCandidatePatch } from "./candidate-patch-evidence.mts";
+import type { CandidateSnapshot } from "./candidate-snapshot.mts";
 
 export type FailedReviewDraft = { artifact: string; sha256: string };
 export type FailedReviewDraftEvidence = { files: CandidateFile[]; patch: string; sha256: string; digest: string };
 const exec = promisify(execFile);
 
 export async function restoreFailedReviewDraft(root: string, target: string, workspace: string, issue: number, head: string,
-  draft: FailedReviewDraft, allowed: readonly string[], timeout: number, signal: AbortSignal, evidence?: FailedReviewDraftEvidence) {
+  draft: FailedReviewDraft, allowed: readonly string[], timeout: number, signal: AbortSignal,
+  evidence?: FailedReviewDraftEvidence | CandidateSnapshot) {
   if (!workerCommit.test(head) || !workerDigest.test(draft.sha256)
     || !new RegExp(`^issue-${issue}-[A-Za-z0-9]+$`).test(draft.artifact)) throw Error("上一份续修产物标识无效。");
   const source = join(await realpath(root), draft.artifact, "source");
@@ -40,9 +42,12 @@ export async function restoreFailedReviewDraft(root: string, target: string, wor
     }
     files.push(path);
   }
-  if (evidence && (files.length !== evidence.files.length || contentDigest(evidence.patch) !== evidence.sha256
-    || contentDigest(JSON.stringify(evidence.files)) !== evidence.digest
-    || !verifyCandidatePatch(originals, evidence.files, evidence.patch))) throw Error("续修产物与最新失败候选摘要不一致。");
+  if (evidence && (files.length !== evidence.files.length || contentDigest(JSON.stringify(evidence.files)) !== evidence.digest
+    || ("patch" in evidence ? contentDigest(evidence.patch) !== evidence.sha256
+      || !verifyCandidatePatch(originals, evidence.files, evidence.patch)
+      : evidence.version !== 1 || evidence.head !== head || evidence.artifact !== draft.artifact || evidence.sha256 !== draft.sha256))) {
+    throw Error("续修产物与最新失败候选摘要不一致。");
+  }
   const patch = await git(source, "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "HEAD", "--");
   if (!files.length || contentDigest(patch) !== draft.sha256) throw Error("上一份续修补丁与核对摘要不符。");
   const patchFile = join(target, "review-draft.patch");
