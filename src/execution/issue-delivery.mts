@@ -12,7 +12,7 @@ import { IssueDeliverySourcesChanged, proveSourceHandoff, type SourceHandoff, ty
 import type { DispatchMonitor } from "./dispatch-monitor.mts";
 import { IssueVerificationUncertain } from "./issue-verification.mts";
 import type { CodeWorkerPool } from "./code-worker-pool.mts";
-import { contentDigest, type CodeWork } from "./code-worker-protocol.mts";
+import { contentDigest, type CodeWork, type WorkerFailureStage } from "./code-worker-protocol.mts";
 import { applyCheckedCodeChanges, codeResultSchema, deliveryPath, maxCodeProposalBytes, maxEdits, type PatchIssue,
   PatchRejection, prepareCodeProposal, readEditableFile } from "./local-code-changes.mts";
 
@@ -24,9 +24,10 @@ export type DeliveryTarget = { branch: string; head: string; base?: string };
 export type CheckedIssue = { head: string; passingTests: string[] };
 export type PreparedDelivery = DeliveryTarget & { workspace: string; base: string; executionRevision?: string; checked?: CheckedIssue };
 export type DeliveryFailure = {
-  stage: "preflight" | "checkout" | "codex" | "dependencies" | "patch" | "tests" | "commit" | "publish" | "legacy";
-  reason: "unavailable" | "format" | "scope" | "redacted" | "match" | "size" | "empty" | "check-failed";
+  stage: "preflight" | "checkout" | "codex" | "dependencies" | "patch" | "tests" | "commit" | "publish" | "legacy" | "device";
+  reason: "unavailable" | "format" | "scope" | "redacted" | "match" | "size" | "empty" | "check-failed" | "device-failed";
   patchIssue?: PatchIssue;
+  workerStage?: WorkerFailureStage;
 };
 export type PrepareIssue = (input: {
   number: number; flowId?: string; planVersion?: number; spec: DeliverySpec; branch: string; upstream: string[]; publisher: IssuePublisher;
@@ -81,6 +82,7 @@ const retryInstruction = {
   size: "上一次改动触发文件大小边界。缩小每个文件的改动范围，保留验收要求。",
   empty: "上一次没有实际差异。为每项替换提供明确的行为改动或相关测试。",
   "check-failed": "上一次改动未通过隔离检查。核对类型、静态规则以及受影响的成功与失败路径。",
+  "device-failed": "",
   unavailable: "恢复旧工单时，优先用较短且唯一的原文锚点；逐字复制 before，按顺序考虑每次替换后的内容，并核对既有测试契约。",
   scope: "",
   redacted: "",
@@ -230,6 +232,8 @@ export function createIssueDeveloper(monitor: DispatchMonitor, options: {
           instructions: [spec.instructions, acceptanceTestInstruction, ...(previousFailure ? [retryInstruction[previousFailure.reason]] : [])].join("\n"),
           context: untrustedContext,
         }, signal, timeoutMs, connected, ensureCurrent);
+        if (result.phase === "failed") throw new IssueDeliveryFailed({ stage: "device", reason: "device-failed",
+          ...(result.failureStage ? { workerStage: result.failureStage } : {}) });
         if (result.phase !== "tested") throw new IssueVerificationUncertain("needs-reconciliation");
         remotePatch = result.patch;
         stage = "patch";

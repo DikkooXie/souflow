@@ -21,11 +21,13 @@ export type CodeWork = {
 };
 
 export type CodeOffer = { version: number; id: string; digest: string; work: CodeWork };
+export type WorkerFailureStage = "checkout" | "codex" | "patch" | "tests";
 export type CodeReceipt = { id: string; digest: string } & (
   | { phase: "accepted"; at: number }
   | { phase: "started"; at: number; thread: string }
   | { phase: "tested"; at: number; output: string; patch: string }
-  | { phase: "declined" | "interrupted" | "failed"; at: number }
+  | { phase: "declined" | "interrupted"; at: number }
+  | { phase: "failed"; at: number; failureStage?: WorkerFailureStage }
 );
 
 function object(input: unknown): Record<string, unknown> | undefined {
@@ -79,7 +81,14 @@ export function readCodeReceipt(input: unknown): CodeReceipt | undefined {
   if (!value || !matches(value.id, workerId) || !matches(value.digest, workerDigest) || !positive(value.at)) return;
   const fields = { id: value.id, digest: value.digest, at: value.at };
   const phase = value.phase;
-  if (phase === "accepted" || phase === "declined" || phase === "interrupted" || phase === "failed") return { ...fields, phase };
+  if (phase === "accepted" || phase === "declined" || phase === "interrupted") return { ...fields, phase };
+  if (phase === "failed") {
+    const stage = value.failureStage;
+    if (stage === undefined) return { ...fields, phase };
+    if (stage === "checkout" || stage === "codex" || stage === "patch" || stage === "tests") {
+      return { ...fields, phase, failureStage: stage };
+    }
+  }
   if (phase === "started" && typeof value.thread === "string" && /^[a-z0-9_-]{1,128}$/i.test(value.thread)) {
     return { ...fields, phase, thread: value.thread };
   }

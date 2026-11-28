@@ -405,10 +405,12 @@ function startAttempt(options: Options, mode: "commands" | "questions" | "local-
       if (!config) return connectionLost();
       const inherited = record(config.mcp_servers);
       if (config.mcp_servers != null && !inherited) return connectionLost();
-      // 把继承的 MCP 条目换成禁用占位配置，避免读取环境的会话触发外部工具。
-      const mcp = Object.fromEntries(Object.keys(inherited ?? {}).map(name => [
-        name, { command: process.execPath, enabled: false },
-      ]));
+      // App Server 可能合并用户配置，也可能用启动参数提供的条目重建会话。
+      // 禁用项仍必须带同类传输，否则 URL 与 stdio 混合，或新配置缺少传输。
+      const mcp = Object.fromEntries(Object.entries(inherited ?? {}).map(([name, server]) => {
+        const url = record(server)?.url;
+        return [name, { ...(typeof url === "string" ? { url } : { command: process.execPath }), enabled: false }];
+      }));
       openThread({
         mcp_servers: mcp,
         ...(mode === "local-task" && options.untrustedContext ? { features: {

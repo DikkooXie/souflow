@@ -69,7 +69,9 @@ input.on("line", line => {
       if (scenario === "question-invalid-config") {
         send({ id: message.id, result: { config: { mcp_servers: [] } } });
       } else {
-        send({ id: message.id, result: { config: { mcp_servers: { inherited: {} } } } });
+        send({ id: message.id, result: { config: { mcp_servers: {
+          inherited: { command: "fixture-stdio" }, network: { url: "http://127.0.0.1:1/mcp" },
+        } } } });
       }
       return;
     case "thread/start":
@@ -78,7 +80,13 @@ input.on("line", line => {
         return;
       }
       if (questionMode && (scenario === "question-invalid-config" || message.params.approvalPolicy !== "never"
-        || message.params.sandbox !== "read-only" || message.params.config?.mcp_servers?.inherited?.enabled !== false)) {
+        || message.params.sandbox !== "read-only"
+        || Object.keys(message.params.config?.mcp_servers ?? {}).length !== 2
+        || message.params.config.mcp_servers.inherited?.command !== process.execPath
+        || message.params.config.mcp_servers.inherited?.enabled !== false
+        || message.params.config.mcp_servers.network?.url !== "http://127.0.0.1:1/mcp"
+        || message.params.config.mcp_servers.network?.enabled !== false
+        || Object.hasOwn(message.params.config.mcp_servers.network, "command"))) {
         send({ id: message.id, error: { code: -32602 } });
         return;
       }

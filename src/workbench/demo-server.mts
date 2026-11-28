@@ -177,6 +177,7 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
           ...(issueDelivery.recoverFailedIssue ? { recoverFailedIssue: issueDelivery.recoverFailedIssue } : {}),
           ...(issueDelivery.reviewFix ? { reviewFix: issueDelivery.reviewFix } : {}),
           ...(publishIssues ? { publishRepair: publishIssues } : {}),
+          ...(remoteLink?.code ? { failedWorkerAttempt: remoteLink.code.failedAttempt } : {}),
           async reviewSourceHandoff(claim, proof, sources, signal) {
             if (!reviewSourceHandoff) throw Error("无法复核上游源码交接。");
             return reviewSourceHandoff(claim, proof, sources, signal);

@@ -4,7 +4,7 @@ import test from "node:test";
 import type { BusinessEvent, Checkpoint } from "../src/audit/activity-store.mts";
 import { codeEditFileBytes, legacyCodeEditFileBytes, readCodeWorkerConfig } from "../src/config/runtime.mts";
 import { createCodeWorkerPool, type WorkerAttempt } from "../src/execution/code-worker-pool.mts";
-import { contentDigest, readCodeOffer, readWorkerCapacity, type CodeOffer, type CodeWork } from "../src/execution/code-worker-protocol.mts";
+import { contentDigest, readCodeOffer, readCodeReceipt, readWorkerCapacity, type CodeOffer, type CodeWork } from "../src/execution/code-worker-protocol.mts";
 
 const repo = "owner/repository";
 const first = { id: "00000000-0000-0000-0000-000000000001", name: "第一台 Mac", instance: randomUUID(), repo, slots: 1, ready: true };
@@ -88,6 +88,47 @@ test("断线后只向原设备重发未确认工单，主机重启后不把状�
   assert.equal(restarted.receipt(first, { id, digest, at: 101, phase: "started", thread: "stale" }), 410);
   assert.equal(restarted.snapshot().attempts[0]?.state, "interrupted");
   assert.equal(audit.filter(event => (event.details as { action: string }).action === "offered").length, 1);
+});
+
+test("只有最近一条与原审批匹配的设备失败回执可用于恢复", async t => {
+  const { checkpoint, audit } = database();
+  const devices = new Set([first.id]);
+  const pool = createCodeWorkerPool(checkpoint, devices);
+  t.after(pool.close);
+  const signal = new AbortController().signal;
+  const waiting = pool.poll(first, signal);
+  const pending = pool.execute(work, signal, 1000, () => {}, revalidate);
+  const delivery = await waiting;
+  assert.ok(delivery.status === 200 && delivery.offer);
+  const { id, digest } = delivery.offer;
+  assert.equal(pool.receipt(first, { id, digest, at: 100, phase: "accepted" }), 200);
+  const failure = { id, digest, at: 101, phase: "failed", failureStage: "codex" } as const;
+  assert.deepEqual(readCodeReceipt(failure), failure);
+  assert.equal(readCodeReceipt({ ...failure, failureStage: "external error" }), undefined);
+  assert.equal(readCodeReceipt({ ...failure, failureStage: undefined })?.phase, "failed");
+  assert.equal(pool.receipt(first, failure), 200);
+  assert.equal((await pending).phase, "failed");
+  assert.equal(checkpoint.load()[0]?.receipt?.failureStage, "codex");
+  assert.equal((audit.at(-1)?.details as { failureStage?: string } | undefined)?.failureStage, "codex");
+  pool.close();
+
+  const restarted = createCodeWorkerPool(checkpoint, devices);
+  t.after(restarted.close);
+  assert.equal(restarted.failedAttempt(work), id);
+  for (const scope of [{ ...work, repo: "other/repo" }, { ...work, issue: 11 }, { ...work, issueRevision: "f".repeat(64) },
+    ...Object.keys(work.plan).map(key => ({ ...work, plan: { ...work.plan, [key]: key === "version" ? 3 : "changed" } }))]) {
+    assert.equal(restarted.failedAttempt(scope), undefined);
+  }
+
+  const later = { ...work, plan: { ...work.plan, version: 3 } };
+  const again = restarted.poll(first, signal);
+  const next = assert.rejects(restarted.execute(later, signal, 1000, () => {}, revalidate), { reason: "needs-reconciliation" });
+  const newer = await again;
+  assert.ok(newer.status === 200 && newer.offer);
+  assert.equal(restarted.failedAttempt(work), undefined);
+  restarted.close();
+  await next;
+  assert.equal(restarted.failedAttempt(later), undefined);
 });
 
 test("满载设备仅上报在线，空闲设备才会收到工单", async t => {

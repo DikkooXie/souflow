@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { BusinessEvent, Checkpoint } from "../audit/activity-store.mts";
 import { issueRevision, type DeliveryTracker, type IssueDetail, type IssuePull, type IssueSummary, type IssueTracker } from "../connections/issue-tracker.mts";
 import type { AccountAssignment } from "../execution/codex-account-dispatch.mts";
+import type { WorkerFailureScope } from "../execution/code-worker-pool.mts";
 import type { SourceHandoff, SourceProducer } from "../execution/dependency-source-handoff.mts";
 import { IssueDeliveryFailed, IssueDeliverySourcesChanged, type CheckedIssue, type DeliveryFailure, type DeliverySpec, type DeliveryTarget, type PrepareIssue } from "../execution/issue-delivery.mts";
 import { IssueVerificationUncertain, type VerifyIssue } from "../execution/issue-verification.mts";
@@ -18,6 +19,7 @@ export type IssueDeliveryOptions = { specs: ReadonlyMap<number, DeliverySpec>; p
   requireQuality?: boolean; recoverFailedIssue?: number; reviewFix?: ApprovedReviewFix; review?: ReviewIssueDelivery;
   publishRepair?: ReturnType<typeof createPlannedIssuePublication>;
   reviewScopeCurrent?: (claim: Claim) => boolean;
+  failedWorkerAttempt?: (scope: WorkerFailureScope) => string | undefined;
   reviewSourceHandoff?: (claim: Claim, proof: SourceHandoff, sources: Record<string, string>, signal: AbortSignal) => Promise<TicketSourceFinding> };
 
 function publisher(tracker: IssueTracker) {
@@ -37,7 +39,7 @@ export type Claim = Remote & {
   observedReviewLink?: boolean;
   deliveryReviews?: { observed: string; receipt: DeliveryReviewReceipt }[];
   claimUncertain?: boolean;
-  failure?: DeliveryFailure; retryCount?: number;
+  failure?: DeliveryFailure; retryCount?: number; retriedWorkerAttempt?: string; interruptedDevelopment?: boolean;
   reviewFix?: { from: string; state: "running" | "publishing" | "complete" | "failed"; pendingHead?: string; base?: string; repairId?: string };
   reviewRepairs?: ReviewRepairDecision[];
   sourceHandoff?: { proof: SourceHandoff; finding: TicketSourceFinding };
@@ -46,9 +48,17 @@ const phases = { claiming: "正在认领", waiting: "等待上游 PR 合并", ch
   developing: "Codex 正在开发与测试", publishing: "正在推送并创建 PR", submitted: "已提交 PR", deliveryFailed: "开发或测试失败",
   running: "Codex 正在核验", done: "核验完成", conflict: "认领冲突", uncertain: "待核对", failed: "核验失败" };
 const stageNames = { preflight: "工单状态核对", checkout: "工作区准备", codex: "Codex 运行", dependencies: "依赖安装",
-  patch: "补丁校验与应用", tests: "隔离检查", commit: "生成本地提交", publish: "远端发布", legacy: "旧版执行" };
+  patch: "补丁校验与应用", tests: "隔离检查", commit: "生成本地提交", publish: "远端发布", legacy: "旧版执行", device: "设备执行" };
 const reasonNames = { unavailable: "暂无更细的失败记录", format: "替换格式无效", scope: "涉及未授权文件", redacted: "涉及已脱敏字段",
-  match: "替换原文无法唯一定位", size: "文件大小超出边界", empty: "没有实际代码差异", "check-failed": "质量命令退出失败" };
+  match: "替换原文无法唯一定位", size: "文件大小超出边界", empty: "没有实际代码差异", "check-failed": "质量命令退出失败",
+  "device-failed": "执行设备已确认失败" };
+
+function workerScope(repo: string, c: Claim): WorkerFailureScope | undefined {
+  const approved = c.approval;
+  if (approved?.quality) return { repo, issue: c.number, issueRevision: approved.issueRevision,
+    plan: { flowId: approved.flowId, version: approved.version, flowDigest: approved.quality.flowDigest,
+      batchDigest: approved.quality.batchDigest } };
+}
 
 function retryable(failure: DeliveryFailure | undefined) {
   return failure?.stage === "tests" && failure.reason === "check-failed"
@@ -85,6 +95,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       ...(c.reviewFix ? { reviewFix: c.reviewFix } : {}),
       ...(event?.startsWith("review-repair-") ? { repair: c.reviewRepairs?.at(-1) } : {}),
       ...(event === "account-assigned" ? { codexAccount: c.accountAssignment } : {}),
+      ...(event === "worker-retry-queued" ? { workerAttempt: c.retriedWorkerAttempt } : {}),
       ...(event?.startsWith("dependency-source-") ? { sourceHandoff: c.sourceHandoff } : {}),
       ...(c.pull ? { pull: c.pull.number, ci: c.pull.ci, merge: c.pull.mergeCommit, state: c.pull.state } : {}), actor: c.claimedBy, githubAccount: c.account, phase: c.phase, session: c.sessionId,
     } } : undefined)) throw new IssueActionError(503, "无法保存 GitHub 工单状态。");
@@ -153,12 +164,29 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     save({ ...c, phase: "waiting", retryCount: oldFormat ? 2 : 1, failure: c.failure ?? { stage: "legacy", reason: "unavailable" } },
       oldFormat ? "patch-recovery-queued" : "retry-queued");
   }
+  function queueWorkerRetry(c: Claim) {
+    const needsReceipt = c.phase === "uncertain"
+      && (c.interruptedDevelopment || c.failure?.stage === "preflight" && c.failure.reason === "unavailable");
+    const recordedFailure = c.phase === "deliveryFailed" && c.failure?.stage === "device" && c.failure.reason === "device-failed";
+    if ((!needsReceipt && !recordedFailure) || !delivery?.conversation || !delivery.failedWorkerAttempt
+      || c.claimUncertain || c.retryCount || c.target || c.pull || c.pulls.length || !c.delivery?.baseRevision
+      || !qualityBindingCurrent(c.approval?.quality) || !delivery.reviewScopeCurrent?.(c)) return c;
+    const scope = workerScope(tracker.repo, c);
+    const attempt = scope && delivery.failedWorkerAttempt(scope);
+    if (!attempt) return c;
+    // 设备只生成补丁并测试。明确失败且工作台尚未进入发布时，才可沿原授权重试。
+    const queued: Claim = { ...c, phase: "waiting", retryCount: 1, retriedWorkerAttempt: attempt,
+      ...(needsReceipt ? { failure: { stage: "device", reason: "device-failed" } } : {}) };
+    save(queued, "worker-retry-queued");
+    return queued;
+  }
   for (const c of store.load()) {
     if (c.reviewFix?.state === "running") save({ ...c, reviewFix: { ...c.reviewFix, state: "failed" } }, "review-fix-interrupted");
     else if (c.phase === "checkingSources") save({ ...c,
       phase: c.sourceHandoff?.finding.status === "block" ? "uncertain" : "waiting" }, "dependency-source-restarted");
     else if (["claiming", "running", "developing", "publishing"].includes(c.phase)) {
-      save({ ...c, phase: "uncertain", ...(c.phase === "claiming" ? { claimUncertain: true } : {}) }, "restart");
+      save({ ...c, phase: "uncertain", ...(c.phase === "claiming" ? { claimUncertain: true } : {}),
+        ...(c.phase === "developing" ? { interruptedDevelopment: true } : {}) }, "restart");
     }
     else {
       claims.set(c.number, c);
@@ -169,10 +197,11 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
     return { repo: tracker.repo, canClaim: canClaim && !delivery?.conversation, ...(delivery ? { deliveryEnabled: true, conversationEnabled: delivery.conversation === true } : {}), items: [
       ...[...claims.values()].reverse().map(({ requestId: _id, account: _account, phase, delivery, pull, approval,
         checked: _checked, deliveryReviews: _reviews, reviewRepairs: _repairs, sourceHandoff: _sourceHandoff,
-        observedIssueRevision: _issueRevision, observedReviewLink: _reviewLink, ...item }) => ({ ...item,
+        observedIssueRevision: _issueRevision, observedReviewLink: _reviewLink, retriedWorkerAttempt: _retriedWorkerAttempt,
+        interruptedDevelopment: _interruptedDevelopment, ...item }) => ({ ...item,
         ...(delivery ? { dependsOn: delivery.dependsOn, mode: "delivery" } : {}),
         ...(approval ? { flowId: approval.flowId } : {}),
-        ...(item.failure ? { failureMessage: `${stageNames[item.failure.stage]} · ${reasonNames[item.failure.reason]}` } : {}),
+        ...(item.failure ? { failureMessage: `${stageNames[item.failure.workerStage ?? item.failure.stage]} · ${reasonNames[item.failure.reason]}` } : {}),
         pulls: pull ? [...item.pulls.filter(other => other.number !== pull.number), pull] : item.pulls,
         progress: item.reviewFix?.state === "running" ? "Codex 正在续修 PR"
           : item.reviewFix?.state === "publishing" ? "正在核对续修发布"
@@ -369,6 +398,8 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       }
       const issue = await connection.read(c.number);
       if (!stillAssignee(c, issue) || issue.pulls.length) throw Error("工单状态已变化。");
+      if (c.retriedWorkerAttempt && !delivery.reviewScopeCurrent?.(current())) throw new IssueDeliverySourcesChanged();
+      const scope = workerScope(connection.repo, c);
       const branch = `feat/${c.number}-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
       const prepared = await delivery.prepare({ number: c.number, spec, branch, publisher: remote, upstream,
         ...(c.retryCount && c.failure ? { previousFailure: c.failure } : {}),
@@ -378,7 +409,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
             abort.signal.throwIfAborted();
             const latest = current();
             if (latest.phase !== "checkingSources" || !delivery.reviewScopeCurrent?.(latest)) throw new IssueDeliverySourcesChanged();
-            save({ ...latest, phase: "developing" }, "woken");
+            save({ ...latest, phase: "developing" }, c.retriedWorkerAttempt ? "worker-redispatched" : "woken");
           },
           async review(proof: SourceHandoff, sources: Record<string, string>, signal: AbortSignal) {
             const finding = await delivery.reviewSourceHandoff?.(current(), proof, sources, signal);
@@ -389,13 +420,12 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
           },
         } } : {}),
         repairing: diagnostic => save(current(), "patch-repair", diagnostic),
-        ...(c.approval?.quality ? { workerProof: { repo: connection.repo, issueRevision: c.approval.issueRevision,
-          plan: { flowId: c.approval.flowId, version: c.approval.version,
-            flowDigest: c.approval.quality.flowDigest, batchDigest: c.approval.quality.batchDigest } },
+        ...(scope ? { workerProof: scope,
           async revalidateWorker(signal: AbortSignal) {
             signal.throwIfAborted();
             const latest = await connection.read(c.number);
-            if (!permits(c.claimedBy) || !stillAssignee(c, latest) || latest.pulls.length) {
+            if (!permits(c.claimedBy) || !stillAssignee(c, latest) || latest.pulls.length
+              || (c.retriedWorkerAttempt && !delivery.reviewScopeCurrent?.(current()))) {
               throw new IssueVerificationUncertain("needs-reconciliation");
             }
             signal.throwIfAborted();
@@ -410,6 +440,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       if (handoff && (handoff.finding.status !== "pass" || handoff.proof.execution !== prepared.executionRevision
         || JSON.stringify(await producers(handoff.proof.producers[0]?.baseName ?? "", abort.signal))
           !== JSON.stringify(handoff.proof.producers))) throw new IssueDeliverySourcesChanged();
+      if (c.retriedWorkerAttempt && (!permits(c.claimedBy) || !delivery.reviewScopeCurrent?.(current()))) throw new IssueDeliverySourcesChanged();
       abort.signal.throwIfAborted();
       const target = { branch, head: prepared.head, base: prepared.base };
       save({ ...current(), target, ...(prepared.checked ? { checked: prepared.checked } : {}), phase: "publishing" }, "checked");
@@ -432,8 +463,9 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
   function dispatchReady(retryRepairs = false) {
     if (!delivery || abort.signal.aborted) return;
     dispatchReviewFix(retryRepairs);
-    for (const c of claims.values()) {
+    for (const item of claims.values()) {
       if (jobs.size >= maxActive) break;
+      const c = queueWorkerRetry(item);
       if (c.phase !== "waiting" || !c.delivery || c.requestId === pending?.id) continue;
       if (c.approval && !delivery.conversation) continue;
       if (delivery.requireQuality && !qualityBindingCurrent(c.approval?.quality)) {
@@ -448,7 +480,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
       if (!upstream.every(pull => pull?.state === "MERGED" && pull.mergeCommit)) continue;
       const checkSources = !!(c.delivery.sourceFrom?.length && delivery.reviewSourceHandoff);
       save({ ...c, phase: checkSources ? "checkingSources" : "developing" },
-        checkSources ? "dependency-source-checking" : upstream.length ? "woken" : "dispatched");
+        checkSources ? "dependency-source-checking" : c.retriedWorkerAttempt ? "worker-redispatched" : upstream.length ? "woken" : "dispatched");
       const job = develop(c, c.delivery, upstream.map(pull => pull?.mergeCommit ?? ""));
       jobs.add(job);
       void job.finally(() => { jobs.delete(job); });

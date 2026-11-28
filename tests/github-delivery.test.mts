@@ -689,6 +689,65 @@ test("交付失败留存可用诊断，仅在原授权内重试一次", async t 
   }
 });
 
+test("确有设备失败回执的已授权工单只重试一次，仍复核授权和 GitHub 状态", async t => {
+  const baseRevision = "b".repeat(40);
+  const quality = { policy: 1, flowDigest: "c".repeat(64), batchDigest: "d".repeat(64) };
+  const issue: IssueDetail = { number: 7, title: "恢复派发", body: "原工单", url: "https://github.com/a/b/issues/7",
+    state: "OPEN", assignees: ["member"], pulls: [] };
+  const approval = { flowId: "flow", planId: "plan", version: 4, issueRevision: issueRevision(issue), quality };
+  for (const scenario of ["old", "current", "restart-before-failure-save", "restart-without-receipt", "missing-receipt",
+    "stale-approval", "changed-issue", "linked-pr", "already-pushed"] as const) {
+    await t.test(scenario, async () => {
+      const events: { action?: string; workerAttempt?: string }[] = [];
+      let prepares = 0;
+      let stored: Claim = { ...issue, syncedAt: 0, requestId: "approval", claimedBy: "member", account: "member",
+        phase: scenario === "current" ? "waiting" : scenario.startsWith("restart-") ? "developing" : "uncertain",
+        delivery: { ...spec, baseRevision }, approval,
+        ...(!scenario.startsWith("restart-") ? { failure: { stage: "preflight", reason: "unavailable" } } : {}),
+        ...(scenario === "already-pushed" ? { target: { branch: "feat/7-existing", head: baseRevision } } : {}) };
+      const observed = structuredClone(issue);
+      if (scenario === "changed-issue") observed.body = "另一个版本";
+      if (scenario === "linked-pr") observed.pulls = [{ number: 9, state: "OPEN", url: "https://github.com/a/b/pull/9" }];
+      const tracker: DeliveryTracker = {
+        repo: "a/b", candidates: async () => [], read: async () => observed, account: async () => "member", assign: async () => {},
+        delivery: { checkout: async () => ({ base: "main", author: "fixture", email: "fixture@example.test" }), find: async () => undefined,
+          publish: async () => { assert.fail("失败的执行不能发布"); } },
+      };
+      for (let restart = 0; restart < 2; restart++) {
+        const dispatch = createIssueDispatch(tracker, { load: () => [stored], save(_id, next, event) {
+          stored = next;
+          if (event) events.push(event.details as typeof events[number]);
+          return true;
+        } }, async () => "", () => true, 2, new Map(), {
+          specs: new Map(), conversation: true, requireQuality: true, pollMs: 60_000,
+          reviewScopeCurrent: () => scenario !== "stale-approval",
+          failedWorkerAttempt(scope) {
+            assert.deepEqual(scope, { repo: "a/b", issue: 7, issueRevision: approval.issueRevision,
+              plan: { flowId: "flow", version: 4, flowDigest: quality.flowDigest, batchDigest: quality.batchDigest } });
+            return scenario === "missing-receipt" || scenario === "restart-without-receipt" ? undefined : "confirmed-attempt";
+          },
+          async prepare(input, _connected, signal) {
+            prepares++;
+            assert.deepEqual(input.spec, { ...spec, baseRevision });
+            await input.revalidateWorker?.(signal);
+            throw new IssueDeliveryFailed({ stage: "device", reason: "device-failed", workerStage: "tests" });
+          },
+        });
+        try {
+          for (let i = 0; i < 3; i++) {
+            await dispatch.refresh();
+            await setImmediate();
+          }
+        } finally { await dispatch.close(); }
+      }
+      assert.equal(prepares, ["old", "restart-before-failure-save"].includes(scenario) ? 1 : scenario === "current" ? 2 : 0);
+      const retries = events.filter(event => event.action === "worker-retry-queued");
+      assert.equal(retries.length, ["old", "current", "changed-issue", "restart-before-failure-save"].includes(scenario) ? 1 : 0);
+      if (retries.length) assert.equal(retries[0]?.workerAttempt, "confirmed-attempt");
+    });
+  }
+});
+
 test("开 PR 回执丢失后只做回读，指定 PR 关闭重开并合并后才唤醒一次", async () => {
   const specs = parseDeliveryPlan(JSON.stringify({ 1: spec, 2: { ...spec, dependsOn: [1] } }));
   const rows: IssueDetail[] = [1, 2, 3].map(number => ({
