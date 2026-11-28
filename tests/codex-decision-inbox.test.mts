@@ -36,8 +36,10 @@ test("real App Server question replies reach their originating sessions through 
   const results = new Map<string, string>();
   const stageRequests = new Set<string>();
   let nextResponse = 0;
+  let disabledRequests = 0;
   const model = "gpt-6.1-sol";
   const provider = createServer(async (request, response) => {
+    if (request.url === "/disabled-mcp") disabledRequests++;
     const session = /^\/(a|b)\/v1\/responses$/.exec(request.url ?? "")?.[1];
     if (!session || request.method !== "POST") {
       response.writeHead(404).end();
@@ -97,11 +99,13 @@ test("real App Server question replies reach their originating sessions through 
         "-c", `model=${JSON.stringify(model)}`, "-c", 'model_provider="souflow_fixture"',
         "-c", `model_providers.souflow_fixture={name="Soulflow fixture",base_url="${endpoint}/${session}/v1",requires_openai_auth=false,request_max_retries=0,stream_max_retries=0}`,
         "-c", `mcp_servers.souflow_test={command=${JSON.stringify(process.execPath)},args=${JSON.stringify(["-e", markerProgram])}}`,
+        "-c", `mcp_servers.souflow_http={url="${endpoint}/disabled-mcp"}`,
         "app-server", "--stdio",
       ],
     });
   }]);
   const origin = await listen(server);
+  t.after(() => assert.equal(disabledRequests, 0));
   const post = (url: string, body: object) => fetch(origin + url, {
     method: "POST", headers: { origin, "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
