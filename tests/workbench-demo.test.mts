@@ -171,6 +171,37 @@ test("AC-3 先返回的轮询切换成员，后返回的当前 401 清空身份"
   assert.equal(page.form.hidden, true);
 });
 
+test("AC-3 早一条 401 先清理身份，晚一条成功响应恢复切换后的成员", async () => {
+  const page = await loadWorkbenchPage("#personal");
+  const identity = page.get("#personal-identity");
+  await page.take()(200, memberSnapshot("alice", "甲的对话"));
+  page.prompt.value = "甲的未提交需求";
+  const unauthorized = page.poll();
+  const switched = page.poll();
+  await unauthorized(401);
+  assert.equal(identity.hidden, true);
+  assert.equal(page.prompt.value, "");
+  await switched(200, memberSnapshot("bob"));
+  assert.equal(identity.hidden, false);
+  assert.equal(identity.textContent, "bob");
+  assert.equal(page.prompt.value, "");
+});
+
+test("AC-3 401 后在途旧成员成功响应不恢复身份，重新读取确认后才恢复", async () => {
+  const page = await loadWorkbenchPage("#personal");
+  const identity = page.get("#personal-identity");
+  await page.take()(200, memberSnapshot("alice"));
+  const unauthorized = page.poll();
+  const stale = page.poll();
+  await unauthorized(401);
+  await stale(200, memberSnapshot("alice", "已失效的对话"));
+  assert.equal(identity.hidden, true);
+  assert.equal(page.get("#conversation").hidden, true);
+  await page.poll()(200, memberSnapshot("alice"));
+  assert.equal(identity.hidden, false);
+  assert.equal(identity.textContent, "alice");
+});
+
 test("AC-3 迟到的轮询保留当前提交和新对话，当前 401 清理成员状态", async () => {
   const page = await loadWorkbenchPage();
   const label = page.get("#member-label");

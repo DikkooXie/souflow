@@ -75,6 +75,7 @@ let poll;
 let refreshing = 0;
 let requestNumber = 0;
 let latestResponse = 0;
+let rejectedPoll;
 let live = false;
 let member;
 let memberReadState = "loading";
@@ -568,10 +569,11 @@ function clearMemberState() {
   feedback.textContent = "";
 }
 
-function rejectAuthentication(requestId) {
+function rejectAuthentication(requestId, fromPoll = false) {
   if (!acceptResponse(requestId)) return;
-  // 登录失效后，先前发出的轮询不能恢复成员状态。
-  cycle += 1;
+  // 已失效成员的在途响应不能恢复旧状态，后发的另一成员仍可用自己的快照登录。
+  if (fromPoll) rejectedPoll = { through: requestNumber, member: member?.login ?? member?.id ?? rejectedPoll?.member };
+  else cycle += 1;
   clearMemberState();
   memberReadState = "unauthorized";
   member = undefined;
@@ -593,6 +595,7 @@ function applySnapshot(snapshot) {
     const nextMember = snapshot.member;
     if (memberReadState === "ready" && (member?.login ?? member?.id) !== (nextMember?.login ?? nextMember?.id)) clearMemberState();
     member = nextMember;
+    rejectedPoll = undefined;
     memberReadState = "ready";
     promptBox.maxLength = snapshot.inputLimits.promptMaxLength;
     answerMaxLength = snapshot.inputLimits.answerMaxLength;
@@ -628,12 +631,15 @@ async function refresh() {
     const response = await fetch("/api/decisions", { signal: AbortSignal.timeout(10_000) });
     if (revision !== cycle) return;
     if (response.status === 401) {
-      rejectAuthentication(requestId);
+      rejectAuthentication(requestId, true);
       return;
     }
     if (!response.ok) throw Error();
     const snapshot = await response.json();
-    if (revision !== cycle || !acceptResponse(requestId)) return;
+    if (revision !== cycle) return;
+    if (rejectedPoll && requestId <= rejectedPoll.through
+      && (snapshot.member?.login ?? snapshot.member?.id) === rejectedPoll.member) return;
+    if (!acceptResponse(requestId)) return;
     applySnapshot(snapshot);
     if (!actionError) setError();
     render();
