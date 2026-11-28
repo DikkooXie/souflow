@@ -139,9 +139,13 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
     try {
       if (!recovery) throw Error("局域网设备接入需要持久化的 Codex 工作台。");
       const handoff = createRemoteHandoff(audit.checkpoint<RemoteDevice>("remote-devices"),
-        audit.checkpoint<RemoteJob>("remote-jobs"), remoteLan.offlineMs);
-      const code = codeDevices?.size ? createCodeWorkerPool(audit.checkpoint<WorkerAttempt>("remote-code"),
-        codeDevices, readCodeWorkerConfig(), Date.now, audit.record) : undefined;
+        audit.checkpoint<RemoteJob>("remote-jobs"), remoteLan.offlineMs, Date.now, audit.record);
+      const code = issueDelivery && issueTracker ? createCodeWorkerPool(audit.checkpoint<WorkerAttempt>("remote-code"),
+        codeDevices ?? new Set<string>(), readCodeWorkerConfig(), Date.now, audit.record,
+        (id, repo, issue, flowId): boolean => {
+          const claim = issueTracker.repo.toLowerCase() === repo.toLowerCase() ? github?.amendmentClaim(issue) : undefined;
+          return !!claim && claim.approval?.flowId === flowId && handoff.ownsDevice(id, claim.claimedBy);
+        }) : undefined;
       return { handoff, code, ingress: createRemoteWorkerIngress(handoff, remoteLan, code), cert: new X509Certificate(remoteLan.cert).toString() };
     } catch (error) {
       closeStore();
@@ -194,7 +198,8 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
             createCodexDeliveryReviewer(live[0], issueDelivery.timeoutMs, qualityModel ?? issueDelivery.planningModel)),
             reviewScopeCurrent: issueDelivery.reviewScopeCurrent ?? (claim => !!reviewScope?.(claim)) } : {}),
           prepare: createIssueDeveloper(monitor, { ...issueDelivery, root: `${database}.artifacts/github`,
-            ...(codexAccounts ? { codexAccounts } : {}), ...(remoteLink?.code ? { workers: remoteLink.code } : {}) }),
+            ...(codexAccounts ? { codexAccounts } : {}),
+            ...(codeDevices?.size && remoteLink?.code ? { workers: remoteLink.code } : {}) }),
         }) : undefined;
       const issuePlanning = live && github && issueTracker && issueDelivery?.conversation && reviewQuality
         ? createConversationDelivery(github, audit.checkpoint<IssueProposal>(`github-proposals:${issueTracker.repo.toLowerCase()}`),
@@ -352,6 +357,23 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       return false;
     }
     if (request.method === "GET") {
+      if (path === "/api/remote/personal-devices" && remoteLink) {
+        if (!member) return send(403, { error: "请以工作台成员身份登录。" });
+        const code = remoteLink.code;
+        const workers = new Map(code?.snapshot().devices.map(worker => [worker.id, worker]));
+        const devices = remoteLink.handoff.snapshot().devices
+          .filter(device => remoteLink.handoff.ownsDevice(device.id, githubActor))
+          .map(({ id, name }) => {
+            const worker = workers.get(id);
+            const online = worker?.online === true;
+            const slots = worker?.slots ?? 0;
+            return { id, name, owner: githubActor, permitted: code?.permits(id) === true,
+              online, ready: online && worker?.ready === true, slots,
+              availableSlots: online ? Math.max(0, slots - (worker?.count ?? 0)) : 0 };
+          });
+        const identity = githubActor === member.label ? member.label : `${member.label}（${githubActor}）`;
+        return send(200, { identity, devices });
+      }
       if (path === "/api/github/issues" && github) return send(200, github.snapshot(canClaim));
       if (path === "/api/decisions") return send(200, state());
       if (path === "/api/dispatch-status" && monitor && dispatch) {
@@ -407,6 +429,30 @@ export function createWorkbenchServer(receiptDelay?: number, live?: LiveOptions,
       // 页面操作仅接受当前本机地址发起的请求。
       if (request.headers.origin !== `http://${address}:${local.port}`) {
         return send(403, { error: "请求来源与工作台地址不一致。" });
+      }
+      const pairing = /^\/api\/remote\/personal-devices\/(pair|confirm)$/.exec(path)?.[1];
+      const revokeOwned = /^\/api\/remote\/personal-devices\/([a-f0-9-]{36})\/revoke$/.exec(path)?.[1];
+      if (remoteLink && (pairing || revokeOwned)) {
+        if (!member) return send(403, { error: "请以工作台成员身份登录。" });
+        if (revokeOwned) {
+          if (!remoteLink.handoff.ownsDevice(revokeOwned, githubActor)) return send(404, { error: "找不到可撤销的设备。" });
+          const status = remoteLink.handoff.revoke(revokeOwned, githubActor);
+          if (status === 200) remoteLink.code?.disconnect(revokeOwned);
+          return send(status, status === 200 ? { revoked: true } : { error: "无法撤销设备接入。" });
+        }
+        const endpoint = remoteLink.ingress.endpoint();
+        if (!endpoint) return send(503, { error: "设备 HTTPS 接口尚未启动。" });
+        const body = await readJson(request);
+        if ("status" in body) return send(body.status, { error: body.error });
+        const input = body.value as { name?: unknown; code?: unknown } | null;
+        if (pairing === "pair") {
+          const result = remoteLink.handoff.startPairing(input?.name, githubActor);
+          return send(result.status, result.status === 201 ? { code: result.code, expiresAt: result.expiresAt }
+            : { error: result.status === 422 ? "请填写有效的设备名称。" : "暂时无法发起配对。" });
+        }
+        const result = remoteLink.handoff.confirmPairing(input?.code, githubActor);
+        return send(result.status, result.status === 201 ? { ...result.bundle, endpoint, certificate: remoteLink.cert }
+          : { error: result.status === 409 ? "配对码无效或已过期，或设备名称、数量与现有登记冲突。" : "暂时无法保存绑定。" });
       }
       const revokeDevice = /^\/api\/remote\/devices\/([a-f0-9-]{36})\/revoke$/.exec(path)?.[1];
       if (remoteLink && (path === "/api/remote/devices" || path === "/api/remote/jobs" || revokeDevice)) {

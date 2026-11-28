@@ -24,7 +24,10 @@ const supportsFiles = (device: Device, work: CodeWork) =>
   work.files.every(file => (file.bytes ?? 0) <= (device.editFileBytes ?? legacyCodeEditFileBytes));
 
 export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: ReadonlySet<string>,
-  config = readCodeWorkerConfig(), now = Date.now, record?: RecordBusiness) {
+  config = readCodeWorkerConfig(), now = Date.now, record?: RecordBusiness,
+  authorize?: (device: string, repo: string, issue: number, flowId: string) => boolean) {
+  const permitsWork = (device: string, { repo, issue, plan }: Pick<CodeWork, "repo" | "issue" | "plan">) =>
+    authorize?.(device, repo, issue, plan.flowId) ?? true;
   const attempts = new Map(store.load().map(attempt => [attempt.id, attempt]));
   const waiters = new Map<string, Ready>();
   const online = new Map<string, { device: Device; at: number }>();
@@ -114,7 +117,9 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
       const offered = [...attempts.values()].find(row => row.device === device.id && row.instance === device.instance
         && row.repo === device.repo && row.state === "offered");
       const replay = offered && running.get(offered.id);
-      if (replay && device.ready && supportsFiles(device, replay.offer.work)) return { status: 200, offer: replay.offer } as const;
+      if (replay && device.ready && supportsFiles(device, replay.offer.work) && permitsWork(device.id, replay.offer.work)) {
+        return { status: 200, offer: replay.offer } as const;
+      }
       const offer = await new Promise<CodeOffer | undefined>(resolve => {
         const settle = (offer?: CodeOffer) => {
           clearTimeout(timer);
@@ -136,6 +141,12 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
           attempt.instance !== device.instance || attempt.digest !== receipt.digest) return 409;
       if (attempt.state === "interrupted" || (!unfinished(attempt.state) && receipt.phase === "interrupted")
           || (unfinished(attempt.state) && !running.has(attempt.id))) return 410;
+      if (receipt.phase === "accepted" && !permitsWork(device.id, attempt)) {
+        record?.({ kind: "remote.code", subject: attempt.id, flowId: attempt.flowId, attemptId: attempt.id,
+          details: { action: "acceptance-denied", direction: "from-device", device: device.id,
+            repo: attempt.repo, issue: attempt.issue, at: now() } });
+        return 403;
+      }
       const digest = contentDigest(JSON.stringify(receipt));
       const active = running.get(attempt.id);
       if (attempt.receipt?.digest === digest) {
@@ -178,7 +189,7 @@ export function createCodeWorkerPool(store: Checkpoint<WorkerAttempt>, allowed: 
       const weight = work.files.length;
       const pickTarget = () => [...waiters.values()]
           .filter(entry => entry.device.ready && entry.device.repo === work.repo.toLowerCase()
-            && supportsFiles(entry.device, work))
+            && supportsFiles(entry.device, work) && permitsWork(entry.device.id, work))
           .map(entry => ({ ...entry, ...capacity(entry.device) }))
           .filter(entry => entry.count < entry.device.slots)
           .sort((a, b) => (a.load + weight) / a.device.slots - (b.load + weight) / b.device.slots

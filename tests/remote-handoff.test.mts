@@ -128,6 +128,47 @@ test("只允许绑定设备领取，重启及断线后继续同一工单，重�
     ["queued", "claimed", "progress", "finished"]);
 });
 
+test("AC-3 配对码过期失效，跨成员确认不消费原码，并发确认只绑定一次", async () => {
+  const events: BusinessEvent[] = [];
+  const devices = checkpoint<RemoteDevice>(events);
+  let now = 1000;
+  const hub = createRemoteHandoff(devices, checkpoint<RemoteJob>(events), 1000, () => now,
+    event => { events.push(event); return true; });
+  const expired = hub.startPairing("过期 Mac", "alice");
+  assert.ok(expired.status === 201);
+  now = expired.expiresAt;
+  assert.equal(hub.confirmPairing(expired.code, "alice").status, 409);
+  assert.equal(devices.load().length, 0);
+
+  const pending = hub.startPairing("新人 Mac", "alice");
+  const other = hub.startPairing("另一台 Mac", "bob");
+  assert.ok(pending.status === 201 && other.status === 201);
+  assert.equal(hub.confirmPairing(pending.code, "bob").status, 409);
+  assert.equal(devices.load().length, 0);
+  const results = await Promise.all([pending.code, pending.code].map(async code => {
+    await Promise.resolve();
+    return hub.confirmPairing(code, "alice");
+  }));
+  assert.deepEqual(results.map(result => result.status), [201, 409]);
+  const [bound] = results;
+  assert.ok(bound?.status === 201);
+  const { id, key } = bound.bundle;
+  assert.equal(hub.confirmPairing(pending.code, "alice").status, 409);
+  assert.equal(hub.confirmPairing(other.code, "bob").status, 201);
+  assert.deepEqual(devices.load().map(device => device.owner), ["alice", "bob"]);
+  assert.equal(hub.ownsDevice(id, "alice"), true);
+  assert.equal(hub.ownsDevice(id, "bob"), false);
+  assert.equal(hub.revoke(id, "bob"), 404);
+  assert.equal(hub.canAuthenticateCodeDevice(id, `Bearer ${key}`), true);
+  assert.equal(hub.revoke(id, "alice"), 200);
+  assert.equal(hub.ownsDevice(id, "alice"), false);
+  assert.equal(hub.canAuthenticateCodeDevice(id, `Bearer ${key}`), false);
+  assert.deepEqual(events.filter(event => event.subject === id).map(event => (event.details as { action: string }).action),
+    ["pairing-started", "paired", "revoked"]);
+  const audit = JSON.stringify(events);
+  assert.ok(!audit.includes(pending.code) && !audit.includes(key));
+});
+
 test("撤销设备后旧设备凭据无法继续领取或回传", () => {
   const events: BusinessEvent[] = [];
   const hub = createRemoteHandoff(checkpoint<RemoteDevice>(events), checkpoint<RemoteJob>(events), 1000);
