@@ -82,7 +82,7 @@ export function createGithubPanel(node, reportView) {
         row.append(evidence);
       }
       if (issue.retryCount) row.append(node("p", "github-meta",
-        issue.retryCount > 1 ? "已安排补丁格式修复后的恢复" : "已安排一次自动重试"));
+        `已安排 ${issue.retryCount} 次重试`));
       if (issue.dependsOn?.length) row.append(node("p", "github-meta", `上游：${issue.dependsOn.map(number => `#${number}`).join("、")}`));
       if (/^feat\/\d+-[a-f0-9]{12}$/.test(issue.target?.branch ?? "")) {
         row.append(node("p", "github-meta", `分支：${issue.target.branch}`));

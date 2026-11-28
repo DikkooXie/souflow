@@ -112,7 +112,13 @@ test("已修订工单的每个明确失败回执仅续派一次，保留原 4+2 
             evidence: [source, ...testFiles].map(path => ({ ref: `repo:${path}`, quote: "已批准源码" })) });
         } },
       });
-      try { for (let n = 0; n < 3; n++) { await dispatch.refresh(); await setImmediate(); } }
+      try {
+        for (let n = 0; n < 3; n++) { await dispatch.refresh(); await setImmediate(); }
+        const shown = dispatch.snapshot(false).items.find(item => item.number === 2);
+        assert.ok(shown);
+        assert.equal(Object.hasOwn(shown, "recoveredWorkerAttempts"), false, "内部消费清单不进入公开快照");
+        if (starts) assert.equal("retryCount" in shown ? shown.retryCount : undefined, 1 + starts, "界面仍能读取准确的累计次数");
+      }
       finally { await conversation.close(); await dispatch.close(); }
       if (scenario === "fails-again" && restart === 1) {
         assert.equal(starts, 1, "再次失败不会凭旧恢复配置自动重跑");

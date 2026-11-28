@@ -226,6 +226,7 @@ export function createIssueDispatch(tracker: IssueTracker, store: Checkpoint<Cla
         checked: _checked, deliveryReviews: _reviews, reviewRepairs: _repairs, sourceHandoff: _sourceHandoff, sourceRefresh: _sourceRefresh,
         observedIssueRevision: _issueRevision, observedReviewLink: _reviewLink, retriedWorkerAttempt: _retriedWorkerAttempt,
         pendingWorkerAttempt: _pendingWorkerAttempt, recoveryDispatchAttempt: _recoveryDispatchAttempt,
+        recoveredWorkerAttempts: _recoveredWorkerAttempts,
         interruptedDevelopment: _interruptedDevelopment, prepared: _prepared, attemptedCheckedRecovery: _attemptedCheckedRecovery,
         reviewTestFiles: _reviewTestFiles,
         ...item }) => ({ ...item,
